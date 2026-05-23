@@ -1,6 +1,7 @@
 //! Jcowork Tools - Tool registry and implementations.
 
 pub mod base;
+pub mod bing_search;
 pub mod cron;
 pub mod delegate;
 pub mod file_ops;

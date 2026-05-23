@@ -14,6 +14,7 @@ use jcowork_memory::MemoryManager;
 use jcowork_skills::{builtin_skills, SkillManager};
 use jcowork_tools::base::ToolContext;
 use jcowork_tools::cron::{ReminderAddTool, ReminderListTool, ReminderRemoveTool, CronAddTool, CronListTool, CronRemoveTool};
+use jcowork_tools::bing_search::WebSearchTool;
 use jcowork_tools::memory::{MemorySaveTool, MemoryUpdateTool, MemoryRecallTool, MemorySearchTool};
 use jcowork_tools::pdf_parse::PdfParseTool;
 use jcowork_tools::report_search::{ReportListCompaniesTool, ReportSearchTool};
@@ -72,6 +73,8 @@ pub fn build_tool_registry(scheduler: Arc<CronScheduler>, memory_manager: Arc<Me
     registry.register(Arc::new(MemorySearchTool { manager: memory_manager }));
     // PDF parsing tool
     registry.register(Arc::new(PdfParseTool::default()));
+    // Web search tool
+    registry.register(Arc::new(WebSearchTool::default()));
     // Report search tools
     registry.register(Arc::new(ReportSearchTool::default()));
     registry.register(Arc::new(ReportListCompaniesTool::default()));

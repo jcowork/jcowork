@@ -217,4 +217,48 @@ Generate a comprehensive research report in Markdown with these sections:
 
 IMPORTANT: Do NOT generate HTML unless the user explicitly asks for it. The Markdown report is the final deliverable."#,
     },
+    BuiltinSkill {
+        id: "builtin:web_search",
+        name: "web_search",
+        description: "Search the web using a headless browser (Sogou WAP), retrieve top results, and answer questions based on live internet content.",
+        content: r#"## Skill: web_search — Web Search & Answer
+
+When a question requires up-to-date or real-world information that you don't know from training data, use the `web_search` tool to find answers on the internet.
+
+### When to use this skill
+- Questions about current events, news, prices, or recent data
+- Questions about specific products, companies, people you are uncertain about
+- Any question where your training knowledge may be outdated or incomplete
+- User explicitly asks you to search the web
+
+### Query formulation tips
+- Keep queries concise: 3-6 key terms work best
+- For Chinese topics, use natural Chinese: `"海淀小升初好学校"`, `"北京小学奥数报名条件 2025"`
+- Add specifics to narrow results: year, city, organization name
+- If Round 1 returns unrelated results, try rephrasing or splitting the query
+
+### Search loop (max 3 rounds)
+
+Round 1:
+1. Formulate a concise, specific query.
+2. Call `web_search` with the query and `num_results: 20`.
+3. Read the titles and snippets carefully.
+4. If sufficient information found, synthesize and respond.
+
+Round 2 (if Round 1 is insufficient):
+5. Refine the query — try different keywords, add year/location, or focus on a sub-topic.
+6. Call `web_search` again.
+7. If now sufficient, answer; otherwise proceed to Round 3.
+
+Round 3 (final):
+8. Try one more targeted query with a different approach.
+9. Answer based on all gathered information.
+10. If still insufficient, state clearly what was and wasn't found.
+
+### Answer guidelines
+- Cite sources: "According to [title](url)..."
+- Synthesize across multiple results; don't just paste snippets.
+- Favor authoritative/recent sources when results conflict.
+- Keep answers focused and structured."#,
+    },
 ];
