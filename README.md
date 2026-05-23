@@ -9,7 +9,7 @@ English | [中文](./README_CN.md)
 ```
 ┌─────────────────────────────────────────────────┐
 │                   Clients                        │
-│  (Web UI / CLI / Telegram / Slack / API)         │
+│  (Web UI / API)                                  │
 └──────────────────┬──────────────────────────────┘
                    │ WebSocket / REST
 ┌──────────────────▼──────────────────────────────┐
@@ -305,37 +305,7 @@ The server searches for `providers.json` in this order:
 
 The file must exist in one of these locations; the server will fail to start if no `providers.json` is found.
 
-### Option 1: Docker (Recommended for Production)
-
-```bash
-# Build the Docker image
-make docker
-
-# Start with docker-compose
-make docker-up
-
-# Or manually:
-docker run -d \
-  -p 3000:3000 \
-  -v jcowork-data:/data \
-  -v $(pwd)/providers.json:/opt/jcowork/providers.json \
-  --env-file .env \
-  jcowork
-```
-
-The Docker image uses a multi-stage build:
-1. **Rust builder**: Compiles Rust in release mode
-2. **Node builder**: Builds the React frontend
-3. **Runtime stage**: Slim image with the binary and static files
-
-Data persists in the `jcowork-data` Docker volume at `/data`.
-Mount `providers.json` to customize providers without rebuilding.
-
-The Docker container runs the backend on port 3000.
-To serve the web frontend, use nginx on the host with a reverse proxy config (see below),
-or add an nginx container to `docker-compose.yml`.
-
-### Option 2: Native Binary
+### Option 1: Native Binary
 
 ```bash
 # Build backend (release)
@@ -434,7 +404,7 @@ Now visit `http://your-domain.com` in your browser.
 In development, just run `npm run dev` in the `web/` directory — Vite handles hot reload and proxies `/api` to the backend on port 3000.
 In production, the built static files (`web/dist/`) are served by nginx, which also proxies `/api` to the backend.
 
-### Option 3: systemd Service (Linux)
+### Option 2: systemd Service (Linux)
 
 Create `/etc/systemd/system/jcowork.service`:
 
@@ -527,7 +497,7 @@ All config via environment variables:
 | `OPENAI_API_KEY` | (empty) | OpenAI API key |
 | `OPENROUTER_API_KEY` | (empty) | OpenRouter API key |
 | `<PROVIDER>_BASE_URL` | (preset) | Override any provider's base URL |
-| `SEARXNG_URL` | `http://localhost:8888` | SearXNG instance for web search |
+| `SEARXNG_URL` | ~~removed~~ | Replaced by built-in Sogou WAP web search |
 | `JCWORK_IDLE_TIMEOUT` | `300` | UserActor idle timeout in seconds |
 
 ## Supported LLM Providers

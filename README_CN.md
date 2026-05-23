@@ -9,7 +9,7 @@
 ```
 ┌─────────────────────────────────────────────────┐
 │                   客户端                          │
-│  (Web UI / CLI / Telegram / Slack / API)         │
+│  (Web UI / API)                                  │
 └──────────────────┬──────────────────────────────┘
                    │ WebSocket / REST
 ┌──────────────────▼──────────────────────────────┐
@@ -305,37 +305,7 @@ make check
 
 文件必须存在于以上某个位置；如果找不到 providers.json，服务器将启动失败。
 
-### 方式一：Docker（生产环境推荐）
-
-```bash
-# 构建 Docker 镜像
-make docker
-
-# 使用 docker-compose 启动
-make docker-up
-
-# 或手动运行：
-docker run -d \
-  -p 3000:3000 \
-  -v jcowork-data:/data \
-  -v $(pwd)/providers.json:/opt/jcowork/providers.json \
-  --env-file .env \
-  jcowork
-```
-
-Docker 镜像采用多阶段构建：
-1. **Rust 构建阶段**：Release 模式编译 Rust 代码
-2. **Node 构建阶段**：构建 React 前端
-3. **运行阶段**：精简镜像，包含二进制文件和静态文件
-
-数据持久化在 `jcowork-data` Docker 卷的 `/data` 目录。
-挂载 `providers.json` 可自定义提供者而无需重新构建。
-
-Docker 容器运行后端，监听 3000 端口。
-要提供 Web 前端服务，可在宿主机上使用 nginx 反向代理（见下方配置），
-或在 `docker-compose.yml` 中添加 nginx 容器。
-
-### 方式二：原生二进制
+### 方式一：原生二进制
 
 ```bash
 # 构建后端（release）
@@ -434,7 +404,7 @@ sudo systemctl reload nginx
 开发模式下，只需在 `web/` 目录下运行 `npm run dev` —— Vite 自动处理热更新并将 `/api` 代理到后端 3000 端口。
 生产模式下，构建后的静态文件（`web/dist/`）由 nginx 提供服务，同时 nginx 将 `/api` 请求代理到后端。
 
-### 方式三：systemd 服务（Linux）
+### 方式二：systemd 服务（Linux）
 
 创建 `/etc/systemd/system/jcowork.service`：
 ```ini
@@ -526,7 +496,7 @@ server {
 | `OPENAI_API_KEY` | （空） | OpenAI API Key |
 | `OPENROUTER_API_KEY` | （空） | OpenRouter API Key |
 | `<PROVIDER>_BASE_URL` | （预设） | 覆盖任意 Provider 的基础 URL |
-| `SEARXNG_URL` | `http://localhost:8888` | SearXNG 实例地址（用于网页搜索） |
+| `SEARXNG_URL` | ~~已移除~~ | 已替换为内置搜狗 WAP 网页搜索 |
 | `JCWORK_IDLE_TIMEOUT` | `300` | UserActor 空闲超时时间（秒） |
 
 ## 支持的 LLM 提供者

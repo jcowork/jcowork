@@ -13,29 +13,15 @@
   },
   {
     "id": "qwen",
-    "name": "Qwen / 通义千问",
+    "name": "Qwen / Tongyi Qianwen",
     "env_key": "QWEN_API_KEY",
     "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "default_model": "qwen-plus",
+    "default_model": "qwen3.6-plus",
     "context_length": 131072,
     "models": [
-      { "id": "qwen-max", "name": "Qwen Max", "context_length": 32000 },
-      { "id": "qwen-plus", "name": "Qwen Plus", "context_length": 131072 },
-      { "id": "qwen-turbo", "name": "Qwen Turbo", "context_length": 131072 },
-      { "id": "qwen-long", "name": "Qwen Long", "context_length": 1000000 }
-    ]
-  },
-  {
-    "id": "minimax",
-    "name": "Minimax",
-    "env_key": "MINIMAX_API_KEY",
-    "base_url": "https://api.minimax.chat/v1",
-    "default_model": "MiniMax-Text-01",
-    "context_length": 1000000,
-    "models": [
-      { "id": "MiniMax-Text-01", "name": "MiniMax Text 01", "context_length": 1000000 },
-      { "id": "abab6.5s-chat", "name": "ABAB 6.5s Chat", "context_length": 131072 },
-      { "id": "abab6.5-chat", "name": "ABAB 6.5 Chat", "context_length": 16000 }
+      { "id": "qwen3.6-plus", "name": "Qwen3.6 Plus", "context_length": 256000 },
+      { "id": "qwen3.6-flash", "name": "Qwen3.6 Flash", "context_length": 256000 },
+      { "id": "qwen3.7-max", "name": "Qwen3.7 Max", "context_length": 256000 }
     ]
   },
   {
@@ -48,21 +34,6 @@
     "models": [
       { "id": "kimi-k2.5", "name": "Kimi K2.5", "context_length": 256000 },
       { "id": "kimi-k2.6", "name": "Kimi K2.6", "context_length": 256000 }
-    ]
-  },
-  {
-    "id": "openai",
-    "name": "OpenAI",
-    "env_key": "OPENAI_API_KEY",
-    "base_url": "https://api.openai.com/v1",
-    "default_model": "gpt-4o",
-    "context_length": 128000,
-    "models": [
-      { "id": "gpt-4o", "name": "GPT-4o", "context_length": 128000 },
-      { "id": "gpt-4o-mini", "name": "GPT-4o Mini", "context_length": 128000 },
-      { "id": "gpt-4-turbo", "name": "GPT-4 Turbo", "context_length": 128000 },
-      { "id": "o1", "name": "o1", "context_length": 200000 },
-      { "id": "o1-mini", "name": "o1 Mini", "context_length": 128000 }
     ]
   },
   {
