@@ -49,6 +49,13 @@ impl BuiltinMemoryProvider {
         .execute(&self.pool)
         .await?;
 
+        // Remove any stale FTS triggers created by old migrations (they reference wrong columns)
+        for trigger in ["memories_fts_insert", "memories_fts_delete", "memories_fts_update"] {
+            sqlx::query(&format!("DROP TRIGGER IF EXISTS {}", trigger))
+                .execute(&self.pool)
+                .await?;
+        }
+
         // Drop old FTS5 table if it exists, recreate in standalone mode
         // (no content= sync — we manage FTS rows manually with jieba-tokenized content)
         sqlx::query("DROP TABLE IF EXISTS memories_fts")

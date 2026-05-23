@@ -4,6 +4,7 @@ import Memory from './components/Memory';
 import Schedule from './components/Schedule';
 import Sidebar from './components/Sidebar';
 import Settings from './components/Settings';
+import SkillsSquare from './components/SkillsSquare';
 
 const API_BASE = '';
 
@@ -21,6 +22,7 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showSchedule, setShowSchedule] = useState(false);
   const [showMemory, setShowMemory] = useState(false);
+  const [showSkills, setShowSkills] = useState(false);
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [isRegister, setIsRegister] = useState(false);
 
@@ -94,7 +96,14 @@ export default function App() {
 
   return (
     <div style={{ display: 'flex', height: '100vh', background: '#111', color: '#eee' }}>
-      <Sidebar username={auth.username} onLogout={logout} onChat={() => { setShowSettings(false); setShowSchedule(false); setShowMemory(false); }} onSettings={() => { setShowSettings(true); setShowSchedule(false); setShowMemory(false); }} onSchedule={() => { setShowSchedule(true); setShowSettings(false); setShowMemory(false); }} onMemory={() => { setShowMemory(true); setShowSchedule(false); setShowSettings(false); }} currentView={showSettings ? 'settings' : showSchedule ? 'schedule' : showMemory ? 'memory' : 'chat'} />
+      <Sidebar username={auth.username} onLogout={logout}
+        onChat={() => { setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); }}
+        onSettings={() => { setShowSettings(true); setShowSchedule(false); setShowMemory(false); setShowSkills(false); }}
+        onSchedule={() => { setShowSchedule(true); setShowSettings(false); setShowMemory(false); setShowSkills(false); }}
+        onMemory={() => { setShowMemory(true); setShowSchedule(false); setShowSettings(false); setShowSkills(false); }}
+        onSkills={() => { setShowSkills(true); setShowMemory(false); setShowSchedule(false); setShowSettings(false); }}
+        currentView={showSettings ? 'settings' : showSchedule ? 'schedule' : showMemory ? 'memory' : showSkills ? 'skills' : 'chat'}
+      />
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
         {showSettings ? (
           <Settings onClose={() => setShowSettings(false)} userId={auth.userId} token={auth.token} />
@@ -102,6 +111,8 @@ export default function App() {
           <Schedule userId={auth.userId} token={auth.token} />
         ) : showMemory ? (
           <Memory userId={auth.userId} token={auth.token} />
+        ) : showSkills ? (
+          <SkillsSquare userId={auth.userId} token={auth.token} />
         ) : (
           <Chat userId={auth.userId} token={auth.token} />
         )}

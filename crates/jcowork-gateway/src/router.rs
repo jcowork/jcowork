@@ -20,6 +20,7 @@ use jcowork_cron::CronScheduler;
 use jcowork_llm::LlmRouter;
 use jcowork_logs::LogWriter;
 use jcowork_memory::MemoryManager;
+use jcowork_skills::{builtin_skills, SkillManager};
 use jcowork_storage::UserStore;
 use jcowork_tools::registry::ToolRegistry;
 
@@ -32,6 +33,7 @@ pub struct AppState {
     pub default_model: String,
     pub cron_scheduler: Arc<CronScheduler>,
     pub memory_manager: Arc<MemoryManager>,
+    pub skill_manager: Arc<SkillManager>,
     pub tool_registry: Arc<ToolRegistry>,
     pub user_store: Arc<UserStore>,
     pub log_writer: Arc<LogWriter>,
@@ -127,6 +129,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/sessions", get(list_sessions))
         .route("/api/skills", get(list_skills))
         .route("/api/skills", post(create_skill))
+        .route("/api/skills/all", get(list_all_skills))
+        .route("/api/skills/{id}/toggle", put(toggle_skill))
         .route("/api/memory", get(list_memories))
         .route("/api/memory/search", get(search_memories))
         .route("/api/memory/{id}", put(update_memory))
@@ -358,6 +362,94 @@ async fn create_skill(
     (StatusCode::OK, Json(serde_json::json!({"status": "created"})))
 }
 
+/// Unified skill entry returned by /api/skills/all
+#[derive(Debug, Serialize)]
+struct SkillEntry {
+    id: String,
+    name: String,
+    description: String,
+    content: String,
+    source: String, // "builtin" or "user"
+    version: i32,
+    enabled: bool,
+}
+
+async fn list_all_skills(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+) -> impl IntoResponse {
+    // Load enabled skill IDs from memory (category = "skill_enabled", content = skill id)
+    let enabled_ids: std::collections::HashSet<String> = state
+        .memory_manager
+        .recall_all(&auth_user.user_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| e.category == "skill_enabled")
+        .map(|e| e.content)
+        .collect();
+
+    let mut entries: Vec<SkillEntry> = Vec::new();
+
+    // Built-in skills
+    for s in builtin_skills() {
+        entries.push(SkillEntry {
+            id: s.id.to_string(),
+            name: s.name.to_string(),
+            description: s.description.to_string(),
+            content: s.content.to_string(),
+            source: "builtin".to_string(),
+            version: 1,
+            enabled: enabled_ids.contains(s.id),
+        });
+    }
+
+    // User skills
+    if let Ok(user_skills) = state.skill_manager.list(&auth_user.user_id).await {
+        for s in user_skills {
+            let enabled = enabled_ids.contains(&s.id);
+            entries.push(SkillEntry {
+                id: s.id.clone(),
+                name: s.name,
+                description: s.description.unwrap_or_default(),
+                content: s.content,
+                source: "user".to_string(),
+                version: s.version,
+                enabled,
+            });
+        }
+    }
+
+    (StatusCode::OK, Json(entries))
+}
+
+#[derive(Debug, Deserialize)]
+struct ToggleSkillRequest {
+    enabled: bool,
+}
+
+async fn toggle_skill(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Path(skill_id): Path<String>,
+    Json(req): Json<ToggleSkillRequest>,
+) -> impl IntoResponse {
+    // Remove existing entry for this skill_id in skill_enabled category
+    if let Ok(entries) = state.memory_manager.recall_all(&auth_user.user_id).await {
+        for entry in entries.into_iter().filter(|e| e.category == "skill_enabled" && e.content == skill_id) {
+            let _ = state.memory_manager.delete(&auth_user.user_id, &entry.id).await;
+        }
+    }
+    if req.enabled {
+        match state.memory_manager.save(&auth_user.user_id, &skill_id, "skill_enabled").await {
+            Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "status": "enabled" }))),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))),
+        }
+    } else {
+        (StatusCode::OK, Json(serde_json::json!({ "status": "disabled" })))
+    }
+}
+
 async fn list_memories(
     State(state): State<AppState>,
     axum::Extension(auth_user): axum::Extension<AuthUser>,
@@ -547,7 +639,8 @@ async fn ws_upgrade(
     let cron_scheduler = state.cron_scheduler.clone();
     let log_writer = state.log_writer.clone();
     let memory_manager = state.memory_manager.clone();
+    let skill_manager = state.skill_manager.clone();
     ws.on_upgrade(move |socket| {
-        ws::ws_handler(socket, user_id, state.session_manager, state.llm_router, default_model, tool_registry, cron_scheduler, log_writer, memory_manager)
+        ws::ws_handler(socket, user_id, state.session_manager, state.llm_router, default_model, tool_registry, cron_scheduler, log_writer, memory_manager, skill_manager)
     })
 }

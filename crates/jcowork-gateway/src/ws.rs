@@ -11,6 +11,7 @@ use jcowork_llm::provider::{ChatMessage, StreamChunk, ToolCall};
 use jcowork_llm::LlmRouter;
 use jcowork_logs::{build_llm_input, build_llm_output, LogEntry, LogWriter, ToolCallEntry};
 use jcowork_memory::MemoryManager;
+use jcowork_skills::{builtin_skills, SkillManager};
 use jcowork_tools::base::ToolContext;
 use jcowork_tools::cron::{ReminderAddTool, ReminderListTool, ReminderRemoveTool, CronAddTool, CronListTool, CronRemoveTool};
 use jcowork_tools::memory::{MemorySaveTool, MemoryRecallTool, MemorySearchTool};
@@ -80,6 +81,7 @@ pub async fn ws_handler(
     cron_scheduler: Arc<CronScheduler>,
     log_writer: Arc<LogWriter>,
     memory_manager: Arc<MemoryManager>,
+    skill_manager: Arc<SkillManager>,
 ) {
     let (mut ws_sender, mut ws_receiver) = ws.split();
 
@@ -89,11 +91,14 @@ pub async fn ws_handler(
     // Load user's custom agent identity from memory
     let custom_identity = load_agent_identity(&memory_manager, &user_id).await;
 
+    // Load enabled skills and build skill prompt blocks
+    let skill_prompt = build_skill_prompt(&memory_manager, &skill_manager, &user_id).await;
+
     // Conversation history for this connection
     let mut history: Vec<ChatMessage> = Vec::new();
 
     // System prompt (uses custom identity if set, otherwise default)
-    let system_prompt = build_system_prompt_with_identity(custom_identity.as_deref());
+    let system_prompt = build_system_prompt_with_identity(custom_identity.as_deref(), &skill_prompt);
     history.push(ChatMessage {
         role: "system".to_string(),
         content: system_prompt,
@@ -388,6 +393,48 @@ pub async fn ws_handler(
     }
 }
 
+/// Build the skill prompt block from enabled skills.
+/// Loads enabled skill IDs from memory, then fetches content from builtin or user skills.
+async fn build_skill_prompt(memory_manager: &MemoryManager, skill_manager: &SkillManager, user_id: &str) -> String {
+    // Get enabled skill IDs
+    let enabled_ids: std::collections::HashSet<String> = match memory_manager.recall_all(user_id).await {
+        Ok(entries) => entries
+            .into_iter()
+            .filter(|e| e.category == "skill_enabled")
+            .map(|e| e.content)
+            .collect(),
+        Err(_) => return String::new(),
+    };
+
+    if enabled_ids.is_empty() {
+        return String::new();
+    }
+
+    let mut blocks: Vec<String> = Vec::new();
+
+    // Check built-in skills
+    for s in builtin_skills() {
+        if enabled_ids.contains(s.id) {
+            blocks.push(s.content.to_string());
+        }
+    }
+
+    // Check user skills
+    if let Ok(user_skills) = skill_manager.list(user_id).await {
+        for s in user_skills {
+            if enabled_ids.contains(&s.id) {
+                blocks.push(s.content);
+            }
+        }
+    }
+
+    if blocks.is_empty() {
+        return String::new();
+    }
+
+    format!("\n\n---\n\n## Active Skills\n\n{}", blocks.join("\n\n---\n\n"))
+}
+
 /// Load the user's custom agent identity from memory.
 async fn load_agent_identity(memory_manager: &MemoryManager, user_id: &str) -> Option<String> {
     match memory_manager.recall_all(user_id).await {
@@ -401,7 +448,8 @@ async fn load_agent_identity(memory_manager: &MemoryManager, user_id: &str) -> O
 
 /// Build the system prompt that instructs the LLM about its capabilities.
 /// If a custom identity is provided, it replaces the default "You are Jcowork Agent" prefix.
-fn build_system_prompt_with_identity(custom_identity: Option<&str>) -> String {
+/// If skill_prompt is non-empty, it is appended at the end.
+fn build_system_prompt_with_identity(custom_identity: Option<&str>, skill_prompt: &str) -> String {
     let now = chrono::Local::now();
     let current_time = now.format("%Y-%m-%d %H:%M:%S %:z").to_string();
 
@@ -447,8 +495,9 @@ When the user asks you to set a reminder or alarm:
 
 Current date/time: {current_time}
 
-IMPORTANT: When the user asks to set a reminder or alarm, DO NOT give instructions on how to use their phone's clock app. Instead, USE the reminder_add tool to actually set the reminder in the system."#,
+IMPORTANT: When the user asks to set a reminder or alarm, DO NOT give instructions on how to use their phone's clock app. Instead, USE the reminder_add tool to actually set the reminder in the system.{skill_prompt}"#,
         identity = identity,
-        current_time = current_time
+        current_time = current_time,
+        skill_prompt = skill_prompt
     )
 }

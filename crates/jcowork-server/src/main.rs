@@ -16,6 +16,7 @@ use jcowork_gateway::{
 use jcowork_logs::LogWriter;
 use jcowork_memory::{BuiltinMemoryProvider, MemoryManager};
 use jcowork_server::config::ServerConfig;
+use jcowork_skills::SkillManager;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -45,16 +46,22 @@ async fn main() -> Result<()> {
     // Initialize memory provider (SQLite)
     let db_path = format!("{}/jcowork.db", data_dir);
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(5)
+        .max_connections(10)
         .connect(&format!("sqlite:{}?mode=rwc", db_path))
         .await?;
-    let memory_provider = BuiltinMemoryProvider::new(pool);
+    // Run schema migrations (tables: memories, skills, cron_jobs, etc.)
+    jcowork_storage::migration::run_migrations(&pool).await?;
+    let memory_provider = BuiltinMemoryProvider::new(pool.clone());
     memory_provider.init().await?;
     info!(db = %db_path, "Memory database initialized");
 
     let mut memory_manager = MemoryManager::new();
     memory_manager.add_provider(std::sync::Arc::new(memory_provider));
     let memory_manager = std::sync::Arc::new(memory_manager);
+
+    // Initialize skill manager (shares the same pool — no locking conflicts)
+    let skill_manager = Arc::new(SkillManager::new(pool.clone()));
+    info!("Skill manager initialized");
 
     // Initialize cron scheduler
     let cron_scheduler = Arc::new(jcowork_cron::CronScheduler::new());
@@ -87,6 +94,7 @@ async fn main() -> Result<()> {
         default_model: config.default_model.clone(),
         cron_scheduler,
         memory_manager,
+        skill_manager,
         tool_registry,
         user_store,
         log_writer,

@@ -57,13 +57,14 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // Memories table with FTS5
+    // Memories table
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS memories (
             id TEXT PRIMARY KEY,
             user_id TEXT NOT NULL,
             content TEXT NOT NULL,
+            content_tokens TEXT NOT NULL DEFAULT '',
             category TEXT DEFAULT 'general',
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -73,56 +74,8 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // FTS5 virtual table for memory search
-    sqlx::query(
-        r#"
-        CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-            content,
-            category,
-            content='memories',
-            content_rowid=rowid,
-            tokenize='porter unicode61'
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    // FTS5 sync triggers
-    sqlx::query(
-        r#"
-        CREATE TRIGGER IF NOT EXISTS memories_fts_insert AFTER INSERT ON memories BEGIN
-            INSERT INTO memories_fts(rowid, content, category)
-            VALUES (new.rowid, new.content, new.category);
-        END
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        r#"
-        CREATE TRIGGER IF NOT EXISTS memories_fts_delete AFTER DELETE ON memories BEGIN
-            INSERT INTO memories_fts(memories_fts, rowid, content, category)
-            VALUES ('delete', old.rowid, old.content, old.category);
-        END
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        r#"
-        CREATE TRIGGER IF NOT EXISTS memories_fts_update AFTER UPDATE ON memories BEGIN
-            INSERT INTO memories_fts(memories_fts, rowid, content, category)
-            VALUES ('delete', old.rowid, old.content, old.category);
-            INSERT INTO memories_fts(rowid, content, category)
-            VALUES (new.rowid, new.content, new.category);
-        END
-        "#,
-    )
-    .execute(pool)
-    .await?;
+    // NOTE: memories_fts (FTS5 virtual table) is managed exclusively by BuiltinMemoryProvider.
+    // Do NOT create or alter memories_fts here to avoid schema conflicts.
 
     // Skills table
     sqlx::query(

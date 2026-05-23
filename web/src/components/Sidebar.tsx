@@ -5,10 +5,11 @@ interface SidebarProps {
   onSettings: () => void;
   onSchedule: () => void;
   onMemory: () => void;
+  onSkills: () => void;
   currentView: string;
 }
 
-export default function Sidebar({ username, onLogout, onChat, onSettings, onSchedule, onMemory, currentView }: SidebarProps) {
+export default function Sidebar({ username, onLogout, onChat, onSettings, onSchedule, onMemory, onSkills, currentView }: SidebarProps) {
   return (
     <div style={{
       width: 240,
@@ -82,6 +83,24 @@ export default function Sidebar({ username, onLogout, onChat, onSettings, onSche
           }}
         >
           Memory
+        </button>
+        <button
+          onClick={onSkills}
+          style={{
+            display: 'block',
+            width: '100%',
+            padding: '8px 12px',
+            borderRadius: 6,
+            border: 'none',
+            background: currentView === 'skills' ? '#2a2a2a' : 'transparent',
+            color: '#eee',
+            textAlign: 'left' as const,
+            cursor: 'pointer',
+            fontSize: 14,
+            marginBottom: 4,
+          }}
+        >
+          Skills
         </button>
         <button
           onClick={onSettings}
