@@ -1,0 +1,25 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Node
+web/node_modules/
+web/dist/
+
+# Environment
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.qoder/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data
+data/

@@ -1,0 +1,111 @@
+import { useState } from 'react';
+import Chat from './components/Chat';
+import Memory from './components/Memory';
+import Schedule from './components/Schedule';
+import Sidebar from './components/Sidebar';
+import Settings from './components/Settings';
+
+const API_BASE = '';
+
+interface AuthState {
+  token: string;
+  userId: string;
+  username: string;
+}
+
+export default function App() {
+  const [auth, setAuth] = useState<AuthState | null>(() => {
+    const saved = localStorage.getItem('jcowork_auth');
+    return saved ? JSON.parse(saved) : null;
+  });
+  const [showSettings, setShowSettings] = useState(false);
+  const [showSchedule, setShowSchedule] = useState(false);
+  const [showMemory, setShowMemory] = useState(false);
+  const [loginForm, setLoginForm] = useState({ username: '', password: '' });
+  const [isRegister, setIsRegister] = useState(false);
+
+  const handleAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const endpoint = isRegister ? '/api/auth/register' : '/api/auth/login';
+    try {
+      const res = await fetch(`${API_BASE}${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(loginForm),
+      });
+      const data = await res.json();
+      if (data.token) {
+        const authState: AuthState = {
+          token: data.token,
+          userId: data.user_id,
+          username: data.username,
+        };
+        setAuth(authState);
+        localStorage.setItem('jcowork_auth', JSON.stringify(authState));
+      } else if (data.error) {
+        alert(data.error);
+      }
+    } catch (err) {
+      console.error('Auth failed:', err);
+      alert('Authentication failed. Please try again.');
+    }
+  };
+
+  const logout = () => {
+    setAuth(null);
+    localStorage.removeItem('jcowork_auth');
+  };
+
+  if (!auth) {
+    return (
+      <div style={{ maxWidth: 400, margin: '100px auto', padding: 32, color: '#eee' }}>
+        <h1 style={{ fontSize: 28, marginBottom: 24 }}>Jcowork Agent</h1>
+        <form onSubmit={handleAuth}>
+          <input
+            type="text"
+            placeholder="Username"
+            value={loginForm.username}
+            onChange={(e) => setLoginForm({ ...loginForm, username: e.target.value })}
+            style={{ width: '100%', padding: 10, marginBottom: 12, borderRadius: 8, border: '1px solid #555', background: '#1a1a1a', color: '#eee' }}
+          />
+          <input
+            type="password"
+            placeholder="Password"
+            value={loginForm.password}
+            onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })}
+            style={{ width: '100%', padding: 10, marginBottom: 16, borderRadius: 8, border: '1px solid #555', background: '#1a1a1a', color: '#eee' }}
+          />
+          <button
+            type="submit"
+            style={{ width: '100%', padding: 10, borderRadius: 8, border: 'none', background: '#1a73e8', color: '#fff', fontSize: 16, cursor: 'pointer' }}
+          >
+            {isRegister ? 'Register' : 'Login'}
+          </button>
+        </form>
+        <p style={{ marginTop: 16, textAlign: 'center' }}>
+          <span style={{ color: '#888' }}>{isRegister ? 'Already have an account?' : "Don't have an account?"}</span>{' '}
+          <a href="#" onClick={() => setIsRegister(!isRegister)} style={{ color: '#1a73e8' }}>
+            {isRegister ? 'Login' : 'Register'}
+          </a>
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: 'flex', height: '100vh', background: '#111', color: '#eee' }}>
+      <Sidebar username={auth.username} onLogout={logout} onChat={() => { setShowSettings(false); setShowSchedule(false); setShowMemory(false); }} onSettings={() => { setShowSettings(true); setShowSchedule(false); setShowMemory(false); }} onSchedule={() => { setShowSchedule(true); setShowSettings(false); setShowMemory(false); }} onMemory={() => { setShowMemory(true); setShowSchedule(false); setShowSettings(false); }} currentView={showSettings ? 'settings' : showSchedule ? 'schedule' : showMemory ? 'memory' : 'chat'} />
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+        {showSettings ? (
+          <Settings onClose={() => setShowSettings(false)} userId={auth.userId} token={auth.token} />
+        ) : showSchedule ? (
+          <Schedule userId={auth.userId} token={auth.token} />
+        ) : showMemory ? (
+          <Memory userId={auth.userId} token={auth.token} />
+        ) : (
+          <Chat userId={auth.userId} token={auth.token} />
+        )}
+      </div>
+    </div>
+  );
+}

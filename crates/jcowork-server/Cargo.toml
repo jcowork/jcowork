@@ -1,0 +1,30 @@
+[package]
+name = "jcowork-server"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "jcowork"
+path = "src/main.rs"
+
+[dependencies]
+jcowork-gateway = { workspace = true }
+jcowork-agent = { workspace = true }
+jcowork-memory = { workspace = true }
+jcowork-skills = { workspace = true }
+jcowork-tools = { workspace = true }
+jcowork-storage = { workspace = true }
+jcowork-llm = { workspace = true }
+jcowork-cron = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+sqlx = { workspace = true }
+shellexpand = "3"
+dashmap = { workspace = true }
+dotenvy = { workspace = true }

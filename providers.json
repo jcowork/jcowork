@@ -1,0 +1,95 @@
+[
+  {
+    "id": "deepseek",
+    "name": "DeepSeek",
+    "env_key": "DEEPSEEK_API_KEY",
+    "base_url": "https://api.deepseek.com",
+    "default_model": "deepseek-v4-flash",
+    "context_length": 64000,
+    "models": [
+      { "id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "context_length": 64000 },
+      { "id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "context_length": 64000 }
+    ]
+  },
+  {
+    "id": "qwen",
+    "name": "Qwen / 通义千问",
+    "env_key": "QWEN_API_KEY",
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "default_model": "qwen-plus",
+    "context_length": 131072,
+    "models": [
+      { "id": "qwen-max", "name": "Qwen Max", "context_length": 32000 },
+      { "id": "qwen-plus", "name": "Qwen Plus", "context_length": 131072 },
+      { "id": "qwen-turbo", "name": "Qwen Turbo", "context_length": 131072 },
+      { "id": "qwen-long", "name": "Qwen Long", "context_length": 1000000 }
+    ]
+  },
+  {
+    "id": "minimax",
+    "name": "Minimax",
+    "env_key": "MINIMAX_API_KEY",
+    "base_url": "https://api.minimax.chat/v1",
+    "default_model": "MiniMax-Text-01",
+    "context_length": 1000000,
+    "models": [
+      { "id": "MiniMax-Text-01", "name": "MiniMax Text 01", "context_length": 1000000 },
+      { "id": "abab6.5s-chat", "name": "ABAB 6.5s Chat", "context_length": 131072 },
+      { "id": "abab6.5-chat", "name": "ABAB 6.5 Chat", "context_length": 16000 }
+    ]
+  },
+  {
+    "id": "moonshot",
+    "name": "Moonshot",
+    "env_key": "MOONSHOT_API_KEY",
+    "base_url": "https://api.moonshot.cn/v1",
+    "default_model": "kimi-k2.5",
+    "context_length": 256000,
+    "models": [
+      { "id": "kimi-k2.5", "name": "Kimi K2.5", "context_length": 256000 },
+      { "id": "kimi-k2.6", "name": "Kimi K2.6", "context_length": 256000 }
+    ]
+  },
+  {
+    "id": "openai",
+    "name": "OpenAI",
+    "env_key": "OPENAI_API_KEY",
+    "base_url": "https://api.openai.com/v1",
+    "default_model": "gpt-4o",
+    "context_length": 128000,
+    "models": [
+      { "id": "gpt-4o", "name": "GPT-4o", "context_length": 128000 },
+      { "id": "gpt-4o-mini", "name": "GPT-4o Mini", "context_length": 128000 },
+      { "id": "gpt-4-turbo", "name": "GPT-4 Turbo", "context_length": 128000 },
+      { "id": "o1", "name": "o1", "context_length": 200000 },
+      { "id": "o1-mini", "name": "o1 Mini", "context_length": 128000 }
+    ]
+  },
+  {
+    "id": "openrouter",
+    "name": "OpenRouter",
+    "env_key": "OPENROUTER_API_KEY",
+    "base_url": "https://openrouter.ai/api/v1",
+    "default_model": "anthropic/claude-3.5-sonnet",
+    "context_length": 200000,
+    "models": [
+      { "id": "anthropic/claude-3.5-sonnet", "name": "Claude 3.5 Sonnet", "context_length": 200000 },
+      { "id": "anthropic/claude-3-haiku", "name": "Claude 3 Haiku", "context_length": 200000 },
+      { "id": "google/gemini-pro-1.5", "name": "Gemini Pro 1.5", "context_length": 1000000 },
+      { "id": "meta-llama/llama-3.1-70b-instruct", "name": "Llama 3.1 70B", "context_length": 131072 }
+    ]
+  },
+  {
+    "id": "local",
+    "name": "Local / Ollama",
+    "env_key": "",
+    "base_url": "http://localhost:11434/v1",
+    "default_model": "llama3",
+    "context_length": 8000,
+    "models": [
+      { "id": "llama3", "name": "Llama 3", "context_length": 8000 },
+      { "id": "qwen2", "name": "Qwen 2", "context_length": 32000 },
+      { "id": "mistral", "name": "Mistral", "context_length": 32000 }
+    ]
+  }
+]
