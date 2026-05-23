@@ -13,6 +13,7 @@ use jcowork_gateway::{
     router::{self, AppState},
     session::SessionManager,
 };
+use jcowork_logs::LogWriter;
 use jcowork_memory::{BuiltinMemoryProvider, MemoryManager};
 use jcowork_server::config::ServerConfig;
 
@@ -62,6 +63,11 @@ async fn main() -> Result<()> {
     let user_store = Arc::new(jcowork_storage::UserStore::new(&data_dir).await?);
     info!("User store initialized");
 
+    // Initialize log writer
+    let log_dir = format!("{}/logs", data_dir);
+    let log_writer = Arc::new(LogWriter::new(log_dir.into()).await?);
+    info!("Log writer initialized");
+
     // Initialize tool registry
     let tool_registry = jcowork_gateway::ws::build_tool_registry(cron_scheduler.clone(), memory_manager.clone());
 
@@ -83,6 +89,7 @@ async fn main() -> Result<()> {
         memory_manager,
         tool_registry,
         user_store,
+        log_writer,
     };
 
     // Build router

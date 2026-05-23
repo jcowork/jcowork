@@ -10,6 +10,7 @@ members = [
     "crates/jcowork-llm",
     "crates/jcowork-storage",
     "crates/jcowork-cron",
+    "crates/jcowork-logs",
 ]
 
 [workspace.package]
@@ -28,6 +29,7 @@ jcowork-tools = { path = "crates/jcowork-tools" }
 jcowork-llm = { path = "crates/jcowork-llm" }
 jcowork-storage = { path = "crates/jcowork-storage" }
 jcowork-cron = { path = "crates/jcowork-cron" }
+jcowork-logs = { path = "crates/jcowork-logs" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

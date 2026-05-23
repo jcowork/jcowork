@@ -18,6 +18,7 @@ use crate::session::SessionManager;
 use crate::ws;
 use jcowork_cron::CronScheduler;
 use jcowork_llm::LlmRouter;
+use jcowork_logs::LogWriter;
 use jcowork_memory::MemoryManager;
 use jcowork_storage::UserStore;
 use jcowork_tools::registry::ToolRegistry;
@@ -33,6 +34,7 @@ pub struct AppState {
     pub memory_manager: Arc<MemoryManager>,
     pub tool_registry: Arc<ToolRegistry>,
     pub user_store: Arc<UserStore>,
+    pub log_writer: Arc<LogWriter>,
 }
 
 // --- Request/Response types ---
@@ -495,7 +497,8 @@ async fn ws_upgrade(
     let default_model = state.default_model.clone();
     let tool_registry = state.tool_registry.clone();
     let cron_scheduler = state.cron_scheduler.clone();
+    let log_writer = state.log_writer.clone();
     ws.on_upgrade(move |socket| {
-        ws::ws_handler(socket, user_id, state.session_manager, state.llm_router, default_model, tool_registry, cron_scheduler)
+        ws::ws_handler(socket, user_id, state.session_manager, state.llm_router, default_model, tool_registry, cron_scheduler, log_writer)
     })
 }

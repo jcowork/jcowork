@@ -9,6 +9,7 @@ use std::sync::Arc;
 use jcowork_cron::CronScheduler;
 use jcowork_llm::provider::{ChatMessage, StreamChunk, ToolCall};
 use jcowork_llm::LlmRouter;
+use jcowork_logs::{build_llm_input, build_llm_output, LogEntry, LogWriter, ToolCallEntry};
 use jcowork_memory::MemoryManager;
 use jcowork_tools::base::ToolContext;
 use jcowork_tools::cron::{ReminderAddTool, ReminderListTool, ReminderRemoveTool, CronAddTool, CronListTool, CronRemoveTool};
@@ -77,6 +78,7 @@ pub async fn ws_handler(
     default_model: String,
     tool_registry: Arc<ToolRegistry>,
     cron_scheduler: Arc<CronScheduler>,
+    log_writer: Arc<LogWriter>,
 ) {
     let (mut ws_sender, mut ws_receiver) = ws.split();
 
@@ -160,6 +162,9 @@ pub async fn ws_handler(
                 let max_turns = 10;
                 for _turn in 0..max_turns {
                     // Call LLM with streaming
+                    let llm_start = std::time::Instant::now();
+                    let llm_input = build_llm_input(&history.iter().map(|m| (m.role.as_str(), m.content.as_str())).collect::<Vec<_>>());
+                    let provider_name = provider.name().to_string();
                     let stream_result = provider.chat_stream(&history, &tools).await;
                     let mut stream = match stream_result {
                         Ok(s) => s,
@@ -180,6 +185,7 @@ pub async fn ws_handler(
                     let mut current_tool_args: HashMap<String, (String, String, String)> = HashMap::new();
                     let mut tool_call_started: std::collections::HashSet<String> = std::collections::HashSet::new();
                     let mut had_error = false;
+                    let mut final_usage: Option<(i32, i32, i32)> = None;
 
                     while let Some(chunk) = stream.next().await {
                         match chunk {
@@ -218,6 +224,7 @@ pub async fn ws_handler(
                                 }
                             }
                             Ok(StreamChunk::Done(usage)) => {
+                                final_usage = Some((usage.prompt_tokens, usage.completion_tokens, usage.total_tokens));
                                 let _ = ws_sender
                                     .send(Message::Text(
                                         serde_json::json!({
@@ -267,6 +274,26 @@ pub async fn ws_handler(
                         })
                         .collect();
 
+                    // Log LLM request/response
+                    let llm_duration_ms = llm_start.elapsed().as_millis() as u64;
+                    let tool_names: Vec<String> = tool_calls.iter().map(|tc| tc.function.name.clone()).collect();
+                    let log_entry = LogEntry::LlmRequest {
+                        timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                        user_id: user_id.clone(),
+                        provider: provider_name,
+                        model: model_str.to_string(),
+                        duration_ms: llm_duration_ms,
+                        input: llm_input,
+                        output: build_llm_output(
+                            &assistant_content,
+                            tool_calls.len(),
+                            tool_names,
+                            final_usage,
+                        ),
+                    };
+                    let lw = log_writer.clone();
+                    tokio::spawn(async move { lw.write(&log_entry).await });
+
                     // Add assistant message to history
                     history.push(ChatMessage {
                         role: "assistant".to_string(),
@@ -283,6 +310,7 @@ pub async fn ws_handler(
 
                     // Dispatch tool calls
                     for tc in &tool_calls {
+                        let tool_start = std::time::Instant::now();
                         let result = tool_registry
                             .dispatch(&tc.function.name, &tc.function.arguments, &tool_ctx)
                             .await;
@@ -291,6 +319,8 @@ pub async fn ws_handler(
                             Ok(r) => r,
                             Err(e) => format!("Error: {}", e),
                         };
+
+                        let tool_duration_ms = tool_start.elapsed().as_millis() as u64;
 
                         let _ = ws_sender
                             .send(Message::Text(
@@ -303,6 +333,12 @@ pub async fn ws_handler(
                                     .into(),
                             ))
                             .await;
+
+                        // Log tool call
+                        let tool_log = ToolCallEntry::new(&user_id, &tc.function.name)
+                            .into_log_entry_with(&tc.function.arguments, &result_str, tool_duration_ms);
+                        let lw = log_writer.clone();
+                        tokio::spawn(async move { lw.write(&tool_log).await });
 
                         // Add tool result to history
                         history.push(ChatMessage {
