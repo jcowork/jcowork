@@ -103,7 +103,7 @@ pub async fn ws_handler(
     let custom_identity = load_agent_identity(&memory_manager, &user_id).await;
 
     // Load enabled skills and build skill prompt blocks
-    let skill_prompt = build_skill_prompt(&memory_manager, &skill_manager, &user_id).await;
+    let (skill_prompt, enabled_skill_ids) = build_skill_prompt(&memory_manager, &skill_manager, &user_id).await;
 
     // Conversation history for this connection
     let mut history: Vec<ChatMessage> = Vec::new();
@@ -171,8 +171,22 @@ pub async fn ws_handler(
                     }
                 };
 
-                // Get tool schemas
-                let tools = tool_registry.all_schemas();
+                // Get tool schemas — filter out skill-gated tools if the skill is not enabled
+                let tools: Vec<_> = tool_registry.all_schemas()
+                    .into_iter()
+                    .filter(|t| {
+                        // Skill-gated tools: only available when the corresponding skill is enabled
+                        let skill_required = match t.function.name.as_str() {
+                            "web_search" => Some("builtin:web_search"),
+                            "report_search" | "report_list_companies" => Some("builtin:write_research_report"),
+                            _ => None,
+                        };
+                        match skill_required {
+                            Some(skill_id) => enabled_skill_ids.contains(skill_id),
+                            None => true,
+                        }
+                    })
+                    .collect();
                 let tool_ctx = ToolContext {
                     user_id: user_id.clone(),
                     workspace_root: String::new(),
@@ -428,7 +442,8 @@ pub async fn ws_handler(
 
 /// Build the skill prompt block from enabled skills.
 /// Loads enabled skill IDs from memory, then fetches content from builtin or user skills.
-async fn build_skill_prompt(memory_manager: &MemoryManager, skill_manager: &SkillManager, user_id: &str) -> String {
+/// Returns (prompt_string, set_of_enabled_skill_ids).
+async fn build_skill_prompt(memory_manager: &MemoryManager, skill_manager: &SkillManager, user_id: &str) -> (String, std::collections::HashSet<String>) {
     // Get enabled skill IDs
     let enabled_ids: std::collections::HashSet<String> = match memory_manager.recall_all(user_id).await {
         Ok(entries) => entries
@@ -436,11 +451,11 @@ async fn build_skill_prompt(memory_manager: &MemoryManager, skill_manager: &Skil
             .filter(|e| e.category == "skill_enabled")
             .map(|e| e.content)
             .collect(),
-        Err(_) => return String::new(),
+        Err(_) => return (String::new(), std::collections::HashSet::new()),
     };
 
     if enabled_ids.is_empty() {
-        return String::new();
+        return (String::new(), enabled_ids);
     }
 
     let mut blocks: Vec<String> = Vec::new();
@@ -462,10 +477,10 @@ async fn build_skill_prompt(memory_manager: &MemoryManager, skill_manager: &Skil
     }
 
     if blocks.is_empty() {
-        return String::new();
+        return (String::new(), enabled_ids);
     }
 
-    format!("\n\n---\n\n## Active Skills\n\n{}", blocks.join("\n\n---\n\n"))
+    (format!("\n\n---\n\n## Active Skills\n\n{}", blocks.join("\n\n---\n\n")), enabled_ids)
 }
 
 /// Load the user's custom agent identity from memory.
@@ -510,7 +525,7 @@ fn build_reminder_context_msg(reminders: &[Reminder], cron_jobs: &[CronJob]) -> 
 /// If skill_prompt is non-empty, it is appended at the end.
 fn build_system_prompt_with_identity(custom_identity: Option<&str>, skill_prompt: &str) -> String {
     let now = chrono::Local::now();
-    let current_time = now.format("%Y-%m-%d %H:%M:%S %:z").to_string();
+    let current_time = now.format("%Y年%m月%d日 %H时%M分%S秒 (%:z)").to_string();
 
     let identity = match custom_identity {
         Some(id) if !id.trim().is_empty() => id.to_string(),
@@ -567,7 +582,7 @@ When the user asks you to set a reminder or alarm:
 3. Call the reminder_add tool with the full ISO 8601 datetime and the reminder message.
 4. Confirm to the user that the reminder has been set.
 
-Current date/time: {current_time}
+今天是 {current_time}
 
 IMPORTANT: When the user asks to set a reminder or alarm, DO NOT give instructions on how to use their phone's clock app. Instead, USE the reminder_add tool to actually set the reminder in the system.{skill_prompt}"#,
         identity = identity,
