@@ -14,7 +14,7 @@ use jcowork_memory::MemoryManager;
 use jcowork_skills::{builtin_skills, SkillManager};
 use jcowork_tools::base::ToolContext;
 use jcowork_tools::cron::{ReminderAddTool, ReminderListTool, ReminderRemoveTool, CronAddTool, CronListTool, CronRemoveTool};
-use jcowork_tools::memory::{MemorySaveTool, MemoryRecallTool, MemorySearchTool};
+use jcowork_tools::memory::{MemorySaveTool, MemoryUpdateTool, MemoryRecallTool, MemorySearchTool};
 use jcowork_tools::pdf_parse::PdfParseTool;
 use jcowork_tools::report_search::{ReportListCompaniesTool, ReportSearchTool};
 use jcowork_tools::registry::ToolRegistry;
@@ -67,6 +67,7 @@ pub fn build_tool_registry(scheduler: Arc<CronScheduler>, memory_manager: Arc<Me
     registry.register(Arc::new(CronRemoveTool { scheduler }));
     // Memory tools
     registry.register(Arc::new(MemorySaveTool { manager: memory_manager.clone() }));
+    registry.register(Arc::new(MemoryUpdateTool { manager: memory_manager.clone() }));
     registry.register(Arc::new(MemoryRecallTool { manager: memory_manager.clone() }));
     registry.register(Arc::new(MemorySearchTool { manager: memory_manager }));
     // PDF parsing tool
@@ -531,10 +532,14 @@ r#"{identity} You have the following tools available:
 
 **memory_save** — Save a durable fact or life event to persistent memory.
   Parameters: content (declarative statement), category ('life_event' | 'preference' | 'environment' | 'convention' | 'person' | 'general')
+  Returns: the saved entry including its `id` (UUID) — keep this ID in mind for possible later update.
 
-**memory_recall** — Recall all saved memories.
+**memory_update** — Update an existing memory entry with new or enriched content.
+  Parameters: id (UUID from memory_save), content (full updated text), category (optional)
 
-**memory_search** — Search memories by keyword.
+**memory_recall** — Recall all saved memories (includes entry IDs).
+
+**memory_search** — Search memories by keyword (includes entry IDs).
   Parameters: query (search terms), limit (max results, default 5)
 
 When to use memory:
@@ -547,6 +552,11 @@ When to use memory:
   - Completing important tasks or meetings
   Always include the current date/time in the content for life events. Ask for missing details (who, where) only if the event seems significant.
 - DO NOT save purely conversational context with no future value
+
+Life event memory rules:
+- **Never mention the saving action in your reply.** Do NOT say things like "已记录"、"我帮你记下来了"、"已保存" etc. Just respond naturally to what the user said.
+- **If the event is in the future** (e.g., "明天要去开会", "下周送孩子去夏令营"), after saving it ask: "需要到时提醒你吗？" — if the user says yes, use reminder_add or cron_add to set a reminder.
+- **If the conversation continues on the same topic** and adds new details (location, people, outcome etc.), call memory_update with the original entry's id to enrich the content rather than saving a duplicate.
 
 When the user asks you to set a reminder or alarm:
 1. Parse the time they mentioned. If they say "11:41", assume today at 11:41 in the Asia/Shanghai timezone (UTC+8).

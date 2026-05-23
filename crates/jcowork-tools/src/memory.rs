@@ -49,8 +49,57 @@ impl Tool for MemorySaveTool {
             .unwrap_or("general");
 
         match self.manager.save(&ctx.user_id, content, category).await {
-            Ok(entry) => Ok(format!("Memory saved: [{}] {}", entry.category, entry.content)),
+            Ok(entry) => Ok(format!("Memory saved (id={}): [{}] {}", entry.id, entry.category, entry.content)),
             Err(e) => Ok(format!("Failed to save memory: {}", e)),
+        }
+    }
+}
+
+/// Memory update tool — update an existing memory entry by ID.
+pub struct MemoryUpdateTool {
+    pub manager: Arc<MemoryManager>,
+}
+
+#[async_trait]
+impl Tool for MemoryUpdateTool {
+    fn name(&self) -> &str { "memory_update" }
+    fn description(&self) -> &str {
+        "Update an existing memory entry by its ID. Use this when the same topic from an earlier message gains new details and you want to enrich the previously saved memory rather than create a duplicate."
+    }
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "The memory entry ID returned by memory_save (format: UUID)"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The updated content to replace the old one"
+                },
+                "category": {
+                    "type": "string",
+                    "description": "Optionally change the category",
+                    "enum": ["life_event", "preference", "environment", "convention", "person", "general"]
+                }
+            },
+            "required": ["id", "content"]
+        })
+    }
+    async fn execute(&self, args: &str, ctx: &ToolContext) -> Result<String> {
+        let params: serde_json::Value = serde_json::from_str(args)?;
+        let id = params["id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing 'id' parameter"))?;
+        let content = params["content"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing 'content' parameter"))?;
+        let category = params["category"].as_str();
+
+        match self.manager.update(&ctx.user_id, id, Some(content), category).await {
+            Ok(entry) => Ok(format!("Memory updated (id={}): [{}] {}", entry.id, entry.category, entry.content)),
+            Err(e) => Ok(format!("Failed to update memory: {}", e)),
         }
     }
 }
@@ -63,7 +112,7 @@ pub struct MemoryRecallTool {
 #[async_trait]
 impl Tool for MemoryRecallTool {
     fn name(&self) -> &str { "memory_recall" }
-    fn description(&self) -> &str { "Recall all saved memories. Returns the full memory context." }
+    fn description(&self) -> &str { "Recall all saved memories. Returns the full memory context including entry IDs." }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({ "type": "object", "properties": {} })
     }
@@ -73,7 +122,7 @@ impl Tool for MemoryRecallTool {
             Ok(memories) => {
                 let lines: Vec<String> = memories
                     .iter()
-                    .map(|m| format!("- [{}] {}", m.category, m.content))
+                    .map(|m| format!("- [{}] {} (id={})", m.category, m.content, m.id))
                     .collect();
                 Ok(format!("Memories:\n{}", lines.join("\n")))
             }
@@ -91,7 +140,7 @@ pub struct MemorySearchTool {
 impl Tool for MemorySearchTool {
     fn name(&self) -> &str { "memory_search" }
     fn description(&self) -> &str {
-        "Search memories using full-text search. Use when you need specific past knowledge."
+        "Search memories using full-text search. Returns results with entry IDs. Use when you need specific past knowledge."
     }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
@@ -115,7 +164,7 @@ impl Tool for MemorySearchTool {
             Ok(results) => {
                 let lines: Vec<String> = results
                     .iter()
-                    .map(|r| format!("- [{}] {} (score: {:.2})", r.category, r.content, r.rank))
+                    .map(|r| format!("- [{}] {} (id={}, score: {:.2})", r.category, r.content, r.id, r.rank))
                     .collect();
                 Ok(format!("Search results:\n{}", lines.join("\n")))
             }
