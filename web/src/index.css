@@ -177,3 +177,80 @@ a:hover {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.6; }
 }
+
+/* Show copy button on message hover */
+div:hover > .msg-copy-btn {
+  opacity: 1 !important;
+}
+
+/* --- Responsive / Mobile --- */
+
+/* Login page */
+.login-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px;
+  color: #eee;
+}
+.login-card {
+  width: 100%;
+  max-width: 400px;
+}
+
+/* Mobile top bar — hidden on desktop */
+.mobile-topbar {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid #333;
+  background: #1a1a1a;
+  height: 48px;
+  flex-shrink: 0;
+}
+
+/* Chat messages inner — max-width for readability */
+.chat-messages-inner {
+  max-width: 860px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+/* Sidebar — desktop: normal flow; mobile: fixed overlay */
+.sidebar {
+  position: relative;
+}
+
+@media (max-width: 768px) {
+  /* Show mobile top bar */
+  .mobile-topbar {
+    display: flex;
+  }
+
+  /* Sidebar becomes a fixed overlay on mobile */
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 999;
+    transform: translateX(-100%);
+  }
+  .sidebar.sidebar-open {
+    transform: translateX(0);
+  }
+
+  /* Chat bubbles wider on mobile */
+  .chat-messages-inner {
+    max-width: 100%;
+  }
+}
+
+/* Skills Square grid responsive */
+@media (max-width: 768px) {
+  .skills-grid {
+    grid-template-columns: 1fr !important;
+  }
+}

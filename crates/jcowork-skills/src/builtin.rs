@@ -101,6 +101,10 @@ After producing the outline, **immediately and automatically** output a complete
   - Q&A / Thank You: centered large text
 - **Speaker notes**: hidden by default; toggle with `N` key, shown as a bottom overlay panel
 - **Print/export hint**: include a `<style media="print">` block that shows one slide per page
+- **Action buttons** (fixed top-right corner, always visible):
+  - **Download button**: labeled "Download HTML"; on click, creates a Blob from the page's full outerHTML and triggers a download as `presentation.html`
+  - **Copy button**: labeled "Copy HTML"; on click, copies the page's full outerHTML to clipboard; briefly changes label to "Copied!" for 2 seconds then reverts
+  - Style: small semi-transparent dark pills with white text, `position: fixed; top: 16px; right: 16px; z-index: 9999`, hover opacity change
 
 ### HTML Output
 Output the HTML inside a fenced code block:

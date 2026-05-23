@@ -14,6 +14,85 @@ interface ChatProps {
   token: string;
 }
 
+// Copy button for message bubbles
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // fallback
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
+  return (
+    <button
+      onClick={handleCopy}
+      title={copied ? 'Copied!' : 'Copy'}
+      style={{
+        background: 'none',
+        border: 'none',
+        color: copied ? '#4caf50' : '#888',
+        cursor: 'pointer',
+        fontSize: 12,
+        padding: '2px 6px',
+        borderRadius: 4,
+        transition: 'color 0.2s',
+      }}
+    >
+      {copied ? '✓' : '⧉'}
+    </button>
+  );
+}
+
+// Download button for message bubbles
+function DownloadButton({ text, filename }: { text: string; filename?: string }) {
+  const handleDownload = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    // Detect HTML content
+    const isHtml = text.trimStart().startsWith('<!DOCTYPE') || text.trimStart().startsWith('<html');
+    const blob = new Blob([text], { type: isHtml ? 'text/html;charset=utf-8' : 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename || (isHtml ? 'presentation.html' : 'message.txt');
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+  return (
+    <button
+      onClick={handleDownload}
+      title="Download"
+      style={{
+        background: 'none',
+        border: 'none',
+        color: '#888',
+        cursor: 'pointer',
+        fontSize: 12,
+        padding: '2px 6px',
+        borderRadius: 4,
+        transition: 'color 0.2s',
+      }}
+      onMouseEnter={e => (e.currentTarget.style.color = '#ccc')}
+      onMouseLeave={e => (e.currentTarget.style.color = '#888')}
+    >
+      ⬇
+    </button>
+  );
+}
+
 const STORAGE_KEY = (userId: string) => `jcowork_chat_${userId}`;
 
 function loadMessages(userId: string): Message[] {
@@ -273,6 +352,7 @@ export default function Chat({ userId, token }: ChatProps) {
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
+        <div className="chat-messages-inner">
         {messages.map((msg, i) => {
           const isUser = msg.role === 'user';
           const isSystem = msg.role === 'system';
@@ -287,22 +367,42 @@ export default function Chat({ userId, token }: ChatProps) {
                 color: '#eee',
                 marginLeft: isUser ? 'auto' : 0,
                 marginRight: isUser ? 0 : 'auto',
-                maxWidth: isUser ? '80%' : '85%',
+                maxWidth: isUser ? '75%' : '72%',
                 lineHeight: 1.6,
+                position: 'relative',
               }}
             >
-              {isUser || isSystem ? (
-                <span style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</span>
-              ) : (
-                <div className="markdown-body">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+              <div style={{ userSelect: 'text', WebkitUserSelect: 'text' }}>
+                {isUser || isSystem ? (
+                  <span style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</span>
+                ) : (
+                  <div className="markdown-body">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                  </div>
+                )}
+              </div>
+              {msg.streaming && <span className="cursor">|</span>}
+              {/* Copy button — top-right of bubble, shown on hover */}
+              {!msg.streaming && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: 6,
+                    right: 6,
+                    opacity: 0,
+                    transition: 'opacity 0.15s',
+                  }}
+                  className="msg-copy-btn"
+                >
+                  <DownloadButton text={msg.content} />
+                  <CopyButton text={msg.content} />
                 </div>
               )}
-              {msg.streaming && <span className="cursor">|</span>}
             </div>
           );
         })}
         <div ref={messagesEndRef} />
+        </div>
       </div>
 
       <div style={{ padding: 16, borderTop: '1px solid #333', display: 'flex', gap: 8 }}>

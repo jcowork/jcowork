@@ -175,7 +175,7 @@ export default function SkillsSquare({ token }: SkillsSquareProps) {
             {filter === 'user' ? 'No custom skills yet.' : 'No skills found.'}
           </div>
         ) : (
-          <div style={{
+          <div className="skills-grid" style={{
             display: 'grid',
             gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
             gap: 16,

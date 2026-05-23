@@ -23,6 +23,7 @@ export default function App() {
   const [showSchedule, setShowSchedule] = useState(false);
   const [showMemory, setShowMemory] = useState(false);
   const [showSkills, setShowSkills] = useState(false);
+  const [mobileSidebar, setMobileSidebar] = useState(false);
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [isRegister, setIsRegister] = useState(false);
 
@@ -60,36 +61,38 @@ export default function App() {
 
   if (!auth) {
     return (
-      <div style={{ maxWidth: 400, margin: '100px auto', padding: 32, color: '#eee' }}>
-        <h1 style={{ fontSize: 28, marginBottom: 24 }}>Jcowork Agent</h1>
-        <form onSubmit={handleAuth}>
-          <input
-            type="text"
-            placeholder="Username"
-            value={loginForm.username}
-            onChange={(e) => setLoginForm({ ...loginForm, username: e.target.value })}
-            style={{ width: '100%', padding: 10, marginBottom: 12, borderRadius: 8, border: '1px solid #555', background: '#1a1a1a', color: '#eee' }}
-          />
-          <input
-            type="password"
-            placeholder="Password"
-            value={loginForm.password}
-            onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })}
-            style={{ width: '100%', padding: 10, marginBottom: 16, borderRadius: 8, border: '1px solid #555', background: '#1a1a1a', color: '#eee' }}
-          />
-          <button
-            type="submit"
-            style={{ width: '100%', padding: 10, borderRadius: 8, border: 'none', background: '#1a73e8', color: '#fff', fontSize: 16, cursor: 'pointer' }}
-          >
-            {isRegister ? 'Register' : 'Login'}
-          </button>
-        </form>
-        <p style={{ marginTop: 16, textAlign: 'center' }}>
-          <span style={{ color: '#888' }}>{isRegister ? 'Already have an account?' : "Don't have an account?"}</span>{' '}
-          <a href="#" onClick={() => setIsRegister(!isRegister)} style={{ color: '#1a73e8' }}>
-            {isRegister ? 'Login' : 'Register'}
-          </a>
-        </p>
+      <div className="login-container">
+        <div className="login-card">
+          <h1 style={{ fontSize: 28, marginBottom: 24 }}>Jcowork Agent</h1>
+          <form onSubmit={handleAuth}>
+            <input
+              type="text"
+              placeholder="Username"
+              value={loginForm.username}
+              onChange={(e) => setLoginForm({ ...loginForm, username: e.target.value })}
+              style={{ width: '100%', padding: 10, marginBottom: 12, borderRadius: 8, border: '1px solid #555', background: '#1a1a1a', color: '#eee', fontSize: 16 }}
+            />
+            <input
+              type="password"
+              placeholder="Password"
+              value={loginForm.password}
+              onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })}
+              style={{ width: '100%', padding: 10, marginBottom: 16, borderRadius: 8, border: '1px solid #555', background: '#1a1a1a', color: '#eee', fontSize: 16 }}
+            />
+            <button
+              type="submit"
+              style={{ width: '100%', padding: 10, borderRadius: 8, border: 'none', background: '#1a73e8', color: '#fff', fontSize: 16, cursor: 'pointer' }}
+            >
+              {isRegister ? 'Register' : 'Login'}
+            </button>
+          </form>
+          <p style={{ marginTop: 16, textAlign: 'center' }}>
+            <span style={{ color: '#888' }}>{isRegister ? 'Already have an account?' : "Don't have an account?"}</span>{' '}
+            <a href="#" onClick={() => setIsRegister(!isRegister)} style={{ color: '#1a73e8' }}>
+              {isRegister ? 'Login' : 'Register'}
+            </a>
+          </p>
+        </div>
       </div>
     );
   }
@@ -103,19 +106,35 @@ export default function App() {
         onMemory={() => { setShowMemory(true); setShowSchedule(false); setShowSettings(false); setShowSkills(false); }}
         onSkills={() => { setShowSkills(true); setShowMemory(false); setShowSchedule(false); setShowSettings(false); }}
         currentView={showSettings ? 'settings' : showSchedule ? 'schedule' : showMemory ? 'memory' : showSkills ? 'skills' : 'chat'}
+        mobileOpen={mobileSidebar}
+        onClose={() => setMobileSidebar(false)}
       />
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-        {showSettings ? (
-          <Settings onClose={() => setShowSettings(false)} userId={auth.userId} token={auth.token} />
-        ) : showSchedule ? (
-          <Schedule userId={auth.userId} token={auth.token} />
-        ) : showMemory ? (
-          <Memory userId={auth.userId} token={auth.token} />
-        ) : showSkills ? (
-          <SkillsSquare userId={auth.userId} token={auth.token} />
-        ) : (
-          <Chat userId={auth.userId} token={auth.token} />
-        )}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+        {/* Mobile top bar with hamburger */}
+        <div className="mobile-topbar">
+          <button
+            onClick={() => setMobileSidebar(true)}
+            style={{ background: 'none', border: 'none', color: '#eee', fontSize: 22, cursor: 'pointer', padding: '4px 8px' }}
+          >
+            ☰
+          </button>
+          <span style={{ fontWeight: 600, fontSize: 16 }}>Jcowork</span>
+          <span style={{ width: 30 }} />
+        </div>
+        {/* Content area with max-width for readability */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          {showSettings ? (
+            <Settings onClose={() => setShowSettings(false)} userId={auth.userId} token={auth.token} />
+          ) : showSchedule ? (
+            <Schedule userId={auth.userId} token={auth.token} />
+          ) : showMemory ? (
+            <Memory userId={auth.userId} token={auth.token} />
+          ) : showSkills ? (
+            <SkillsSquare userId={auth.userId} token={auth.token} />
+          ) : (
+            <Chat userId={auth.userId} token={auth.token} />
+          )}
+        </div>
       </div>
     </div>
   );
