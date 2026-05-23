@@ -136,6 +136,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/cron-jobs", get(list_cron_jobs))
         .route("/api/cron-jobs/{id}", delete(remove_cron_job))
         .route("/api/providers", get(list_providers))
+        .route("/api/agent-identity", get(get_agent_identity))
+        .route("/api/agent-identity", put(set_agent_identity))
         .route("/api/ws", get(ws_upgrade))
         .layer(auth_mw);
 
@@ -488,6 +490,52 @@ async fn list_providers(
     })))
 }
 
+async fn get_agent_identity(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+) -> impl IntoResponse {
+    match state.memory_manager.search(&auth_user.user_id, "agent_identity", 1).await {
+        Ok(results) => {
+            let identity = results.into_iter().next().map(|r| r.content).unwrap_or_default();
+            (StatusCode::OK, Json(serde_json::json!({ "identity": identity })))
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "identity": "", "error": e.to_string() })),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SetAgentIdentityRequest {
+    pub identity: String,
+}
+
+async fn set_agent_identity(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Json(req): Json<SetAgentIdentityRequest>,
+) -> impl IntoResponse {
+    // Delete existing agent_identity entries first
+    if let Ok(entries) = state.memory_manager.recall_all(&auth_user.user_id).await {
+        for entry in entries.into_iter().filter(|e| e.category == "agent_identity") {
+            let _ = state.memory_manager.delete(&auth_user.user_id, &entry.id).await;
+        }
+    }
+    // Save new identity (empty string = reset to default)
+    let identity = req.identity.trim().to_string();
+    if identity.is_empty() {
+        return (StatusCode::OK, Json(serde_json::json!({ "status": "reset" })));
+    }
+    match state.memory_manager.save(&auth_user.user_id, &identity, "agent_identity").await {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "status": "saved" }))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
 async fn ws_upgrade(
     ws: WebSocketUpgrade,
     axum::Extension(auth_user): axum::Extension<AuthUser>,
@@ -498,7 +546,8 @@ async fn ws_upgrade(
     let tool_registry = state.tool_registry.clone();
     let cron_scheduler = state.cron_scheduler.clone();
     let log_writer = state.log_writer.clone();
+    let memory_manager = state.memory_manager.clone();
     ws.on_upgrade(move |socket| {
-        ws::ws_handler(socket, user_id, state.session_manager, state.llm_router, default_model, tool_registry, cron_scheduler, log_writer)
+        ws::ws_handler(socket, user_id, state.session_manager, state.llm_router, default_model, tool_registry, cron_scheduler, log_writer, memory_manager)
     })
 }

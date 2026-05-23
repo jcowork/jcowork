@@ -23,12 +23,54 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
   const [selectedProvider, setSelectedProvider] = useState<string>('');
   const [selectedModel, setSelectedModel] = useState<string>('');
   const [loading, setLoading] = useState(true);
+  const [agentIdentity, setAgentIdentity] = useState<string>('');
+  const [identityLoading, setIdentityLoading] = useState(true);
+  const [identitySaving, setIdentitySaving] = useState(false);
+  const [identityStatus, setIdentityStatus] = useState<'idle' | 'saved' | 'error'>('idle');
 
   const MODEL_KEY = `jcowork_model_${userId}`;
 
   // Save model selection to localStorage whenever it changes
   const saveModel = (provider: string, model: string) => {
     localStorage.setItem(MODEL_KEY, JSON.stringify({ provider, model }));
+  };
+
+  useEffect(() => {
+    fetch('/api/agent-identity', {
+      headers: { 'Authorization': `Bearer ${token}` },
+    })
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((data: { identity: string }) => {
+        setAgentIdentity(data.identity || '');
+        setIdentityLoading(false);
+      })
+      .catch(() => setIdentityLoading(false));
+  }, []);
+
+  const saveAgentIdentity = () => {
+    setIdentitySaving(true);
+    setIdentityStatus('idle');
+    fetch('/api/agent-identity', {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ identity: agentIdentity }),
+    })
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then(() => {
+        setIdentityStatus('saved');
+        setTimeout(() => setIdentityStatus('idle'), 2000);
+      })
+      .catch(() => setIdentityStatus('error'))
+      .finally(() => setIdentitySaving(false));
   };
 
   useEffect(() => {
@@ -234,6 +276,82 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
                 </div>
               </div>
             )}
+          </>
+        )}
+      </div>
+
+      {/* Agent Identity Section */}
+      <div style={{ ...cardStyle, marginTop: 16 }}>
+        <h3 style={{ fontSize: 16, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 20 }}>🪪</span> Agent Identity
+        </h3>
+        <div style={{ color: '#888', fontSize: 13, lineHeight: 1.6, marginBottom: 12 }}>
+          Customize how the agent identifies itself and its core behavior. Leave empty to use the default identity.
+        </div>
+        {identityLoading ? (
+          <div style={{ color: '#888', fontSize: 13 }}>Loading...</div>
+        ) : (
+          <>
+            <textarea
+              value={agentIdentity}
+              onChange={e => setAgentIdentity(e.target.value)}
+              placeholder="You are Jcowork Agent, an intelligent AI assistant. (default)"
+              rows={5}
+              style={{
+                width: '100%',
+                padding: '10px 12px',
+                borderRadius: 8,
+                border: '1px solid #444',
+                background: '#1a1a1a',
+                color: '#eee',
+                fontSize: 13,
+                outline: 'none',
+                resize: 'vertical',
+                fontFamily: 'inherit',
+                lineHeight: 1.6,
+                boxSizing: 'border-box',
+              }}
+            />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 10 }}>
+              <button
+                onClick={saveAgentIdentity}
+                disabled={identitySaving}
+                style={{
+                  padding: '8px 20px',
+                  borderRadius: 8,
+                  border: 'none',
+                  background: identitySaving ? '#333' : '#1f6feb',
+                  color: '#fff',
+                  cursor: identitySaving ? 'not-allowed' : 'pointer',
+                  fontSize: 14,
+                  fontWeight: 500,
+                }}
+              >
+                {identitySaving ? 'Saving...' : 'Save'}
+              </button>
+              {agentIdentity && (
+                <button
+                  onClick={() => setAgentIdentity('')}
+                  style={{
+                    padding: '8px 16px',
+                    borderRadius: 8,
+                    border: '1px solid #444',
+                    background: 'transparent',
+                    color: '#888',
+                    cursor: 'pointer',
+                    fontSize: 14,
+                  }}
+                >
+                  Reset to default
+                </button>
+              )}
+              {identityStatus === 'saved' && (
+                <span style={{ color: '#3fb950', fontSize: 13 }}>Saved</span>
+              )}
+              {identityStatus === 'error' && (
+                <span style={{ color: '#f87171', fontSize: 13 }}>Failed to save</span>
+              )}
+            </div>
           </>
         )}
       </div>

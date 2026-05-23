@@ -79,17 +79,21 @@ pub async fn ws_handler(
     tool_registry: Arc<ToolRegistry>,
     cron_scheduler: Arc<CronScheduler>,
     log_writer: Arc<LogWriter>,
+    memory_manager: Arc<MemoryManager>,
 ) {
     let (mut ws_sender, mut ws_receiver) = ws.split();
 
     // Get or create UserActor for this user
     let _actor = session_manager.get(&user_id);
 
+    // Load user's custom agent identity from memory
+    let custom_identity = load_agent_identity(&memory_manager, &user_id).await;
+
     // Conversation history for this connection
     let mut history: Vec<ChatMessage> = Vec::new();
 
-    // System prompt
-    let system_prompt = build_system_prompt();
+    // System prompt (uses custom identity if set, otherwise default)
+    let system_prompt = build_system_prompt_with_identity(custom_identity.as_deref());
     history.push(ChatMessage {
         role: "system".to_string(),
         content: system_prompt,
@@ -384,13 +388,30 @@ pub async fn ws_handler(
     }
 }
 
+/// Load the user's custom agent identity from memory.
+async fn load_agent_identity(memory_manager: &MemoryManager, user_id: &str) -> Option<String> {
+    match memory_manager.recall_all(user_id).await {
+        Ok(entries) => entries
+            .into_iter()
+            .find(|e| e.category == "agent_identity")
+            .map(|e| e.content),
+        Err(_) => None,
+    }
+}
+
 /// Build the system prompt that instructs the LLM about its capabilities.
-fn build_system_prompt() -> String {
+/// If a custom identity is provided, it replaces the default "You are Jcowork Agent" prefix.
+fn build_system_prompt_with_identity(custom_identity: Option<&str>) -> String {
     let now = chrono::Local::now();
     let current_time = now.format("%Y-%m-%d %H:%M:%S %:z").to_string();
 
+    let identity = match custom_identity {
+        Some(id) if !id.trim().is_empty() => id.to_string(),
+        _ => "You are Jcowork Agent, an intelligent AI assistant.".to_string(),
+    };
+
     format!(
-r#"You are Jcowork Agent, an intelligent AI assistant. You have the following tools available:
+r#"{identity} You have the following tools available:
 
 **reminder_add** — Set a one-time reminder. Use this when the user asks to set an alarm, reminder, or notification at a specific time.
   Parameters: fire_at (ISO 8601 datetime, e.g., "2026-05-15T11:41:00+08:00"), message (the reminder text)
@@ -424,9 +445,10 @@ When the user asks you to set a reminder or alarm:
 3. Call the reminder_add tool with the full ISO 8601 datetime and the reminder message.
 4. Confirm to the user that the reminder has been set.
 
-Current date/time: {}
+Current date/time: {current_time}
 
 IMPORTANT: When the user asks to set a reminder or alarm, DO NOT give instructions on how to use their phone's clock app. Instead, USE the reminder_add tool to actually set the reminder in the system."#,
-        current_time
+        identity = identity,
+        current_time = current_time
     )
 }
