@@ -16,14 +16,25 @@ pub struct MemorySaveTool {
 impl Tool for MemorySaveTool {
     fn name(&self) -> &str { "memory_save" }
     fn description(&self) -> &str {
-        "Save a durable fact to persistent memory. Use for user preferences, environment details, tool quirks, and stable conventions. Write as declarative facts, not instructions."
+        "Save a durable fact or life event to persistent memory. \
+         Use for: user preferences, environment details, conventions, \
+         AND daily life events (e.g., dropping kids at school, dining with someone, visiting a place, completing a task). \
+         For life events, use category='life_event' and include timestamp in content."
     }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "content": { "type": "string", "description": "The fact to save (declarative, not imperative)" },
-                "category": { "type": "string", "description": "Category (e.g., 'preference', 'environment', 'convention')", "default": "general" }
+                "content": {
+                    "type": "string",
+                    "description": "The fact or event to save as a declarative statement. For life events, include time context, e.g.: '2026-05-21 08:30 送孩子去学校' or '2026-05-21 午饭 和张总在望京吃火锅'"
+                },
+                "category": {
+                    "type": "string",
+                    "description": "Category for this memory. Use: 'life_event' for daily activities/events, 'preference' for user preferences, 'environment' for env/tool facts, 'convention' for coding/work conventions, 'person' for info about people, 'general' as fallback.",
+                    "enum": ["life_event", "preference", "environment", "convention", "person", "general"],
+                    "default": "general"
+                }
             },
             "required": ["content"]
         })

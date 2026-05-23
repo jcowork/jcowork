@@ -29,3 +29,11 @@ sqlx = { workspace = true }
 shellexpand = "3"
 dashmap = { workspace = true }
 dotenvy = { workspace = true }
+
+[dev-dependencies]
+tokio-tungstenite = { version = "0.26", features = ["native-tls"]}
+reqwest = { workspace = true }
+tempfile = "3"
+async-trait = { workspace = true }
+tower-http = { workspace = true }
+futures = { workspace = true }

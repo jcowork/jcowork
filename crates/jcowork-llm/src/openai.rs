@@ -270,7 +270,9 @@ fn parse_sse_stream(
                     buffer = buffer[pos + 2..].to_string();
 
                     for line in event_str.lines() {
-                        if let Some(data) = line.strip_prefix("data: ") {
+                        // Support both "data: "(standard) and "data: " (some OpenAI-compatible APIs like GLM)
+                        let data_opt = line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:"));
+                        if let Some(data) = data_opt {
                             if data == "[DONE]" {
                                 outputs.push(Ok(StreamChunk::Done(Usage::default())));
                                 continue;
@@ -332,6 +334,14 @@ fn parse_sse_stream(
                                     }
                                 }
                                 Err(e) => {
+                                    // Check if this is an API error response (e.g. {"error": {...}})
+                                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
+                                        if let Some(err) = val.get("error") {
+                                            let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown API error");
+                                            outputs.push(Err(anyhow::anyhow!("API error: {}", msg)));
+                                            continue;
+                                        }
+                                    }
                                     tracing::warn!("Failed to parse SSE data: {} - {}", data, e);
                                 }
                             }

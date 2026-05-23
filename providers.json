@@ -84,12 +84,10 @@
     "name": "Local / Ollama",
     "env_key": "",
     "base_url": "http://localhost:11434/v1",
-    "default_model": "llama3",
-    "context_length": 8000,
+    "default_model": "qwen3.5:35b-a3b",
+    "context_length": 32768,
     "models": [
-      { "id": "llama3", "name": "Llama 3", "context_length": 8000 },
-      { "id": "qwen2", "name": "Qwen 2", "context_length": 32000 },
-      { "id": "mistral", "name": "Mistral", "context_length": 32000 }
+      { "id": "qwen3.5:35b-a3b", "name": "Qwen3.5 35B-A3B", "context_length": 32768 }
     ]
   }
 ]

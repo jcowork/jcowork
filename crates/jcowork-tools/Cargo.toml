@@ -19,3 +19,4 @@ async-trait = { workspace = true }
 schemars = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true }
+shellexpand = { workspace = true }
