@@ -264,13 +264,25 @@ Round 3 (final):
     BuiltinSkill {
         id: "builtin:seven_habits",
         name: "seven_habits",
-        description: "Track your 7 life roles with personal goals and self-assessment, inspired by the 7 Habits of Highly Effective People.",
-        content: r#"## Skill: seven_habits — 7 Life Roles with Personal Goals
+        description: "目标管理 — 用 7 个生活角色来规划和追踪个人目标",
+        content: r#"## Skill: 目标管理 — 7 个生活角色的个人目标追踪
 
-You help the user define and track personal goals across 7 life roles, inspired by Stephen Covey's 7 Habits of Highly Effective People. Each role has its own goal that the user defines for themselves — there is no fixed habit name attached.
+你帮用户在 7 个生活角色上定义个人目标并持续反思。每个角色对应一个目标，目标由用户自己设定，没有固定答案。
 
-### Habit entries in memory
-On first activation, check memory for entries with category='habit'. If fewer than 7 habit entries exist, create all 7 using memory_save with category='habit':
+### 七大角色及其对话触发场景
+
+| # | 角色 | 目标 | 典型话题（对话中出现时主动引导） |
+|---|------|------|----------------------------------|
+| 1 | 管理经营者 | 待用户设定 | 团队管理、业务规划、经营决策、战略思考、KPI/OKR |
+| 2 | 同事及下属 | 待用户设定 | 向上汇报、跨部门协作、职场关系、职业发展 |
+| 3 | 父母 | 待用户设定 | 育儿、亲子陪伴、教育选择、家庭时间分配 |
+| 4 | 配偶 | 待用户设定 | 夫妻沟通、家庭决策、情感连接、分工协作 |
+| 5 | 子女兄弟 | 待用户设定 | 孝顺、家庭聚会、兄弟姐妹关系、照顾父母 |
+| 6 | 同学朋友 | 待用户设定 | 社交、友谊维护、聚会、人脉拓展 |
+| 7 | 身体·智力·精神·社会情感 | 待用户设定 | 健身、读书、冥想、学习、情绪管理、社交充电 |
+
+### Memory 条目格式
+首次激活时，检查 category='habit' 的条目，不足 7 条则一次创建全部：
 
 1. 【7习惯·1】管理经营者 | ⬜待讨论 | 目标：
 2. 【7习惯·2】同事及下属 | ⬜待讨论 | 目标：
@@ -280,34 +292,36 @@ On first activation, check memory for entries with category='habit'. If fewer th
 6. 【7习惯·6】同学朋友 | ⬜待讨论 | 目标：
 7. 【7习惯·7】身体·智力·精神·社会情感 | ⬜待讨论 | 目标：
 
-IMPORTANT: When creating the 7 habit entries, make all 7 memory_save calls in a single turn. Do NOT split them across multiple turns.
+IMPORTANT: 创建 7 条目标时，在单次 turn 内完成所有 memory_save 调用，不要跨 turn。
 
-### Status icons
-- ⬜ 待讨论 — not yet discussed
-- 🟡 探索中 — initial reflection started
-- 🟢 践行中 — goal set, actively practicing
-- 🔵 深化中 — revisited and deepened understanding
+### 状态图标
+- ⬜ 待讨论 — 尚未涉及
+- 🟡 探索中 — 已开始思考，目标尚未确定
+- 🟢 践行中 — 目标已明确，正在践行
+- 🔵 深化中 — 反复回顾，理解加深
 
-### Proactive guidance
-- Each entry is a life role. When conversation touches that role, connect it to the corresponding entry and invite the user to define or reflect on their personal goal:
-  - 管理经营/工作决策 → 习惯1（管理经营者）
-  - 职场方向/同事关系 → 习惯2（同事及下属）
-  - 育儿/家庭时间安排 → 习惯3（父母）
-  - 夫妻沟通/家庭决策 → 习惯4（配偶）
-  - 与父母兄弟相处 → 习惯5（子女兄弟）
-  - 朋友社交/团队协作 → 习惯6（同学朋友）
-  - 健身/学习/冥想/社交 → 习惯7（身体·智力·精神·社会情感）
-- Once per session, if the user hasn't discussed any role yet, pick one (rotate through all 7 over time) and gently ask: "作为[角色]，你希望在这个角色上达到什么目标？" If the goal is already set, ask: "作为[角色]，最近有什么体会？"
-- When the user states their goal, use memory_update to fill in the 目标 field.
-- After the user shares their reflection, use memory_update to update the status icon and add a concise self-assessment summary (under 50 chars).
-- Do NOT force the discussion — if the user changes topic, follow them naturally.
+### 主动引导策略
 
-### Updating entries
-When the user discusses a role:
-1. Use memory_recall to find the entry (category=habit, content contains the role name)
-2. Use memory_update with the entry's id to update content, e.g.:
-   - Setting a goal: 【7习惯·3】父母 | 🟡探索中 | 目标：每周高质量陪伴孩子5小时
-   - Adding reflection: 【7习惯·3】父母 | 🟢践行中 | 目标：每周高质量陪伴孩子5小时 | 陪孩子时间有保障但容易忽视自己
-3. Keep the 【7习惯·N】 prefix and the 目标： field intact so entries stay identifiable and sortable."#,
+**识别时机**：当对话自然触及某角色相关话题时，简要关联并邀请用户反思：
+- 用户聊到工作管理 → "作为管理者，你在这个角色上最想突破什么？"
+- 用户提到同事/领导 → "作为同事和下属，你觉得自己的职场关系有什么可以更好的？"
+- 用户聊到孩子 → "作为父母，你希望自己在育儿上做到什么？"
+- 用户聊到家庭/伴侣 → "作为配偶，你们之间最需要加强的是什么？"
+- 用户提到家人 → "作为子女和兄弟姐妹，你怎么看自己在这个角色上的表现？"
+- 用户聊到社交 → "作为朋友，你觉得友谊中什么最重要？"
+- 用户聊到健身/学习/情绪 → "在自我更新方面，你最近在哪个维度最下功夫？"
+
+**每轮对话引导规则**：
+- 每次会话，如果用户还没聊到任何角色，主动挑一个（按 1→7 顺序轮换），自然地问："最近在[角色]方面有什么想聊的吗？"
+- 如果该角色的目标为空，先引导设目标："你希望在[角色]这个角色上达到什么？" → 用户回答后用 memory_update 填写目标字段，状态改为 🟡
+- 如果目标已设定，引导反思："作为[角色]，最近有什么新的体会？" → 用户回答后用 memory_update 追加反思摘要（50字以内），按深度升级状态
+- 不要生硬切换话题。如果用户在聊别的，先跟上用户，等话题自然落回某个角色时再引导
+
+### 更新条目
+1. 用 memory_recall 找到条目（category=habit，content 含角色名）
+2. 用 memory_update 更新，例如：
+   - 设定目标：【7习惯·3】父母 | 🟡探索中 | 目标：每周高质量陪伴孩子5小时
+   - 追加反思：【7习惯·3】父母 | 🟢践行中 | 目标：每周高质量陪伴孩子5小时 | 陪孩子时间有保障但容易忽视自己
+3. 保持【7习惯·N】前缀和目标：字段完整，便于识别和排序"#,
     },
 ];
