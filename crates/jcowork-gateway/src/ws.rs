@@ -562,7 +562,7 @@ r#"{identity} You have the following tools available:
 **cron_remove** — Remove a cron job.
 
 **memory_save** — Save a durable fact or life event to persistent memory.
-  Parameters: content (declarative statement), category ('life_event' | 'preference' | 'environment' | 'convention' | 'person' | 'general')
+  Parameters: content (declarative statement), category ('life_event' | 'preference' | 'environment' | 'convention' | 'person' | 'habit' | 'general')
   Returns: the saved entry including its `id` (UUID) — keep this ID in mind for possible later update.
   IMPORTANT: Call memory_save only ONCE per piece of information. Combine all related details into a single call. Do NOT make multiple memory_save calls for the same fact.
 

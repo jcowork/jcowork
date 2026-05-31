@@ -31,8 +31,8 @@ impl Tool for MemorySaveTool {
                 },
                 "category": {
                     "type": "string",
-                    "description": "Category for this memory. Use: 'life_event' for daily activities/events, 'preference' for user preferences, 'environment' for env/tool facts, 'convention' for coding/work conventions, 'person' for info about people, 'general' as fallback.",
-                    "enum": ["life_event", "preference", "environment", "convention", "person", "general"],
+                    "description": "Category for this memory. Use: 'life_event' for daily activities/events, 'preference' for user preferences, 'environment' for env/tool facts, 'convention' for coding/work conventions, 'person' for info about people, 'habit' for personal development habits and frameworks, 'general' as fallback.",
+                    "enum": ["life_event", "preference", "environment", "convention", "person", "habit", "general"],
                     "default": "general"
                 }
             },
@@ -81,7 +81,7 @@ impl Tool for MemoryUpdateTool {
                 "category": {
                     "type": "string",
                     "description": "Optionally change the category",
-                    "enum": ["life_event", "preference", "environment", "convention", "person", "general"]
+                    "enum": ["life_event", "preference", "environment", "convention", "person", "habit", "general"]
                 }
             },
             "required": ["id", "content"]

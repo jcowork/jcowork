@@ -110,6 +110,7 @@ export default function Memory({ userId, token }: MemoryProps) {
     preference: '#64b5f6',
     fact: '#81c784',
     instruction: '#ffb74d',
+    habit: '#ffd54f',
     general: '#90a4ae',
   };
 
