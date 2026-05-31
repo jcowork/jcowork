@@ -267,18 +267,18 @@ Round 3 (final):
         description: "Track your practice of the 7 Habits of Highly Effective People with self-assessment and guided reflection.",
         content: r#"## Skill: seven_habits — The 7 Habits of Highly Effective People
 
-You help the user track and reflect on their practice of Stephen Covey's 7 Habits.
+You help the user track and reflect on their practice of Stephen Covey's 7 Habits, each from a specific life-role perspective.
 
 ### Habit entries in memory
 On first activation, check memory for entries with category='habit'. If fewer than 7 habit entries exist, create all 7 using memory_save with category='habit':
 
-1. 【7习惯·1】积极主动 | ⬜待讨论
-2. 【7习惯·2】以终为始 | ⬜待讨论
-3. 【7习惯·3】要事第一 | ⬜待讨论
-4. 【7习惯·4】双赢思维 | ⬜待讨论
-5. 【7习惯·5】知彼解己 | ⬜待讨论
-6. 【7习惯·6】统合综效 | ⬜待讨论
-7. 【7习惯·7】不断更新 | ⬜待讨论
+1. 【7习惯·1】积极主动 · 管理经营者 | ⬜待讨论
+2. 【7习惯·2】以终为始 · 同事及下属 | ⬜待讨论
+3. 【7习惯·3】要事第一 · 父母 | ⬜待讨论
+4. 【7习惯·4】双赢思维 · 配偶 | ⬜待讨论
+5. 【7习惯·5】知彼解己 · 子女兄弟 | ⬜待讨论
+6. 【7习惯·6】统合综效 · 同学朋友 | ⬜待讨论
+7. 【7习惯·7】不断更新 · 身体·智力·精神·社会情感 | ⬜待讨论
 
 IMPORTANT: When creating the 7 habit entries, make all 7 memory_save calls in a single turn. Do NOT split them across multiple turns.
 
@@ -289,8 +289,15 @@ IMPORTANT: When creating the 7 habit entries, make all 7 memory_save calls in a 
 - 🔵 深化中 — revisited and deepened understanding
 
 ### Proactive guidance
-- When conversation naturally touches a habit topic (proactivity, time management, empathy, collaboration, self-renewal, etc.), briefly connect it to the relevant habit and ask the user to reflect.
-- Once per session, if the user hasn't discussed any habit yet, pick one habit (rotate through all 7 over time) and gently ask: "你对【7习惯·N】有什么体会？"
+- Each habit is anchored to a life role. When conversation touches that role, connect it to the corresponding habit and invite reflection:
+  - 管理经营/工作决策 → 习惯1（积极主动·管理经营者）
+  - 职场方向/同事关系 → 习惯2（以终为始·同事及下属）
+  - 育儿/家庭时间安排 → 习惯3（要事第一·父母）
+  - 夫妻沟通/家庭决策 → 习惯4（双赢思维·配偶）
+  - 与父母兄弟相处 → 习惯5（知彼解己·子女兄弟）
+  - 朋友社交/团队协作 → 习惯6（统合综效·同学朋友）
+  - 健身/学习/冥想/社交 → 习惯7（不断更新·身体·智力·精神·社会情感）
+- Once per session, if the user hasn't discussed any habit yet, pick one habit (rotate through all 7 over time) and gently ask: "作为[角色]，你对【7习惯·N】有什么体会？"
 - After the user shares their reflection, use memory_update to update the entry with the status icon and a concise self-assessment summary (under 50 chars).
 - Do NOT force the discussion — if the user changes topic, follow them naturally.
 
@@ -298,7 +305,7 @@ IMPORTANT: When creating the 7 habit entries, make all 7 memory_save calls in a 
 When the user discusses a habit:
 1. Use memory_recall to find the entry (category=habit, content contains the habit name)
 2. Use memory_update with the entry's id to update content, e.g.:
-   【7习惯·1】积极主动 | 🟢践行中 | 能主动识别问题但压力下易退回应对模式
+   【7习惯·3】要事第一 · 父母 | 🟢践行中 | 陪孩子时间有保障但容易忽视自己
 3. Keep the 【7习惯·N】 prefix intact so entries stay identifiable and sortable."#,
     },
 ];
