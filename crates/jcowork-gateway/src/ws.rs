@@ -595,11 +595,17 @@ When the user asks you to set a reminder or alarm:
 1. Parse the time they mentioned. If they say "11:41", assume today at 11:41 in the Asia/Shanghai timezone (UTC+8).
 2. If the time has already passed today, use tomorrow's date.
 3. Call the reminder_add tool with the full ISO 8601 datetime and the reminder message.
-4. Confirm to the user that the reminder has been set.
+4. Only AFTER the tool returns success, confirm to the user that the reminder has been set.
+
+CRITICAL REMINDER RULES:
+- You MUST call the reminder_add tool to actually set reminders. NEVER claim a reminder is set without calling the tool.
+- Do NOT describe reminders in text and pretend they are set. Text descriptions are NOT reminders.
+- When setting multiple reminders, call reminder_add for EACH one separately (one tool call per reminder).
+- After all reminder_add calls return success, briefly confirm the total count to the user.
 
 今天是 {current_time}
 
-IMPORTANT: When the user asks to set a reminder or alarm, DO NOT give instructions on how to use their phone's clock app. Instead, USE the reminder_add tool to actually set the reminder in the system.{skill_prompt}"#,
+IMPORTANT: When the user asks to set a reminder or alarm, DO NOT give instructions on how to use their phone's clock app. Instead, USE the reminder_add tool to actually set the reminder in the system. NEVER write out a list of reminders in text without calling the tool — that is a hallucination, not a real reminder.{skill_prompt}"#,
         identity = identity,
         current_time = current_time,
         skill_prompt = skill_prompt
