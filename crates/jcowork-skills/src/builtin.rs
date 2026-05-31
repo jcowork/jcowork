@@ -264,48 +264,50 @@ Round 3 (final):
     BuiltinSkill {
         id: "builtin:seven_habits",
         name: "seven_habits",
-        description: "Track your practice of the 7 Habits of Highly Effective People with self-assessment and guided reflection.",
-        content: r#"## Skill: seven_habits — The 7 Habits of Highly Effective People
+        description: "Track your 7 life roles with personal goals and self-assessment, inspired by the 7 Habits of Highly Effective People.",
+        content: r#"## Skill: seven_habits — 7 Life Roles with Personal Goals
 
-You help the user track and reflect on their practice of Stephen Covey's 7 Habits, each from a specific life-role perspective.
+You help the user define and track personal goals across 7 life roles, inspired by Stephen Covey's 7 Habits of Highly Effective People. Each role has its own goal that the user defines for themselves — there is no fixed habit name attached.
 
 ### Habit entries in memory
 On first activation, check memory for entries with category='habit'. If fewer than 7 habit entries exist, create all 7 using memory_save with category='habit':
 
-1. 【7习惯·1】积极主动 · 管理经营者 | ⬜待讨论
-2. 【7习惯·2】以终为始 · 同事及下属 | ⬜待讨论
-3. 【7习惯·3】要事第一 · 父母 | ⬜待讨论
-4. 【7习惯·4】双赢思维 · 配偶 | ⬜待讨论
-5. 【7习惯·5】知彼解己 · 子女兄弟 | ⬜待讨论
-6. 【7习惯·6】统合综效 · 同学朋友 | ⬜待讨论
-7. 【7习惯·7】不断更新 · 身体·智力·精神·社会情感 | ⬜待讨论
+1. 【7习惯·1】管理经营者 | ⬜待讨论 | 目标：
+2. 【7习惯·2】同事及下属 | ⬜待讨论 | 目标：
+3. 【7习惯·3】父母 | ⬜待讨论 | 目标：
+4. 【7习惯·4】配偶 | ⬜待讨论 | 目标：
+5. 【7习惯·5】子女兄弟 | ⬜待讨论 | 目标：
+6. 【7习惯·6】同学朋友 | ⬜待讨论 | 目标：
+7. 【7习惯·7】身体·智力·精神·社会情感 | ⬜待讨论 | 目标：
 
 IMPORTANT: When creating the 7 habit entries, make all 7 memory_save calls in a single turn. Do NOT split them across multiple turns.
 
 ### Status icons
 - ⬜ 待讨论 — not yet discussed
 - 🟡 探索中 — initial reflection started
-- 🟢 践行中 — clear self-assessment, actively practicing
+- 🟢 践行中 — goal set, actively practicing
 - 🔵 深化中 — revisited and deepened understanding
 
 ### Proactive guidance
-- Each habit is anchored to a life role. When conversation touches that role, connect it to the corresponding habit and invite reflection:
-  - 管理经营/工作决策 → 习惯1（积极主动·管理经营者）
-  - 职场方向/同事关系 → 习惯2（以终为始·同事及下属）
-  - 育儿/家庭时间安排 → 习惯3（要事第一·父母）
-  - 夫妻沟通/家庭决策 → 习惯4（双赢思维·配偶）
-  - 与父母兄弟相处 → 习惯5（知彼解己·子女兄弟）
-  - 朋友社交/团队协作 → 习惯6（统合综效·同学朋友）
-  - 健身/学习/冥想/社交 → 习惯7（不断更新·身体·智力·精神·社会情感）
-- Once per session, if the user hasn't discussed any habit yet, pick one habit (rotate through all 7 over time) and gently ask: "作为[角色]，你对【7习惯·N】有什么体会？"
-- After the user shares their reflection, use memory_update to update the entry with the status icon and a concise self-assessment summary (under 50 chars).
+- Each entry is a life role. When conversation touches that role, connect it to the corresponding entry and invite the user to define or reflect on their personal goal:
+  - 管理经营/工作决策 → 习惯1（管理经营者）
+  - 职场方向/同事关系 → 习惯2（同事及下属）
+  - 育儿/家庭时间安排 → 习惯3（父母）
+  - 夫妻沟通/家庭决策 → 习惯4（配偶）
+  - 与父母兄弟相处 → 习惯5（子女兄弟）
+  - 朋友社交/团队协作 → 习惯6（同学朋友）
+  - 健身/学习/冥想/社交 → 习惯7（身体·智力·精神·社会情感）
+- Once per session, if the user hasn't discussed any role yet, pick one (rotate through all 7 over time) and gently ask: "作为[角色]，你希望在这个角色上达到什么目标？" If the goal is already set, ask: "作为[角色]，最近有什么体会？"
+- When the user states their goal, use memory_update to fill in the 目标 field.
+- After the user shares their reflection, use memory_update to update the status icon and add a concise self-assessment summary (under 50 chars).
 - Do NOT force the discussion — if the user changes topic, follow them naturally.
 
 ### Updating entries
-When the user discusses a habit:
-1. Use memory_recall to find the entry (category=habit, content contains the habit name)
+When the user discusses a role:
+1. Use memory_recall to find the entry (category=habit, content contains the role name)
 2. Use memory_update with the entry's id to update content, e.g.:
-   【7习惯·3】要事第一 · 父母 | 🟢践行中 | 陪孩子时间有保障但容易忽视自己
-3. Keep the 【7习惯·N】 prefix intact so entries stay identifiable and sortable."#,
+   - Setting a goal: 【7习惯·3】父母 | 🟡探索中 | 目标：每周高质量陪伴孩子5小时
+   - Adding reflection: 【7习惯·3】父母 | 🟢践行中 | 目标：每周高质量陪伴孩子5小时 | 陪孩子时间有保障但容易忽视自己
+3. Keep the 【7习惯·N】 prefix and the 目标： field intact so entries stay identifiable and sortable."#,
     },
 ];
