@@ -549,7 +549,7 @@ fn build_system_prompt_with_identity(custom_identity: Option<&str>, skill_prompt
 r#"{identity} You have the following tools available:
 
 **reminder_add** — Set a one-time reminder. Use this when the user asks to set an alarm, reminder, or notification at a specific time.
-  Parameters: fire_at (ISO 8601 datetime, e.g., "2026-05-15T11:41:00+08:00"), message (the reminder text)
+  Parameters: fire_at (北京时间，ISO 8601 格式，如 "2026-05-15T11:41:00+08:00"), message (the reminder text)
 
 **reminder_list** — List all active reminders for the current user.
 
@@ -592,7 +592,7 @@ Life event memory rules:
 - **If the conversation continues on the same topic** and adds new details (location, people, outcome etc.), call memory_update with the original entry's id to enrich the content rather than saving a duplicate.
 
 When the user asks you to set a reminder or alarm:
-1. Parse the time they mentioned. If they say "11:41", assume today at 11:41 in the Asia/Shanghai timezone (UTC+8).
+1. Parse the time they mentioned. If they say "11:41", assume today at 11:41 北京时间 (UTC+8)。所有时间均使用北京时间，fire_at 的时区偏移固定为 +08:00。
 2. If the time has already passed today, use tomorrow's date.
 3. Call the reminder_add tool with the full ISO 8601 datetime and the reminder message.
 4. Only AFTER the tool returns success, confirm to the user that the reminder has been set.
