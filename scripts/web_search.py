@@ -29,7 +29,24 @@ SYSTEM_CHROME_PATHS = [
     # macOS
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    # Windows (common install locations)
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files\Chromium\Application\chrome.exe",
+    r"C:\Program Files (x86)\Chromium\Application\chrome.exe",
 ]
+
+# Windows: also search via environment variables and registry
+if sys.platform == "win32":
+    import os
+    _pf = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+    _pf86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
+    _local = os.environ.get("LOCALAPPDATA", "")
+    SYSTEM_CHROME_PATHS.extend([
+        os.path.join(_pf, "Google", "Chrome", "Application", "chrome.exe"),
+        os.path.join(_pf86, "Google", "Chrome", "Application", "chrome.exe"),
+        os.path.join(_local, "Google", "Chrome", "Application", "chrome.exe"),
+    ])
 
 
 def find_chrome() -> str | None:
@@ -37,7 +54,12 @@ def find_chrome() -> str | None:
     for path in SYSTEM_CHROME_PATHS:
         if os.path.exists(path):
             return path
-    return shutil.which("google-chrome") or shutil.which("chromium")
+    # Fallback: search PATH
+    for name in (["google-chrome", "chromium", "chromium-browser"] if sys.platform != "win32" else ["chrome.exe", "chromium.exe"]):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
 
 
 async def _make_browser(p):

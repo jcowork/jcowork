@@ -69,6 +69,7 @@ fn default_data_dir() -> String {
 
 fn dirs_home() -> PathBuf {
     std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/tmp"))
 }

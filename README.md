@@ -132,6 +132,16 @@ sudo apt-get update && sudo apt-get install -y build-essential pkg-config libssl
 
 </details>
 
+<details>
+<summary>Windows 11 setup notes</summary>
+
+- Install [Python 3.12+](https://www.python.org/downloads/) (check "Add to PATH")
+- Install [Node.js 18+](https://nodejs.org/) (includes npm)
+- Install [Rust via rustup](https://www.rust-lang.org/tools/install) — the Windows installer includes MSVC build tools
+- Or install Visual Studio Build Tools manually: `winget install Microsoft.VisualStudio.2022.BuildTools --override '--add Microsoft.VisualStudio.Workload.VCTools --quiet'`
+
+</details>
+
 ### 1. Install Rust
 
 ```bash
@@ -155,14 +165,17 @@ cp .env.example .env
 
 ### 3. Setup Python Environment (for web search & PDF parsing)
 
+**Linux / macOS:**
 ```bash
-# One-command setup: creates ~/.jcowork/venv with playwright + pdftext
 make setup-python
-# Or manually:
-# bash scripts/setup-python.sh
 ```
 
-This creates a Python venv at `~/.jcowork/venv` with:
+**Windows (PowerShell):**
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup-python.ps1
+```
+
+This creates a Python venv with:
 - **playwright** — headless browser for web search (Sogou WAP + Bing fallback)
 - **pdftext** — offline PDF text extraction for report parsing
 

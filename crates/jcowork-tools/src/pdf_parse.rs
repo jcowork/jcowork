@@ -15,8 +15,17 @@ use crate::base::{Tool, ToolContext};
 /// Maximum output size (200KB). Parsed PDFs can be very large; truncation prevents token overflow.
 const MAX_OUTPUT_BYTES: usize = 200 * 1024;
 
-/// Python interpreter inside the jcowork venv (has pdftext pre-installed).
-const PYTHON_BIN: &str = "~/.jcowork/venv/bin/python";
+/// Resolve the Python binary path in the jcowork venv.
+/// On Unix: ~/.jcowork/venv/bin/python
+/// On Windows: ~/.jcowork/venv/Scripts/python.exe
+fn resolve_python_bin() -> String {
+    let base = shellexpand::tilde("~/.jcowork/venv").to_string();
+    if cfg!(windows) {
+        format!("{}\\Scripts\\python.exe", base)
+    } else {
+        format!("{}/bin/python", base)
+    }
+}
 
 /// Inline Python script for PDF text extraction using pdftext.
 /// pdftext uses pypdfium2 for layout analysis and works fully offline.
@@ -118,12 +127,12 @@ impl Tool for PdfParseTool {
             anyhow::bail!("Path does not exist: {}", expanded_path);
         }
 
-        // Expand python binary path
-        let python_bin = shellexpand::tilde(PYTHON_BIN).to_string();
+        // Resolve python binary path
+        let python_bin = resolve_python_bin();
 
         if !Path::new(&python_bin).exists() {
             anyhow::bail!(
-                "Python not found at {}. Run: bash scripts/setup-python.sh",
+                "Python not found at {}. Run: scripts/setup-python.sh (or setup-python.ps1 on Windows)",
                 python_bin
             );
         }

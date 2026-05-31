@@ -37,8 +37,12 @@ setup:
 	mkdir -p ~/.jcowork/data
 
 # Python venv setup (install playwright + pdftext)
+# On Linux/macOS:
 setup-python:
 	bash scripts/setup-python.sh
+
+# On Windows (PowerShell):
+#   powershell -ExecutionPolicy Bypass -File scripts\setup-python.ps1
 
 # Docker build
 docker:

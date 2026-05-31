@@ -7,8 +7,17 @@ use anyhow::Result;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
-/// Python binary inside the jcowork venv (has pdftext pre-installed).
-const PYTHON_BIN: &str = "~/.jcowork/venv/bin/python";
+/// Resolve the Python binary path in the jcowork venv.
+/// On Unix: ~/.jcowork/venv/bin/python
+/// On Windows: ~/.jcowork/venv/Scripts/python.exe
+fn resolve_python_bin() -> String {
+    let base = shellexpand::tilde("~/.jcowork/venv").to_string();
+    if cfg!(windows) {
+        format!("{}\\Scripts\\python.exe", base)
+    } else {
+        format!("{}/bin/python", base)
+    }
+}
 
 /// Chunk size in characters.
 pub const CHUNK_SIZE: usize = 1000;
@@ -32,7 +41,7 @@ except Exception as e:
 /// Extract plain text from a PDF file using pdftext.
 /// Returns the full extracted text string.
 pub async fn extract_text(pdf_path: &str) -> Result<String> {
-    let python_bin = shellexpand::tilde(PYTHON_BIN).to_string();
+    let python_bin = resolve_python_bin();
 
     let result = timeout(
         Duration::from_secs(300), // 5 min max for large PDFs

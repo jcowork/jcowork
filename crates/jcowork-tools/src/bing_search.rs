@@ -12,8 +12,18 @@ use tokio::time::{timeout, Duration};
 
 use crate::base::{Tool, ToolContext};
 
-/// Path to the Python binary in the jcowork venv.
-const PYTHON_BIN: &str = "~/.jcowork/venv/bin/python";
+/// Resolve the Python binary path in the jcowork venv.
+/// On Unix: ~/.jcowork/venv/bin/python
+/// On Windows: ~/.jcowork/venv/Scripts/python.exe
+fn resolve_python_bin() -> String {
+    let base = shellexpand::tilde("~/.jcowork/venv").to_string();
+    if cfg!(windows) {
+        format!("{}\\Scripts\\python.exe", base)
+    } else {
+        format!("{}/bin/python", base)
+    }
+}
+
 /// Path to the search script (relative to workspace root or absolute).
 const SEARCH_SCRIPT: &str = "scripts/web_search.py";
 
@@ -69,20 +79,20 @@ impl Tool for WebSearchTool {
             .ok_or_else(|| anyhow::anyhow!("Missing 'query' parameter"))?;
         let num_results = params["num_results"].as_u64().unwrap_or(20).min(20);
 
-        let python_bin = shellexpand::tilde(PYTHON_BIN).to_string();
+        let python_bin = resolve_python_bin();
 
         // Resolve script path: try absolute first, then relative to workspace root
         let script_path = {
-            let abs = format!("{}/{}", self.workspace_root, SEARCH_SCRIPT);
-            if std::path::Path::new(&abs).exists() {
-                abs
+            let abs = std::path::Path::new(&self.workspace_root).join(SEARCH_SCRIPT);
+            if abs.exists() {
+                abs.to_string_lossy().to_string()
             } else {
                 // Fallback: try next to the binary
                 let exe_dir = std::env::current_exe()
                     .ok()
                     .and_then(|p| p.parent().map(|d| d.to_string_lossy().to_string()))
                     .unwrap_or_default();
-                format!("{}/{}", exe_dir, SEARCH_SCRIPT)
+                std::path::Path::new(&exe_dir).join(SEARCH_SCRIPT).to_string_lossy().to_string()
             }
         };
 

@@ -132,6 +132,16 @@ sudo apt-get update && sudo apt-get install -y build-essential pkg-config libssl
 
 </details>
 
+<details>
+<summary>Windows 11 安装说明</summary>
+
+- 安装 [Python 3.12+](https://www.python.org/downloads/)（勾选 "Add to PATH"）
+- 安装 [Node.js 18+](https://nodejs.org/)（包含 npm）
+- 安装 [Rust（via rustup）](https://www.rust-lang.org/tools/install) — Windows 安装程序自带 MSVC 构建工具
+- 或手动安装 Visual Studio Build Tools：`winget install Microsoft.VisualStudio.2022.BuildTools --override '--add Microsoft.VisualStudio.Workload.VCTools --quiet'`
+
+</details>
+
 ### 1. 安装 Rust
 
 ```bash
@@ -155,14 +165,17 @@ cp .env.example .env
 
 ### 3. 配置 Python 环境（用于网页搜索和 PDF 解析）
 
+**Linux / macOS：**
 ```bash
-# 一键安装：创建 ~/.jcowork/venv 并安装 playwright + pdftext
 make setup-python
-# 或手动运行：
-# bash scripts/setup-python.sh
 ```
 
-此命令会在 `~/.jcowork/venv` 创建 Python 虚拟环境，包含：
+**Windows (PowerShell)：**
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup-python.ps1
+```
+
+此命令会创建 Python 虚拟环境，包含：
 - **playwright** — 无头浏览器，用于网页搜索（搜狗 WAP + Bing 备用）
 - **pdftext** — 离线 PDF 文本提取，用于报告解析
 
