@@ -30,7 +30,9 @@ const MEMORY_GUIDANCE: &str = "You have persistent memory across sessions. Save 
     Do NOT save task progress, session outcomes, completed-work logs, or temporary TODO \
     state to memory.\n\
     Write memories as declarative facts, not instructions to yourself. \
-    'User prefers concise responses' — not 'Always respond concisely'.";
+    'User prefers concise responses' — not 'Always respond concisely'.\n\
+    CRITICAL: Call memory_save only ONCE per fact or event. Combine all related details \
+    into a single call. NEVER make duplicate or parallel memory_save calls for the same information.";
 
 const SKILLS_GUIDANCE: &str = "After completing a complex task (5+ tool calls), fixing a tricky error, \
     or discovering a non-trivial workflow, save the approach as a \

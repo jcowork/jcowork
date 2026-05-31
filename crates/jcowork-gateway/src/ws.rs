@@ -364,8 +364,21 @@ pub async fn ws_handler(
                         break;
                     }
 
-                    // Dispatch tool calls
+                    // Dispatch tool calls (skip empty-argument calls — some LLMs emit ghost tool calls)
                     for tc in &tool_calls {
+                        if tc.function.arguments.trim().is_empty() {
+                            tracing::debug!(tool = %tc.function.name, call_id = %tc.id, "Skipping tool call with empty arguments");
+                            // Add error result to history so the LLM sees the feedback
+                            history.push(ChatMessage {
+                                role: "tool".to_string(),
+                                content: "Error: tool call had empty arguments, skipped".to_string(),
+                                tool_calls: None,
+                                tool_call_id: Some(tc.id.clone()),
+                                reasoning_content: None,
+                            });
+                            continue;
+                        }
+
                         let tool_start = std::time::Instant::now();
                         let result = tool_registry
                             .dispatch(&tc.function.name, &tc.function.arguments, &tool_ctx)
@@ -551,6 +564,7 @@ r#"{identity} You have the following tools available:
 **memory_save** — Save a durable fact or life event to persistent memory.
   Parameters: content (declarative statement), category ('life_event' | 'preference' | 'environment' | 'convention' | 'person' | 'general')
   Returns: the saved entry including its `id` (UUID) — keep this ID in mind for possible later update.
+  IMPORTANT: Call memory_save only ONCE per piece of information. Combine all related details into a single call. Do NOT make multiple memory_save calls for the same fact.
 
 **memory_update** — Update an existing memory entry with new or enriched content.
   Parameters: id (UUID from memory_save), content (full updated text), category (optional)
@@ -570,6 +584,7 @@ When to use memory:
   - Completing important tasks or meetings
   Always include the current date/time in the content for life events. Ask for missing details (who, where) only if the event seems significant.
 - DO NOT save purely conversational context with no future value
+- **CRITICAL: Call memory_save only ONCE per fact or event.** If a user mentions multiple related details (e.g., name + family info, preference + condition), combine them into a SINGLE memory_save call. NEVER make duplicate or parallel memory_save calls for the same information.
 
 Life event memory rules:
 - **Never mention the saving action in your reply.** Do NOT say things like "已记录"、"我帮你记下来了"、"已保存" etc. Just respond naturally to what the user said.
