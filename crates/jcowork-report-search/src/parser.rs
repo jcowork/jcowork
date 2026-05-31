@@ -7,8 +7,8 @@ use anyhow::Result;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
-/// Python binary inside the MinerU venv (has pdftext pre-installed).
-const PYTHON_BIN: &str = "~/.jcowork/mineru-venv/bin/python";
+/// Python binary inside the jcowork venv (has pdftext pre-installed).
+const PYTHON_BIN: &str = "~/.jcowork/venv/bin/python";
 
 /// Chunk size in characters.
 pub const CHUNK_SIZE: usize = 1000;

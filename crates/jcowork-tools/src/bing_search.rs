@@ -12,8 +12,8 @@ use tokio::time::{timeout, Duration};
 
 use crate::base::{Tool, ToolContext};
 
-/// Path to the Python binary in the MinerU venv.
-const PYTHON_BIN: &str = "~/.jcowork/mineru-venv/bin/python";
+/// Path to the Python binary in the jcowork venv.
+const PYTHON_BIN: &str = "~/.jcowork/venv/bin/python";
 /// Path to the search script (relative to workspace root or absolute).
 const SEARCH_SCRIPT: &str = "scripts/web_search.py";
 

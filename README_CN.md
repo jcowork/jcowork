@@ -38,9 +38,8 @@
 │  ┌──────────┐ ┌──────────┐ ┌──────────────────┐ │
 │  │  SQLite  │ │  文件    │ │  LLM 提供者       │ │
 │  │ (每用户  │ │  存储    │ │ (DeepSeek,Qwen,   │ │
-│  │ 独立DB) │ │ (沙箱化) │ │  Minimax,Moonshot, │ │
-│  └──────────┘ └──────────┘ │  OpenAI,Ollama)   │ │
-│                            └──────────────────┘ │
+│  │ 独立DB) │ │ (沙箱化) │ │  Moonshot,Ollama)  │ │
+│  └──────────┘ └──────────┘ │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -114,16 +113,18 @@ jcowork-server
 
 ### 前置要求
 
-- **Rust** 1.85+（edition 2024）
+- **Rust** 1.85+（edition 2024）— `rustup` 会通过 `rust-toolchain.toml` 自动安装
 - **Node.js** 18+（前端开发）
+- **Python** 3.12+（网页搜索和 PDF 解析工具）
 - **SQLite** 3.35+（需 FTS5 支持，通常已内置）
-- 至少一个 **LLM API Key**（DeepSeek、Qwen、Moonshot、Minimax、OpenAI 等）
+- 至少一个 **LLM API Key**（DeepSeek、Qwen、Moonshot、OpenRouter 等）
 
 ### 1. 安装 Rust
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source ~/.cargo/env
+# rust-toolchain.toml 会在构建时自动选择 Rust 1.85
 ```
 
 ### 2. 配置环境变量
@@ -134,13 +135,25 @@ cp .env.example .env
 #   DEEPSEEK_API_KEY=sk-your-key
 #   QWEN_API_KEY=sk-your-key
 #   MOONSHOT_API_KEY=sk-your-key
-#   MINIMAX_API_KEY=sk-your-key
-#   # 或 OPENAI_API_KEY=sk-your-key
+#   # 或 OPENROUTER_API_KEY=sk-your-key
 # 设置默认模型：
-#   JCWORK_DEFAULT_MODEL=deepseek:deepseek-chat
+#   JCWORK_DEFAULT_MODEL=moonshot:kimi-k2.6
 ```
 
-### 3. 构建与运行（开发模式）
+### 3. 配置 Python 环境（用于网页搜索和 PDF 解析）
+
+```bash
+# 一键安装：创建 ~/.jcowork/venv 并安装 playwright + pdftext
+make setup-python
+# 或手动运行：
+# bash scripts/setup-python.sh
+```
+
+此命令会在 `~/.jcowork/venv` 创建 Python 虚拟环境，包含：
+- **playwright** — 无头浏览器，用于网页搜索（搜狗 WAP + Bing 备用）
+- **pdftext** — 离线 PDF 文本提取，用于报告解析
+
+### 4. 构建与运行（开发模式）
 
 ```bash
 # 构建所有 crate
@@ -154,7 +167,7 @@ make run
 # 服务器运行在 http://localhost:3000
 ```
 
-### 4. 前端（开发模式）
+### 5. 前端（开发模式）
 
 ```bash
 cd web
@@ -163,7 +176,7 @@ npm run dev
 # 前端运行在 http://localhost:5173（API 代理到 :3000）
 ```
 
-### 5. 验证
+### 6. 验证
 
 ```bash
 # 健康检查
@@ -488,15 +501,12 @@ server {
 | `JCWORK_DATA_DIR` | `~/.jcowork/data` | 数据目录（每用户数据库和工作空间） |
 | `JCWORK_JWT_SECRET` | `change-me-in-production` | JWT 签名密钥（生产环境务必修改！） |
 | `JCWORK_TOKEN_DURATION_HOURS` | `24` | JWT token 有效期（小时） |
-| `JCWORK_DEFAULT_MODEL` | `deepseek:deepseek-chat` | 默认 LLM 模型（`provider:model` 格式） |
+| `JCWORK_DEFAULT_MODEL` | `moonshot:kimi-k2.6` | 默认 LLM 模型（`provider:model` 格式） |
 | `DEEPSEEK_API_KEY` | （空） | DeepSeek API Key |
 | `QWEN_API_KEY` | （空） | 通义千问 API Key |
 | `MOONSHOT_API_KEY` | （空） | Moonshot / Kimi K2.x API Key |
-| `MINIMAX_API_KEY` | （空） | Minimax API Key |
-| `OPENAI_API_KEY` | （空） | OpenAI API Key |
 | `OPENROUTER_API_KEY` | （空） | OpenRouter API Key |
 | `<PROVIDER>_BASE_URL` | （预设） | 覆盖任意 Provider 的基础 URL |
-| `SEARXNG_URL` | ~~已移除~~ | 已替换为内置搜狗 WAP 网页搜索 |
 | `JCWORK_IDLE_TIMEOUT` | `300` | UserActor 空闲超时时间（秒） |
 
 ## 支持的 LLM 提供者
@@ -506,26 +516,22 @@ server {
 
 | 提供者 | 环境变量 | 默认模型 | 上下文长度 | API 地址 |
 |--------|---------|---------|-----------|----------|
-| **DeepSeek** | `DEEPSEEK_API_KEY` | `deepseek-chat` | 64K | `api.deepseek.com/v1` |
-| **Qwen** | `QWEN_API_KEY` | `qwen-plus` | 131K | `dashscope.aliyuncs.com/compatible-mode/v1` |
+| **DeepSeek** | `DEEPSEEK_API_KEY` | `deepseek-v4-flash` | 64K | `api.deepseek.com` |
+| **Qwen** | `QWEN_API_KEY` | `qwen3.6-plus` | 131K | `dashscope.aliyuncs.com/compatible-mode/v1` |
 | **Moonshot** | `MOONSHOT_API_KEY` | `kimi-k2.5` | 256K | `api.moonshot.cn/v1` |
-| **Minimax** | `MINIMAX_API_KEY` | `MiniMax-Text-01` | 1M | `api.minimax.chat/v1` |
-| OpenAI | `OPENAI_API_KEY` | `gpt-4o` | 128K | `api.openai.com/v1` |
 | OpenRouter | `OPENROUTER_API_KEY` | `anthropic/claude-3.5-sonnet` | 200K | `openrouter.ai/api/v1` |
-| 本地/Ollama | （无需 key） | `llama3` | 8K | `localhost:11434/v1` |
+| 本地/Ollama | （无需 key） | `qwen3.5:35b-a3b` | 32K | `localhost:11434/v1` |
 
 ### 模型选择
 
 使用 `provider:model` 格式选择模型：
 
 ```
-deepseek:deepseek-chat       # DeepSeek V3
-deepseek:deepseek-reasoner   # DeepSeek R1
-qwen:qwen-max                # 通义千问 Max
+deepseek:deepseek-v4-flash   # DeepSeek V4 Flash
+qwen:qwen3.6-plus            # 通义千问 Qwen3.6 Plus
 moonshot:kimi-k2.6           # Moonshot Kimi K2.6
-minimax:MiniMax-Text-01      # Minimax 1M 上下文
-openai:gpt-4o                # OpenAI GPT-4o
-local:llama3                 # 本地 Ollama
+openrouter:anthropic/claude-3.5-sonnet  # 通过 OpenRouter
+local:qwen3.5:35b-a3b        # 本地 Ollama
 ```
 
 提供者在 API Key 环境变量非空时自动注册。服务器启动时会打印已注册的提供者列表。
@@ -647,7 +653,7 @@ Agent: ✅ 定时任务已创建！计划：0 9 * * * — 每天早上9:00提醒
 
 7. **上下文压缩** — 当接近 token 上限时，压缩旧消息同时保护系统提示和最近上下文。
 
-8. **静态二进制** — Docker 构建产出单一二进制文件，无运行时依赖。
+8. **静态二进制** — 单一二进制文件，无运行时依赖。
 
 ## 技术栈
 
@@ -658,10 +664,9 @@ Agent: ✅ 定时任务已创建！计划：0 9 * * * — 每天早上9:00提醒
 | Web 框架 | axum |
 | 数据库 | SQLite (sqlx, WAL 模式, FTS5) |
 | 认证 | JWT (jsonwebtoken) + Argon2 |
-| LLM 客户端 | reqwest + SSE 流式（7 个提供者） |
+| LLM 客户端 | reqwest + SSE 流式（5 个提供者） |
 | 并发 | DashMap, mpsc channels |
 | 前端 | React + Vite + TypeScript |
-| 容器 | Docker 多阶段构建 |
 
 ## 许可证
 

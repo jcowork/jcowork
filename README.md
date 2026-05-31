@@ -38,8 +38,7 @@ English | [中文](./README_CN.md)
 │  ┌──────────┐ ┌──────────┐ ┌──────────────────┐ │
 │  │  SQLite  │ │  File    │ │  LLM Providers    │ │
 │  │ (per-user│ │  Store   │ │ (DeepSeek,Qwen,   │ │
-│  │  WAL)    │ │ (sandbox)│ │  Minimax,Moonshot, │ │
-│  └──────────┘ └──────────┘ │  OpenAI,Ollama)   │ │
+│  │  WAL)    │ │ (sandbox)│ │  Moonshot,Ollama)  │ │
 │                            └──────────────────┘ │
 └─────────────────────────────────────────────────┘
 ```
@@ -114,16 +113,18 @@ jcowork-server
 
 ### Prerequisites
 
-- **Rust** 1.85+ (edition 2024)
+- **Rust** 1.85+ (edition 2024) — `rustup` will auto-install via `rust-toolchain.toml`
 - **Node.js** 18+ (for frontend)
+- **Python** 3.12+ (for web search & PDF parsing tools)
 - **SQLite** 3.35+ (with FTS5 support, usually built-in)
-- An **LLM API key** for at least one provider (DeepSeek, Qwen, Moonshot, Minimax, OpenAI, etc.)
+- An **LLM API key** for at least one provider (DeepSeek, Qwen, Moonshot, OpenRouter, etc.)
 
 ### 1. Install Rust
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source ~/.cargo/env
+# rust-toolchain.toml will auto-select Rust 1.85 when you build
 ```
 
 ### 2. Configure Environment
@@ -134,13 +135,25 @@ cp .env.example .env
 #   DEEPSEEK_API_KEY=sk-your-key
 #   QWEN_API_KEY=sk-your-key
 #   MOONSHOT_API_KEY=sk-your-key
-#   MINIMAX_API_KEY=sk-your-key
-#   # or OPENAI_API_KEY=sk-your-key
+#   # or OPENROUTER_API_KEY=sk-your-key
 # Set default model:
-#   JCWORK_DEFAULT_MODEL=deepseek:deepseek-chat
+#   JCWORK_DEFAULT_MODEL=moonshot:kimi-k2.6
 ```
 
-### 3. Build & Run (Development)
+### 3. Setup Python Environment (for web search & PDF parsing)
+
+```bash
+# One-command setup: creates ~/.jcowork/venv with playwright + pdftext
+make setup-python
+# Or manually:
+# bash scripts/setup-python.sh
+```
+
+This creates a Python venv at `~/.jcowork/venv` with:
+- **playwright** — headless browser for web search (Sogou WAP + Bing fallback)
+- **pdftext** — offline PDF text extraction for report parsing
+
+### 4. Build & Run (Development)
 
 ```bash
 # Build all crates
@@ -154,7 +167,7 @@ make run
 # Server starts at http://localhost:3000
 ```
 
-### 4. Frontend (Development)
+### 5. Frontend (Development)
 
 ```bash
 cd web
@@ -163,7 +176,7 @@ npm run dev
 # Frontend starts at http://localhost:5173 (proxies API to :3000)
 ```
 
-### 5. Verify
+### 6. Verify
 
 ```bash
 # Health check
@@ -489,15 +502,12 @@ All config via environment variables:
 | `JCWORK_DATA_DIR` | `~/.jcowork/data` | Data directory for per-user DBs and workspaces |
 | `JCWORK_JWT_SECRET` | `change-me-in-production` | JWT signing secret (CHANGE IN PRODUCTION!) |
 | `JCWORK_TOKEN_DURATION_HOURS` | `24` | JWT token expiry |
-| `JCWORK_DEFAULT_MODEL` | `deepseek:deepseek-chat` | Default LLM model (`provider:model` format) |
+| `JCWORK_DEFAULT_MODEL` | `moonshot:kimi-k2.6` | Default LLM model (`provider:model` format) |
 | `DEEPSEEK_API_KEY` | (empty) | DeepSeek API key |
 | `QWEN_API_KEY` | (empty) | Qwen / Tongyi Qianwen API key |
 | `MOONSHOT_API_KEY` | (empty) | Moonshot / Kimi K2.x API key |
-| `MINIMAX_API_KEY` | (empty) | Minimax API key |
-| `OPENAI_API_KEY` | (empty) | OpenAI API key |
 | `OPENROUTER_API_KEY` | (empty) | OpenRouter API key |
 | `<PROVIDER>_BASE_URL` | (preset) | Override any provider's base URL |
-| `SEARXNG_URL` | ~~removed~~ | Replaced by built-in Sogou WAP web search |
 | `JCWORK_IDLE_TIMEOUT` | `300` | UserActor idle timeout in seconds |
 
 ## Supported LLM Providers
@@ -507,26 +517,22 @@ Provider and model definitions are loaded from `providers.json` (see [providers.
 
 | Provider | Env Key | Default Model | Context | Base URL |
 |----------|---------|--------------|---------|----------|
-| **DeepSeek** | `DEEPSEEK_API_KEY` | `deepseek-chat` | 64K | `api.deepseek.com/v1` |
-| **Qwen** | `QWEN_API_KEY` | `qwen-plus` | 131K | `dashscope.aliyuncs.com/compatible-mode/v1` |
+| **DeepSeek** | `DEEPSEEK_API_KEY` | `deepseek-v4-flash` | 64K | `api.deepseek.com` |
+| **Qwen** | `QWEN_API_KEY` | `qwen3.6-plus` | 131K | `dashscope.aliyuncs.com/compatible-mode/v1` |
 | **Moonshot** | `MOONSHOT_API_KEY` | `kimi-k2.5` | 256K | `api.moonshot.cn/v1` |
-| **Minimax** | `MINIMAX_API_KEY` | `MiniMax-Text-01` | 1M | `api.minimax.chat/v1` |
-| OpenAI | `OPENAI_API_KEY` | `gpt-4o` | 128K | `api.openai.com/v1` |
 | OpenRouter | `OPENROUTER_API_KEY` | `anthropic/claude-3.5-sonnet` | 200K | `openrouter.ai/api/v1` |
-| Local/Ollama | (none) | `llama3` | 8K | `localhost:11434/v1` |
+| Local/Ollama | (none) | `qwen3.5:35b-a3b` | 32K | `localhost:11434/v1` |
 
 ### Model Selection
 
 Use the `provider:model` format to select models:
 
 ```
-deepseek:deepseek-chat       # DeepSeek V3
-deepseek:deepseek-reasoner   # DeepSeek R1
-qwen:qwen-max                # Qwen Max
+deepseek:deepseek-v4-flash   # DeepSeek V4 Flash
+qwen:qwen3.6-plus            # Qwen3.6 Plus
 moonshot:kimi-k2.6           # Moonshot Kimi K2.6
-minimax:MiniMax-Text-01      # Minimax 1M context
-openai:gpt-4o                # OpenAI GPT-4o
-local:llama3                 # Local Ollama
+openrouter:anthropic/claude-3.5-sonnet  # via OpenRouter
+local:qwen3.5:35b-a3b        # Local Ollama
 ```
 
 Providers auto-register when their API key env var is non-empty. The server logs available providers on startup.
@@ -648,7 +654,7 @@ Agent: ✅ Cron job created! Schedule: 0 9 * * * — 每天早上9:00提醒你�
 
 7. **Context compression** — When approaching token limits, older messages are summarized while protecting the system prompt and recent context.
 
-8. **Static binary** — Docker build produces a single binary, no runtime dependencies.
+8. **Static binary** — Single binary with no runtime dependencies.
 
 ## Technology Stack
 
@@ -659,10 +665,9 @@ Agent: ✅ Cron job created! Schedule: 0 9 * * * — 每天早上9:00提醒你�
 | Web framework | axum |
 | Database | SQLite (sqlx, WAL mode, FTS5) |
 | Auth | JWT (jsonwebtoken) + Argon2 |
-| LLM client | reqwest + SSE streaming (7 providers) |
+| LLM client | reqwest + SSE streaming (5 providers) |
 | Concurrency | DashMap, mpsc channels |
 | Frontend | React + Vite + TypeScript |
-| Container | Docker multi-stage build |
 
 ## License
 

@@ -18,8 +18,6 @@ pub struct ServerConfig {
     pub token_duration_hours: i64,
     /// Default LLM model (format: "provider:model", e.g., "deepseek:deepseek-chat").
     pub default_model: String,
-    /// SearXNG URL for web search.
-    pub searxng_url: String,
     /// User actor idle timeout in seconds.
     pub idle_timeout_secs: u64,
 }
@@ -33,7 +31,6 @@ impl Default for ServerConfig {
             jwt_secret: "change-me-in-production".to_string(),
             token_duration_hours: 24,
             default_model: "moonshot:kimi-k2.6".to_string(),
-            searxng_url: "http://localhost:8888".to_string(),
             idle_timeout_secs: 300,
         }
     }
@@ -58,8 +55,6 @@ impl ServerConfig {
                 .unwrap_or(24),
             default_model: std::env::var("JCWORK_DEFAULT_MODEL")
                 .unwrap_or_else(|_| "moonshot:kimi-k2.6".to_string()),
-            searxng_url: std::env::var("SEARXNG_URL")
-                .unwrap_or_else(|_| "http://localhost:8888".to_string()),
             idle_timeout_secs: std::env::var("JCWORK_IDLE_TIMEOUT")
                 .ok()
                 .and_then(|t| t.parse().ok())

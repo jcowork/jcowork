@@ -1,4 +1,4 @@
-.PHONY: build run run-search test clean check clippy
+.PHONY: build run run-search test clean check clippy setup setup-python
 
 build:
 	cargo build --workspace
@@ -35,6 +35,10 @@ fmt-fix:
 # Database setup (creates data dir and runs migrations)
 setup:
 	mkdir -p ~/.jcowork/data
+
+# Python venv setup (install playwright + pdftext)
+setup-python:
+	bash scripts/setup-python.sh
 
 # Docker build
 docker:

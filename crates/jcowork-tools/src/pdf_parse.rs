@@ -1,7 +1,7 @@
 //! PDF parsing tool - uses pdftext (CPU-only, no AI model download required) to parse
 //! PDF files into LLM-friendly plain text. Supports single files or directories.
 //!
-//! pdftext is from the Surya OCR team and is already bundled in the MinerU venv.
+//! pdftext is from the Surya OCR team.
 //! It works entirely offline using pypdfium2 for layout analysis.
 
 use anyhow::Result;
@@ -15,8 +15,8 @@ use crate::base::{Tool, ToolContext};
 /// Maximum output size (200KB). Parsed PDFs can be very large; truncation prevents token overflow.
 const MAX_OUTPUT_BYTES: usize = 200 * 1024;
 
-/// Python interpreter inside the MinerU venv (has pdftext pre-installed).
-const PYTHON_BIN: &str = "~/.jcowork/mineru-venv/bin/python";
+/// Python interpreter inside the jcowork venv (has pdftext pre-installed).
+const PYTHON_BIN: &str = "~/.jcowork/venv/bin/python";
 
 /// Inline Python script for PDF text extraction using pdftext.
 /// pdftext uses pypdfium2 for layout analysis and works fully offline.
@@ -123,9 +123,7 @@ impl Tool for PdfParseTool {
 
         if !Path::new(&python_bin).exists() {
             anyhow::bail!(
-                "Python not found at {}. Please install MinerU venv: \
-                /opt/homebrew/bin/python3.12 -m venv ~/.jcowork/mineru-venv && \
-                ~/.jcowork/mineru-venv/bin/pip install 'mineru[core]'",
+                "Python not found at {}. Run: bash scripts/setup-python.sh",
                 python_bin
             );
         }
