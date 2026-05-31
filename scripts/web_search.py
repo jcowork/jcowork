@@ -5,7 +5,7 @@ Primary: www.sogou.com  (reliable Chinese search, good relevance)
 Fallback: cn.bing.com   (may have CDN quality issues on some networks)
 
 Usage:
-    python bing_search.py <query> [num_results]
+    python web_search.py <query> [num_results]
 
 Outputs JSON array to stdout:
     [{"title": "...", "url": "...", "snippet": "..."}, ...]
@@ -19,10 +19,16 @@ from playwright.async_api import async_playwright
 
 # Prefer system Chrome/Chromium (less likely to be detected as bot)
 SYSTEM_CHROME_PATHS = [
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    # Linux
+    "/usr/bin/google-chrome-stable",
     "/usr/bin/google-chrome",
     "/usr/bin/chromium-browser",
+    "/usr/bin/chromium",
+    # Ubuntu snap
+    "/snap/bin/chromium",
+    # macOS
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
 ]
 
 
@@ -201,7 +207,7 @@ async def search(query: str, num_results: int = 20) -> list[dict]:
 
 def main():
     if len(sys.argv) < 2:
-        print(json.dumps({"error": "Usage: bing_search.py <query> [num_results]"}))
+        print(json.dumps({"error": "Usage: web_search.py <query> [num_results]"}))
         sys.exit(1)
 
     query = sys.argv[1]

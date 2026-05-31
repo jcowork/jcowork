@@ -119,6 +119,19 @@ jcowork-server
 - **SQLite** 3.35+（需 FTS5 支持，通常已内置）
 - 至少一个 **LLM API Key**（DeepSeek、Qwen、Moonshot、OpenRouter 等）
 
+<details>
+<summary>Ubuntu 24.04 一键安装系统依赖</summary>
+
+```bash
+sudo apt-get update && sudo apt-get install -y build-essential pkg-config libssl-dev python3 python3-venv nodejs npm
+```
+
+- `build-essential` + `pkg-config` + `libssl-dev` — Rust 编译所需（openssl-sys）
+- `python3` + `python3-venv` — Python 运行时和虚拟环境支持
+- `nodejs` + `npm` — 前端构建
+
+</details>
+
 ### 1. 安装 Rust
 
 ```bash
@@ -293,7 +306,7 @@ make check
 
 1. 编辑 `providers.json` — 添加或修改提供者条目
 2. 在 `.env` 中添加 API Key（如 `NEWPROVIDER_API_KEY=sk-xxx`）
-3. 重启服务器：`kill $(lsof -ti:3000) && ./target/release/jcowork &`
+3. 重启服务器：`kill $(pgrep -f 'target/release/jcowork') && ./target/release/jcowork &`
 4. 验证：`curl http://localhost:3000/api/providers`
 
 **修改 API Key 或默认模型**：

@@ -28,6 +28,18 @@ detect_python() {
 SYS_PYTHON=$(detect_python)
 echo "Using system Python: ${SYS_PYTHON} ($(${SYS_PYTHON} --version 2>&1))"
 
+# Install python3-venv on Debian/Ubuntu if missing
+if ! ${SYS_PYTHON} -m venv --help &>/dev/null; then
+    echo "Installing python3-venv (requires sudo)..."
+    if command -v apt-get &>/dev/null; then
+        sudo apt-get update -qq && sudo apt-get install -y -qq python3-venv
+    elif command -v dnf &>/dev/null; then
+        sudo dnf install -y python3-venv
+    else
+        echo "WARNING: Cannot install python3-venv automatically. Install it manually." >&2
+    fi
+fi
+
 # Create venv if it doesn't exist
 if [ ! -f "${PYTHON}" ]; then
     echo "Creating virtual environment..."
@@ -42,9 +54,10 @@ echo "Upgrading pip..."
 echo "Installing Python packages (playwright, pdftext)..."
 "${VENV_DIR}/bin/pip" install --quiet playwright pdftext
 
-# Install Playwright browsers
-echo "Installing Playwright Chromium browser..."
-"${VENV_DIR}/bin/playwright" install chromium
+# Install Playwright browsers with system dependencies
+# --with-deps auto-installs OS libs (libatk, libnspr, etc.) on Linux
+echo "Installing Playwright Chromium browser (+ system dependencies)..."
+"${VENV_DIR}/bin/playwright" install --with-deps chromium
 
 echo ""
 echo "=== Setup Complete ==="

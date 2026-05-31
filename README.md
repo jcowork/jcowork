@@ -119,6 +119,19 @@ jcowork-server
 - **SQLite** 3.35+ (with FTS5 support, usually built-in)
 - An **LLM API key** for at least one provider (DeepSeek, Qwen, Moonshot, OpenRouter, etc.)
 
+<details>
+<summary>Ubuntu 24.04 one-liner for system dependencies</summary>
+
+```bash
+sudo apt-get update && sudo apt-get install -y build-essential pkg-config libssl-dev python3 python3-venv nodejs npm
+```
+
+- `build-essential` + `pkg-config` + `libssl-dev` — required by Rust crates (openssl-sys)
+- `python3` + `python3-venv` — Python runtime and venv support
+- `nodejs` + `npm` — frontend build
+
+</details>
+
 ### 1. Install Rust
 
 ```bash
@@ -293,7 +306,7 @@ make check
 
 1. Edit `providers.json` — add or modify provider entries
 2. Add the API key to `.env` (e.g., `NEWPROVIDER_API_KEY=sk-xxx`)
-3. Restart the server: `kill $(lsof -ti:3000) && ./target/release/jcowork &`
+3. Restart the server: `kill $(pgrep -f 'target/release/jcowork') && ./target/release/jcowork &`
 4. Verify: `curl http://localhost:3000/api/providers`
 
 **To change API keys or default model**:
