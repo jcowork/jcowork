@@ -61,11 +61,19 @@ impl UserStore {
         .await?;
 
         // Add feishu_open_id column if it doesn't exist (migration for existing DBs)
+        // Note: SQLite ALTER TABLE ADD COLUMN doesn't support UNIQUE constraint,
+        // so we add without UNIQUE and create the index separately.
         let _ = sqlx::query(
-            "ALTER TABLE users ADD COLUMN feishu_open_id TEXT UNIQUE",
+            "ALTER TABLE users ADD COLUMN feishu_open_id TEXT",
         )
         .execute(&pool)
         .await; // Ignore error if column already exists
+
+        let _ = sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_feishu_open_id ON users(feishu_open_id)",
+        )
+        .execute(&pool)
+        .await; // Ignore error if index already exists
 
         Ok(Self { pool })
     }
