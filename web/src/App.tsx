@@ -122,7 +122,7 @@ export default function App() {
           <span style={{ width: 30 }} />
         </div>
         {/* Content area with max-width for readability */}
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
           {showSettings ? (
             <Settings onClose={() => setShowSettings(false)} userId={auth.userId} token={auth.token} />
           ) : showSchedule ? (
