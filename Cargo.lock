@@ -1341,7 +1341,6 @@ dependencies = [
  "futures",
  "jcowork-agent",
  "jcowork-cron",
- "jcowork-feishu",
  "jcowork-gateway",
  "jcowork-llm",
  "jcowork-logs",

@@ -151,6 +151,27 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         .execute(pool)
         .await?;
 
+    // Feishu configs table (per-user Feishu app configuration)
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS feishu_configs (
+            user_id TEXT NOT NULL PRIMARY KEY,
+            app_id TEXT NOT NULL UNIQUE,
+            app_secret TEXT NOT NULL,
+            verification_token TEXT NOT NULL DEFAULT '',
+            encrypt_key TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_feishu_configs_app_id ON feishu_configs(app_id)")
+        .execute(pool)
+        .await?;
+
     info!("Database migrations completed");
     Ok(())
 }

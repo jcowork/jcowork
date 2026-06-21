@@ -16,13 +16,14 @@ use std::sync::Arc;
 use crate::auth;
 use crate::session::SessionManager;
 use crate::ws;
+use dashmap::DashMap;
 use jcowork_cron::CronScheduler;
-use jcowork_feishu::{client::FeishuClient, config::FeishuConfig};
+use jcowork_feishu::client::FeishuClient;
 use jcowork_llm::LlmRouter;
 use jcowork_logs::LogWriter;
 use jcowork_memory::MemoryManager;
 use jcowork_skills::{builtin_skills, SkillManager};
-use jcowork_storage::UserStore;
+use jcowork_storage::{FeishuConfigStore, UserStore};
 use jcowork_tools::registry::ToolRegistry;
 
 /// Shared application state.
@@ -38,10 +39,10 @@ pub struct AppState {
     pub tool_registry: Arc<ToolRegistry>,
     pub user_store: Arc<UserStore>,
     pub log_writer: Arc<LogWriter>,
-    /// Feishu bot configuration (None if FEISHU_APP_ID/SECRET not set).
-    pub feishu_config: Option<Arc<FeishuConfig>>,
-    /// Feishu API client (None if not configured).
-    pub feishu_client: Option<Arc<FeishuClient>>,
+    /// Per-user Feishu config store (database-backed).
+    pub feishu_config_store: Arc<FeishuConfigStore>,
+    /// Cache of FeishuClient instances keyed by app_id.
+    pub feishu_client_cache: Arc<DashMap<String, Arc<FeishuClient>>>,
 }
 
 // --- Request/Response types ---
@@ -123,15 +124,11 @@ pub fn build_router(state: AppState) -> Router {
     let auth_mw = axum::middleware::from_fn_with_state(state.clone(), auth_middleware);
 
     // Public routes (no auth required)
-    let mut public = Router::new()
+    let public = Router::new()
         .route("/api/auth/register", post(register))
         .route("/api/auth/login", post(login))
-        .route("/api/health", get(health));
-
-    // Add Feishu event callback route only if Feishu is configured
-    if state.feishu_config.is_some() {
-        public = public.route("/api/feishu/event", post(crate::feishu::feishu_event_handler));
-    }
+        .route("/api/health", get(health))
+        .route("/api/feishu/event", post(crate::feishu::feishu_event_handler));
 
     // Protected routes (auth required)
     let protected = Router::new()
@@ -152,6 +149,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/providers", get(list_providers))
         .route("/api/agent-identity", get(get_agent_identity))
         .route("/api/agent-identity", put(set_agent_identity))
+        .route("/api/feishu/config", get(get_feishu_config))
+        .route("/api/feishu/config", put(set_feishu_config))
+        .route("/api/feishu/config", delete(delete_feishu_config))
         .route("/api/ws", get(ws_upgrade))
         .layer(auth_mw);
 
@@ -653,4 +653,111 @@ async fn ws_upgrade(
     ws.on_upgrade(move |socket| {
         ws::ws_handler(socket, user_id, state.session_manager, state.llm_router, default_model, tool_registry, cron_scheduler, log_writer, memory_manager, skill_manager)
     })
+}
+
+// --- Feishu Config API ---
+
+#[derive(Debug, Serialize)]
+#[allow(dead_code)]
+struct FeishuConfigResponse {
+    app_id: String,
+    app_secret_masked: String,
+    verification_token: String,
+    encrypt_key: String,
+    is_configured: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct FeishuConfigRequest {
+    app_id: String,
+    app_secret: String,
+    verification_token: String,
+    encrypt_key: Option<String>,
+}
+
+async fn get_feishu_config(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+) -> impl IntoResponse {
+    match state.feishu_config_store.get_by_user(&auth_user.user_id).await {
+        Ok(Some(config)) => {
+            let masked = mask_secret(&config.app_secret);
+            (StatusCode::OK, Json(serde_json::json!({
+                "app_id": config.app_id,
+                "app_secret_masked": masked,
+                "verification_token": config.verification_token,
+                "encrypt_key": config.encrypt_key,
+                "is_configured": true,
+            })))
+        }
+        Ok(None) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "app_id": "",
+                "app_secret_masked": "",
+                "verification_token": "",
+                "encrypt_key": "",
+                "is_configured": false,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+async fn set_feishu_config(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Json(req): Json<FeishuConfigRequest>,
+) -> impl IntoResponse {
+    let encrypt_key = req.encrypt_key.unwrap_or_default();
+    match state
+        .feishu_config_store
+        .upsert(
+            &auth_user.user_id,
+            &req.app_id,
+            &req.app_secret,
+            &req.verification_token,
+            &encrypt_key,
+        )
+        .await
+    {
+        Ok(()) => {
+            // Invalidate client cache for this app_id so a fresh client is created next time
+            state.feishu_client_cache.remove(&req.app_id);
+            (StatusCode::OK, Json(serde_json::json!({ "status": "saved" })))
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+async fn delete_feishu_config(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+) -> impl IntoResponse {
+    // Get current config to know which app_id cache to invalidate
+    if let Ok(Some(config)) = state.feishu_config_store.get_by_user(&auth_user.user_id).await {
+        state.feishu_client_cache.remove(&config.app_id);
+    }
+    match state.feishu_config_store.delete(&auth_user.user_id).await {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "status": "deleted" }))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+/// Mask a secret string, showing only the last 4 characters.
+fn mask_secret(secret: &str) -> String {
+    if secret.len() <= 4 {
+        "****".to_string()
+    } else {
+        format!("{}{}", "*".repeat(secret.len() - 4), &secret[secret.len() - 4..])
+    }
 }

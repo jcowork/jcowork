@@ -8,6 +8,7 @@ use axum::Json;
 use axum::response::IntoResponse;
 use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use jcowork_feishu::{crypto, event};
 use jcowork_llm::provider::{ChatMessage, StreamChunk, ToolCall};
@@ -33,30 +34,52 @@ pub async fn feishu_event_handler(
         }
     };
 
+    // Extract app_id from event header to route to the correct user
+    let event_app_id = fe_event.header.as_ref()
+        .and_then(|h| h.app_id.clone())
+        .or_else(|| fe_event.token.clone()); // fallback: some events use token field
+
     // Handle challenge/verification request
     if fe_event.is_challenge() {
         let challenge = fe_event.challenge.as_deref().unwrap_or("");
-        let token = &state.feishu_config.as_ref().map(|c| c.verification_token.clone()).unwrap_or_default();
-        let resp = crypto::challenge_response(challenge, token);
+        // Look up verification token from the config store by app_id
+        let verification_token = if let Some(ref app_id) = event_app_id {
+            state.feishu_config_store.get_by_app_id(app_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|c| c.verification_token)
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let resp = crypto::challenge_response(challenge, &verification_token);
         return (StatusCode::OK, Json(resp));
     }
+
+    // We need an app_id to route the event
+    let app_id = match event_app_id {
+        Some(id) => id,
+        None => {
+            tracing::warn!("Feishu event missing app_id, cannot route");
+            return (StatusCode::OK, Json(serde_json::json!({"status": "ignored"})));
+        }
+    };
 
     // Parse the message from the event
     let msg = match fe_event.parse_message() {
         Some(m) => m,
         None => {
-            // Not a text message or unsupported event type — acknowledge silently
             return (StatusCode::OK, Json(serde_json::json!({"status": "ignored"})));
         }
     };
 
-    tracing::info!(open_id = %msg.open_id, text = %msg.text, "Feishu message received");
+    tracing::info!(app_id = %app_id, open_id = %msg.open_id, text = %msg.text, "Feishu message received");
 
     // Spawn the agent handler in the background so we can return 200 immediately
-    // (Feishu expects a quick response, otherwise it retries)
     let state_clone = state.clone();
     tokio::spawn(async move {
-        if let Err(e) = handle_feishu_message(&state_clone, &msg).await {
+        if let Err(e) = handle_feishu_message(&state_clone, &app_id, &msg).await {
             tracing::error!(err = %e, "Feishu agent handler error");
         }
     });
@@ -65,14 +88,26 @@ pub async fn feishu_event_handler(
 }
 
 /// Process a Feishu message through the agent loop and reply.
-async fn handle_feishu_message(state: &crate::router::AppState, msg: &event::ParsedMessage) -> anyhow::Result<()> {
-    // Get or create jcowork user for this Feishu open_id
-    let user = state.user_store.get_or_create_by_feishu_id(&msg.open_id).await?;
-    let user_id = user.id.clone();
+async fn handle_feishu_message(
+    state: &crate::router::AppState,
+    app_id: &str,
+    msg: &event::ParsedMessage,
+) -> anyhow::Result<()> {
+    // Look up the jcowork user who owns this Feishu app
+    let config = state.feishu_config_store.get_by_app_id(app_id).await?
+        .ok_or_else(|| anyhow::anyhow!("No jcowork user found for Feishu app_id: {}", app_id))?;
+    let user_id = config.user_id.clone();
 
-    // Get Feishu client
-    let feishu_client = state.feishu_client.as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Feishu client not initialized"))?;
+    // Get or create a FeishuClient for this app_id (cached)
+    let feishu_client = state.feishu_client_cache
+        .entry(app_id.to_string())
+        .or_insert_with(|| {
+            Arc::new(jcowork_feishu::client::FeishuClient::new(
+                config.app_id.clone(),
+                config.app_secret.clone(),
+            ))
+        })
+        .clone();
 
     // Load user's custom agent identity from memory
     let custom_identity = load_agent_identity(&state.memory_manager, &user_id).await;

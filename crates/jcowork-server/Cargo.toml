@@ -17,7 +17,6 @@ jcowork-storage = { workspace = true }
 jcowork-llm = { workspace = true }
 jcowork-cron = { workspace = true }
 jcowork-logs = { workspace = true }
-jcowork-feishu = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }
 serde = { workspace = true }
