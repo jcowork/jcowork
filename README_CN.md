@@ -71,7 +71,9 @@ jcowork/
 │   ├── jcowork-tools/                   # Tool trait、注册表、10+ 工具实现
 │   ├── jcowork-llm/                     # LlmProvider trait、JSON 驱动配置、SSE 流式
 │   ├── jcowork-storage/                 # 数据库、迁移、文件存储
-│   └── jcowork-cron/                    # 定时任务调度器
+│   ├── jcowork-cron/                    # 定时任务调度器
+│   ├── jcowork-feishu/                  # 飞书/LocalizedMessage机器人集成
+│   └── jcowork-logs/                    # JSONL 日志写入器
 ├── web/                               # React + Vite 前端
 ├── providers.json                    # LLM 提供者与模型配置
 ├── Dockerfile                         # 多阶段 Rust 构建
@@ -91,6 +93,7 @@ jcowork-server
         │     ├── jcowork-skills → jcowork-storage
         │     ├── jcowork-tools → jcowork-memory, jcowork-skills, jcowork-storage
         │     └── jcowork-cron
+        ├── jcowork-feishu
         └── jcowork-storage
 ```
 
@@ -582,6 +585,64 @@ local:qwen3.5:35b-a3b        # 本地 Ollama
 ```
 
 然后在 `.env` 中添加 API Key 并重启服务器即可，无需重新编译。
+
+## 飞书（Lark）机器人接入
+
+Jcowork 支持飞书作为 Web UI 之外的输入渠道。每个用户可以配置自己的飞书机器人，让飞书上的联系人与自己的 AI Agent 对话。
+
+### 工作原理
+
+1. 每个 jcowork 用户在 **设置** 页面配置自己的飞书自建应用
+2. 当有人在飞书上给机器人发消息时，事件通过 Webhook 传递到 Jcowork
+3. Jcowork 通过事件头中的 `app_id` 匹找到对应的 jcowork 用户
+4. 消息经过完整的 Agent 循环处理（包含该用户的记忆、技能、工具、提醒）
+5. Agent 的回复作为飞书消息返回
+
+### 配置步骤
+
+1. **创建飞书自建应用** — 在[飞书开放平台](https://open.feishu.cn/app)创建应用
+   - 启用「机器人」能力
+   - 在**权限管理**中，开通 `im:message`（接收消息）和 `im:message:send_as_bot`（发送消息）
+
+2. **配置事件订阅地址**
+   - 在应用的**事件订阅**页面，设置请求地址为：
+     ```
+     https://你的jcowork域名/api/feishu/event
+     ```
+   - 订阅事件：`im.message.receive_v1`
+   - 飞书会发送验证请求来确认 URL 有效性，Jcowork 会使用你配置的 Verification Token 自动完成验证
+
+3. **在 Jcowork 中配置**
+   - 登录 Jcowork Web 界面
+   - 进入 **Settings** → **Feishu Integration**
+   - 填写：
+     - **App ID** — 来自飞书开放平台（如 `cli_xxxxx`）
+     - **App Secret** — 来自飞书开放平台
+     - **Verification Token** — 来自事件订阅页面
+     - **Encrypt Key**（可选）— 如果开启了事件加密
+   - 点击 **Save**
+
+4. **开始对话** — 在飞书上给机器人发消息，Agent 会使用你配置的模型、记忆和技能来回复
+
+### 按用户隔离架构
+
+- 每个 jcowork 用户配置**自己的**飞书应用，无需共享凭据
+- 飞书消息通过 `app_id` 匹找到对应的 jcowork 用户
+- 飞书渠道支持所有按用户功能：记忆、技能、提醒、自定义 Agent 身份
+- 受技能门控的工具（如 `web_search`）仅在用户启用对应技能后可用
+
+### API 端点
+
+| 方法 | 路径 | 认证 | 说明 |
+|------|------|------|------|
+| POST | `/api/feishu/event` | 无 | 飞书事件回调（Webhook） |
+| GET | `/api/feishu/config` | 需要 | 获取当前用户的飞书配置 |
+| PUT | `/api/feishu/config` | 需要 | 保存/更新飞书配置 |
+| DELETE | `/api/feishu/config` | 需要 | 删除飞书配置 |
+
+### 通过 Web UI 配置
+
+飞书配置通过 Web 设置页面按用户管理，无需设置环境变量。
 
 ## API 参考
 

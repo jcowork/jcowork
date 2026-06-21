@@ -71,7 +71,9 @@ jcowork/
 │   ├── jcowork-tools/                   # Tool trait, Registry, 10+ tool impls
 │   ├── jcowork-llm/                     # LlmProvider trait, JSON-driven provider config, SSE streaming
 │   ├── jcowork-storage/                 # Database, Migrations, FileStore
-│   └── jcowork-cron/                    # Cron scheduler
+│   ├── jcowork-cron/                    # Cron scheduler
+│   ├── jcowork-feishu/                  # Feishu/Lark bot integration
+│   └── jcowork-logs/                    # JSONL log writer
 ├── web/                               # React + Vite frontend
 ├── providers.json                    # LLM provider & model configuration
 ├── Dockerfile                         # Multi-stage Rust build
@@ -91,6 +93,7 @@ jcowork-server
         │     ├── jcowork-skills → jcowork-storage
         │     ├── jcowork-tools → jcowork-memory, jcowork-skills, jcowork-storage
         │     └── jcowork-cron
+        ├── jcowork-feishu
         └── jcowork-storage
 ```
 
@@ -108,6 +111,8 @@ jcowork-server
 | Delegate | `jcowork-agent::delegate` | tokio::spawn sub-agent tasks |
 | Cron Scheduler | `jcowork-cron::scheduler` | Per-user cron jobs via `cron` crate |
 | Auth | `jcowork-gateway::auth` | JWT + Argon2 (multi-user authentication) |
+| Feishu | `jcowork-feishu` | Feishu/Lark bot: event parsing, API client, per-user config |
+| Logging | `jcowork-logs` | JSONL daily rotating logs for LLM and tool calls |
 
 ## Quick Start
 
@@ -583,6 +588,64 @@ To add a new provider, edit `providers.json`:
 ```
 
 Then add the API key to `.env` and restart the server. No recompilation needed.
+
+## Feishu (Lark) Bot Integration
+
+Jcowork supports Feishu as an input channel alongside the web UI. Each user can configure their own Feishu bot, allowing contacts on Feishu to chat with their personal AI agent.
+
+### How It Works
+
+1. Each jcowork user configures their own Feishu Custom App in the **Settings** page
+2. When someone sends a message to the bot on Feishu, the event is delivered to Jcowork via webhook
+3. Jcowork matches the `app_id` in the event header to find the owning jcowork user
+4. The message is processed through the agent loop with full per-user context (memory, skills, tools, reminders)
+5. The agent's response is sent back to Feishu as a reply
+
+### Setup Steps
+
+1. **Create a Feishu Custom App** in the [Feishu Developer Console](https://open.feishu.cn/app)
+   - Enable the "Bot" capability
+   - Under **Permissions**, grant `im:message` (receive messages) and `im:message:send_as_bot` (send messages)
+
+2. **Configure the event subscription URL**
+   - In the app's **Event Subscription** page, set the request URL to:
+     ```
+     https://your-jcowork-domain/api/feishu/event
+     ```
+   - Subscribe to the event: `im.message.receive_v1`
+   - Feishu will send a challenge request to verify the URL — Jcowork handles this automatically using your configured verification token
+
+3. **Configure in Jcowork Settings**
+   - Log in to Jcowork web UI
+   - Go to **Settings** -> **Feishu Integration**
+   - Fill in:
+     - **App ID** — from the Feishu Developer Console (e.g., `cli_xxxxx`)
+     - **App Secret** — from the Feishu Developer Console
+     - **Verification Token** — from the Event Subscription page
+     - **Encrypt Key** (optional) — if you enabled event encryption
+   - Click **Save**
+
+4. **Start chatting** — Send a message to the bot on Feishu. The agent will respond using your configured model, memory, and skills.
+
+### Per-User Architecture
+
+- Each jcowork user configures **their own** Feishu app — no shared credentials
+- Feishu messages are routed to the correct jcowork user by matching `app_id`
+- All per-user features work in Feishu: memory, skills, reminders, custom agent identity
+- Skill-gated tools (e.g., `web_search`) are available only if the user has enabled the corresponding skill
+
+### API Endpoints
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/api/feishu/event` | No | Feishu event callback (webhook) |
+| GET | `/api/feishu/config` | Yes | Get current user's Feishu config |
+| PUT | `/api/feishu/config` | Yes | Save/update Feishu config |
+| DELETE | `/api/feishu/config` | Yes | Delete Feishu config |
+
+### Configuration via Web UI
+
+Feishu configuration is managed per-user through the web Settings page. No environment variables are needed.
 
 ## API Reference
 
