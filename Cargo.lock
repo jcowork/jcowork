@@ -1206,6 +1206,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcowork-feishu"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "hex",
+ "jcowork-agent",
+ "jcowork-cron",
+ "jcowork-llm",
+ "jcowork-logs",
+ "jcowork-memory",
+ "jcowork-skills",
+ "jcowork-storage",
+ "jcowork-tools",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "jcowork-gateway"
 version = "0.1.0"
 dependencies = [
@@ -1217,6 +1240,7 @@ dependencies = [
  "futures",
  "jcowork-agent",
  "jcowork-cron",
+ "jcowork-feishu",
  "jcowork-llm",
  "jcowork-logs",
  "jcowork-memory",
@@ -1317,6 +1341,7 @@ dependencies = [
  "futures",
  "jcowork-agent",
  "jcowork-cron",
+ "jcowork-feishu",
  "jcowork-gateway",
  "jcowork-llm",
  "jcowork-logs",

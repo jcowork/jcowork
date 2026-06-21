@@ -14,6 +14,7 @@ use jcowork_gateway::{
     router::{self, AppState},
     session::SessionManager,
 };
+use jcowork_feishu::{client::FeishuClient, config::FeishuConfig};
 use jcowork_logs::LogWriter;
 use jcowork_memory::{BuiltinMemoryProvider, MemoryManager};
 use jcowork_server::config::ServerConfig;
@@ -88,7 +89,7 @@ async fn main() -> Result<()> {
         token_duration_hours: config.token_duration_hours,
     };
 
-    let state = AppState {
+    let mut state = AppState {
         session_manager,
         auth_config,
         llm_router: Arc::new(llm_router),
@@ -99,7 +100,21 @@ async fn main() -> Result<()> {
         tool_registry,
         user_store,
         log_writer,
+        feishu_config: None,
+        feishu_client: None,
     };
+
+    // Initialize Feishu integration if configured
+    let feishu_config = FeishuConfig::from_env();
+    if let Some(fc) = &feishu_config {
+        if fc.is_configured() {
+            info!(app_id = %fc.app_id, "Feishu integration enabled");
+            let client = FeishuClient::new(fc.app_id.clone(), fc.app_secret.clone());
+            state.feishu_config.replace(Arc::new(fc.clone()));
+            state.feishu_client.replace(Arc::new(client));
+        }
+    }
+    let state = state;
 
     // Build router
     let app = router::build_router(state)

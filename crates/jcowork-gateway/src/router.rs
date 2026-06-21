@@ -17,6 +17,7 @@ use crate::auth;
 use crate::session::SessionManager;
 use crate::ws;
 use jcowork_cron::CronScheduler;
+use jcowork_feishu::{client::FeishuClient, config::FeishuConfig};
 use jcowork_llm::LlmRouter;
 use jcowork_logs::LogWriter;
 use jcowork_memory::MemoryManager;
@@ -37,6 +38,10 @@ pub struct AppState {
     pub tool_registry: Arc<ToolRegistry>,
     pub user_store: Arc<UserStore>,
     pub log_writer: Arc<LogWriter>,
+    /// Feishu bot configuration (None if FEISHU_APP_ID/SECRET not set).
+    pub feishu_config: Option<Arc<FeishuConfig>>,
+    /// Feishu API client (None if not configured).
+    pub feishu_client: Option<Arc<FeishuClient>>,
 }
 
 // --- Request/Response types ---
@@ -118,10 +123,15 @@ pub fn build_router(state: AppState) -> Router {
     let auth_mw = axum::middleware::from_fn_with_state(state.clone(), auth_middleware);
 
     // Public routes (no auth required)
-    let public = Router::new()
+    let mut public = Router::new()
         .route("/api/auth/register", post(register))
         .route("/api/auth/login", post(login))
         .route("/api/health", get(health));
+
+    // Add Feishu event callback route only if Feishu is configured
+    if state.feishu_config.is_some() {
+        public = public.route("/api/feishu/event", post(crate::feishu::feishu_event_handler));
+    }
 
     // Protected routes (auth required)
     let protected = Router::new()

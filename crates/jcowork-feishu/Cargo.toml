@@ -1,0 +1,24 @@
+[package]
+name = "jcowork-feishu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+jcowork-llm = { workspace = true }
+jcowork-memory = { workspace = true }
+jcowork-skills = { workspace = true }
+jcowork-tools = { workspace = true }
+jcowork-logs = { workspace = true }
+jcowork-cron = { workspace = true }
+jcowork-storage = { workspace = true }
+jcowork-agent = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }

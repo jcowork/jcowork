@@ -11,6 +11,7 @@ members = [
     "crates/jcowork-storage",
     "crates/jcowork-cron",
     "crates/jcowork-logs",
+    "crates/jcowork-feishu",
     "crates/jcowork-report-search",
 ]
 
@@ -30,6 +31,7 @@ jcowork-tools = { path = "crates/jcowork-tools" }
 jcowork-llm = { path = "crates/jcowork-llm" }
 jcowork-storage = { path = "crates/jcowork-storage" }
 jcowork-cron = { path = "crates/jcowork-cron" }
+jcowork-feishu = { path = "crates/jcowork-feishu" }
 jcowork-logs = { path = "crates/jcowork-logs" }
 
 # Async runtime

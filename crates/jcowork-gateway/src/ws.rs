@@ -536,7 +536,7 @@ fn build_reminder_context_msg(reminders: &[Reminder], cron_jobs: &[CronJob]) -> 
 /// Build the system prompt that instructs the LLM about its capabilities.
 /// If a custom identity is provided, it replaces the default "You are Jcowork Agent" prefix.
 /// If skill_prompt is non-empty, it is appended at the end.
-fn build_system_prompt_with_identity(custom_identity: Option<&str>, skill_prompt: &str) -> String {
+pub fn build_system_prompt_with_identity(custom_identity: Option<&str>, skill_prompt: &str) -> String {
     let now = chrono::Local::now();
     let current_time = now.format("%Y年%m月%d日 %H时%M分%S秒 (%:z)").to_string();
 
