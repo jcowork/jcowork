@@ -6,6 +6,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     host: '0.0.0.0',
+    allowedHosts: ['home.top.jx.cn'],
     proxy: {
       '/api/ws': {
         target: 'ws://localhost:3000',
