@@ -178,9 +178,9 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
         }
         // If no saved preference, use server default
         if (!initialProvider && serverDefault.includes(':')) {
-          const [defProvider, defModel] = serverDefault.split(':');
-          initialProvider = defProvider;
-          initialModel = defModel;
+          const colonIdx = serverDefault.slice(':');
+          initialProvider = serverDefault.slice(0, colonIdx);
+          initialModel = serverDefault.slice(colonIdx + 1);
         }
         // Validate saved/default values exist in providers
         const validProvider = providers.find(p => p.id === initialProvider);

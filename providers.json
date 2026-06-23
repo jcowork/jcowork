@@ -60,5 +60,17 @@
     "models": [
       { "id": "qwen3.5:35b-a3b", "name": "Qwen3.5 35B-A3B", "context_length": 32768 }
     ]
+  },
+  {
+    "id": "llamacpp",
+    "name": "Local / llamacpp",
+    "env_key": "",
+    "base_url": "http://localhost:8131/v1",
+    "default_model": "unsloth/Qwen3.5-35B-a3B-GGUF:Q4_K_M",
+    "context_length": 131072,
+    "models": [
+      { "id": "unsloth/Qwen3.5-35B-a3B-GGUF:Q4_K_M", "name": "Qwen3.5 35B-A3B (Q4_K_M)", "context_length": 131072 }
+    ]
   }
+
 ]
