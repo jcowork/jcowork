@@ -42,8 +42,12 @@ pub async fn feishu_event_handler(
     // Handle challenge/verification request
     if fe_event.is_challenge() {
         let challenge = fe_event.challenge.as_deref().unwrap_or("");
-        // Look up verification token from the config store by app_id
-        let verification_token = if let Some(ref app_id) = event_app_id {
+        // Feishu challenge request contains verification_token in the "token" field
+        // First try to use the token from the request, then fall back to looking up by app_id
+        let verification_token = if let Some(token) = fe_event.token.clone() {
+            token
+        } else if let Some(ref app_id) = event_app_id {
+            // Fallback: look up verification token from the config store by app_id
             state.feishu_config_store.get_by_app_id(app_id)
                 .await
                 .ok()
