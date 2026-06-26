@@ -20,7 +20,9 @@ impl Tool for ReminderAddTool {
          Use this when the user asks to be reminded of something at a specific time. \
          The fire_at must be an ISO 8601 datetime string. \
          If the user says '11:41', calculate the full ISO datetime using today's date and the user's timezone (default: Asia/Shanghai, UTC+8). \
-         If the time has already passed today, use tomorrow's date."
+         If the time has already passed today, use tomorrow's date. \
+         When the user wants to be reminded to do something (e.g., 'remind me to search for news'), \
+         set the action parameter to the task they want to perform, so it can be executed automatically when the reminder fires."
     }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
@@ -33,6 +35,10 @@ impl Tool for ReminderAddTool {
                 "message": {
                     "type": "string",
                     "description": "The reminder message to show the user at the specified time"
+                },
+                "action": {
+                    "type": "string",
+                    "description": "Optional: The action to execute when the reminder fires (e.g., 'search 俄乌战争最新进展'). If set, this action will be automatically triggered."
                 }
             },
             "required": ["fire_at", "message"]
@@ -46,8 +52,9 @@ impl Tool for ReminderAddTool {
         let message = params["message"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'message' parameter"))?;
+        let action = params["action"].as_str();
 
-        match self.scheduler.add_reminder(&ctx.user_id, fire_at, message).await {
+        match self.scheduler.add_reminder(&ctx.user_id, fire_at, message, action).await {
             Ok(id) => Ok(format!("Reminder set! ID: {}\nWill remind at: {}\nMessage: {}", id, fire_at, message)),
             Err(e) => Ok(format!("Failed to set reminder: {}", e)),
         }

@@ -96,9 +96,10 @@ impl ContextEngine for Compressor {
             compressed.push(msg.clone());
         }
 
-        // Add compression marker
+        // Add compression marker as assistant message (not system)
+        // to avoid "System message must be at the beginning" errors
         compressed.push(ChatMessage {
-            role: "system".to_string(),
+            role: "assistant".to_string(),
             content: format!(
                 "[Context compressed: {} messages summarized. {} messages preserved.]",
                 messages.len() - self.protect_first_n - self.protect_last_n,

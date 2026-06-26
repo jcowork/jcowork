@@ -9,8 +9,10 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
+use std::sync::Arc;
 
 use crate::base::{Tool, ToolContext};
+use jcowork_logs::{LogEntry, LogWriter};
 
 /// Resolve the Python binary path in the jcowork venv.
 /// On Unix: ~/.jcowork/venv/bin/python
@@ -32,6 +34,8 @@ const SEARCH_SCRIPT: &str = "scripts/web_search.py";
 pub struct WebSearchTool {
     /// Absolute path to the workspace / project root (to locate the script).
     pub workspace_root: String,
+    /// Optional log writer for recording search results.
+    pub log_writer: Option<Arc<LogWriter>>,
 }
 
 impl Default for WebSearchTool {
@@ -40,7 +44,18 @@ impl Default for WebSearchTool {
         let root = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
-        Self { workspace_root: root }
+        Self { 
+            workspace_root: root,
+            log_writer: None,
+        }
+    }
+}
+
+impl WebSearchTool {
+    /// Set the log writer for recording search results.
+    pub fn with_log_writer(mut self, log_writer: Arc<LogWriter>) -> Self {
+        self.log_writer = Some(log_writer);
+        self
     }
 }
 
@@ -134,22 +149,78 @@ impl Tool for WebSearchTool {
             return Ok("No search results found.".to_string());
         }
 
+        // Log raw search results (limit size for performance)
+        let log_results: Vec<serde_json::Value> = results
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "title": r["title"].as_str().unwrap_or(""),
+                    "url": r["url"].as_str().unwrap_or(""),
+                    "snippet": r["snippet"].as_str().unwrap_or(""),
+                    "content": r["content"].as_str().map(|c| {
+                        if c.len() > 500 { format!("{}...(truncated)", &c[..500]) } else { c.to_string() }
+                    }).unwrap_or_default(),
+                })
+            })
+            .collect();
+        
+        if let Some(ref log_writer) = self.log_writer {
+            let log_entry = LogEntry::RawData {
+                timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                source: "web_search".to_string(),
+                data: serde_json::json!({
+                    "query": query,
+                    "num_results": results.len(),
+                    "results": log_results,
+                }),
+            };
+            let lw = log_writer.clone();
+            tokio::spawn(async move { 
+                let _ = lw.write(&log_entry).await; 
+            });
+        }
+
+        // Format results for LLM (limit to first 10 results to avoid token overflow)
         let lines: Vec<String> = results
             .iter()
+            .take(10)  // Only take first 10 results
             .enumerate()
             .map(|(i, r)| {
                 let title = r["title"].as_str().unwrap_or("");
                 let url = r["url"].as_str().unwrap_or("");
                 let snippet = r["snippet"].as_str().unwrap_or("");
-                format!("{}. {}\n   URL: {}\n   {}", i + 1, title, url, snippet)
+                let content = r["content"].as_str().unwrap_or("");
+                
+                let mut result_text = format!("{}. {}\n   URL: {}\n   Snippet: {}", i + 1, title, url, snippet);
+                
+                // Add detailed content if available (for top 3 results only)
+                if i < 3 && !content.is_empty() && content != "(No content extracted)" && !content.starts_with("(Failed") {
+                    let content_preview = if content.len() > 500 {
+                        format!("{}... (truncated)", &content[..500])
+                    } else {
+                        content.to_string()
+                    };
+                    result_text.push_str(&format!("\n   Content: {}", content_preview));
+                }
+                
+                result_text
             })
             .collect();
 
-        Ok(format!(
-            "Web search results for \"{}\" ({} results):\n\n{}",
+        let result_text = format!(
+            "Web search results for \"{}\" ({} results, showing top 10, first 3 with full content):\n\n{}",
             query,
             results.len(),
             lines.join("\n\n")
-        ))
+        );
+        
+        // Ensure result is not too large (max ~15KB)
+        let result_text = if result_text.len() > 15000 {
+            format!("{}...(result truncated due to size)", &result_text[..15000])
+        } else {
+            result_text
+        };
+        
+        Ok(result_text)
     }
 }

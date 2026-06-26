@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
     info!("Log writer initialized");
 
     // Initialize tool registry
-    let tool_registry = jcowork_gateway::ws::build_tool_registry(cron_scheduler.clone(), memory_manager.clone());
+    let tool_registry = jcowork_gateway::ws::build_tool_registry(cron_scheduler.clone(), memory_manager.clone(), log_writer.clone());
 
     // Initialize session manager
     let session_manager = Arc::new(SessionManager::new());

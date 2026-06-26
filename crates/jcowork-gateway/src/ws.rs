@@ -57,7 +57,11 @@ pub struct UsageInfo {
 }
 
 /// Build the tool registry with the given CronScheduler and MemoryManager.
-pub fn build_tool_registry(scheduler: Arc<CronScheduler>, memory_manager: Arc<MemoryManager>) -> Arc<ToolRegistry> {
+pub fn build_tool_registry(
+    scheduler: Arc<CronScheduler>,
+    memory_manager: Arc<MemoryManager>,
+    log_writer: Arc<LogWriter>,
+) -> Arc<ToolRegistry> {
     let mut registry = ToolRegistry::new();
     // Reminder/Cron tools
     registry.register(Arc::new(ReminderAddTool { scheduler: scheduler.clone() }));
@@ -73,8 +77,8 @@ pub fn build_tool_registry(scheduler: Arc<CronScheduler>, memory_manager: Arc<Me
     registry.register(Arc::new(MemorySearchTool { manager: memory_manager }));
     // PDF parsing tool
     registry.register(Arc::new(PdfParseTool::default()));
-    // Web search tool
-    registry.register(Arc::new(WebSearchTool::default()));
+    // Web search tool with log writer
+    registry.register(Arc::new(WebSearchTool::default().with_log_writer(log_writer)));
     // Report search tools
     registry.register(Arc::new(ReportSearchTool::default()));
     registry.register(Arc::new(ReportListCompaniesTool::default()));
@@ -435,6 +439,7 @@ pub async fn ws_handler(
             reminder = reminder_rx.recv() => {
                 if let Ok(reminder) = reminder {
                     if reminder.user_id == user_id_for_reminder {
+                        // Send reminder notification to client
                         let _ = ws_sender
                             .send(Message::Text(
                                 serde_json::to_string(&WsOutput::Reminder {
@@ -446,6 +451,229 @@ pub async fn ws_handler(
                                 .into(),
                             ))
                             .await;
+
+                        // If reminder has an action, execute it automatically
+                        if let Some(action) = &reminder.action {
+                            tracing::info!(action = %action, "Executing reminder action");
+
+                            // Add the action as a user message to history
+                            history.push(ChatMessage {
+                                role: "user".to_string(),
+                                content: action.clone(),
+                                tool_calls: None,
+                                tool_call_id: None,
+                                reasoning_content: None,
+                            });
+
+                            // Get provider and tools for executing the action
+                            let provider = match llm_router.get_provider(&default_model) {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    tracing::error!(err = %e, "Failed to get provider for reminder action");
+                                    continue;
+                                }
+                            };
+
+                            let tools: Vec<_> = tool_registry.all_schemas()
+                                .into_iter()
+                                .filter(|t| {
+                                    let skill_required = match t.function.name.as_str() {
+                                        "web_search" => Some("builtin:web_search"),
+                                        "report_search" | "report_list_companies" => Some("builtin:write_research_report"),
+                                        _ => None,
+                                    };
+                                    match skill_required {
+                                        Some(skill_id) => enabled_skill_ids.contains(skill_id),
+                                        None => true,
+                                    }
+                                })
+                                .collect();
+
+                            let tool_ctx = ToolContext {
+                                user_id: user_id.clone(),
+                                workspace_root: String::new(),
+                            };
+
+                            // Agent loop for reminder action - continue until no more tool calls
+                            let max_turns = 5;
+                            let mut final_usage: Option<(i32, i32, i32)> = None;
+                            for _turn in 0..max_turns {
+                                let llm_start = std::time::Instant::now();
+                                let llm_input = build_llm_input(&history.iter().map(|m| (m.role.as_str(), m.content.as_str())).collect::<Vec<_>>());
+                                let provider_name = provider.name().to_string();
+
+                                let stream_result = provider.chat_stream(&history, &tools).await;
+                                let mut stream = match stream_result {
+                                    Ok(s) => s,
+                                    Err(e) => {
+                                        tracing::error!(err = %e, "Failed to start LLM stream for reminder action");
+                                        break;
+                                    }
+                                };
+
+                                let mut assistant_content = String::new();
+                                let mut reasoning_content = String::new();
+                                let mut current_tool_args: HashMap<String, (String, String, String)> = HashMap::new();
+                                let mut tool_call_started: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+                                while let Some(chunk) = stream.next().await {
+                                    match chunk {
+                                        Ok(StreamChunk::Delta(delta)) => {
+                                            assistant_content.push_str(&delta);
+                                            let _ = ws_sender
+                                                .send(Message::Text(
+                                                    serde_json::json!({"type": "text_delta", "content": delta})
+                                                        .to_string()
+                                                        .into(),
+                                                ))
+                                                .await;
+                                        }
+                                        Ok(StreamChunk::ReasoningDelta(reasoning)) => {
+                                            reasoning_content.push_str(&reasoning);
+                                        }
+                                        Ok(StreamChunk::ToolCallDelta(call_id, name, args_delta)) => {
+                                            let entry = current_tool_args
+                                                .entry(call_id.clone())
+                                                .or_insert_with(|| (call_id.clone(), name.clone(), String::new()));
+                                            entry.2.push_str(&args_delta);
+                                            // Only send tool_call_start once per call_id
+                                            if tool_call_started.insert(call_id.clone()) {
+                                                let _ = ws_sender
+                                                    .send(Message::Text(
+                                                        serde_json::json!({
+                                                            "type": "tool_call_start",
+                                                            "name": name,
+                                                            "call_id": call_id
+                                                        })
+                                                            .to_string()
+                                                            .into(),
+                                                    ))
+                                                    .await;
+                                            }
+                                        }
+                                        Ok(StreamChunk::Done(usage)) => {
+                                            final_usage = Some((usage.prompt_tokens, usage.completion_tokens, usage.total_tokens));
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(err = %e, "Stream error during reminder action");
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                // Build tool calls from accumulated deltas
+                                let tool_calls: Vec<ToolCall> = current_tool_args
+                                    .into_iter()
+                                    .map(|(_, (call_id, func_name, arguments))| ToolCall {
+                                        id: call_id,
+                                        r#type: "function".to_string(),
+                                        function: jcowork_llm::provider::FunctionCall {
+                                            name: func_name,
+                                            arguments,
+                                        },
+                                    })
+                                    .collect();
+
+                                // Log LLM request/response for this turn
+                                let llm_duration_ms = llm_start.elapsed().as_millis() as u64;
+                                let tool_names: Vec<String> = tool_calls.iter().map(|tc| tc.function.name.clone()).collect();
+                                let log_entry = LogEntry::LlmRequest {
+                                    timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                                    user_id: user_id.clone(),
+                                    provider: provider_name,
+                                    model: default_model.clone(),
+                                    duration_ms: llm_duration_ms,
+                                    input: llm_input,
+                                    output: build_llm_output(&assistant_content, tool_calls.len(), tool_names, final_usage),
+                                };
+                                let lw = log_writer.clone();
+                                tokio::spawn(async move { lw.write(&log_entry).await });
+
+                                // Add assistant message to history
+                                history.push(ChatMessage {
+                                    role: "assistant".to_string(),
+                                    content: assistant_content,
+                                    tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls.clone()) },
+                                    tool_call_id: None,
+                                    reasoning_content: if reasoning_content.is_empty() { None } else { Some(reasoning_content) },
+                                });
+
+                                // If no tool calls, we're done
+                                if tool_calls.is_empty() {
+                                    // Send done notification
+                                    let (pt, ct, tt) = final_usage.unwrap_or((0, 0, 0));
+                                    let _ = ws_sender
+                                        .send(Message::Text(
+                                            serde_json::json!({
+                                                "type": "done",
+                                                "usage": {
+                                                    "prompt_tokens": pt,
+                                                    "completion_tokens": ct,
+                                                    "total_tokens": tt,
+                                                }
+                                            })
+                                                .to_string()
+                                                .into(),
+                                        ))
+                                        .await;
+                                    break;
+                                }
+
+                                // Handle tool calls
+                                for tc in &tool_calls {
+                                    if tc.function.arguments.trim().is_empty() {
+                                        tracing::debug!(tool = %tc.function.name, call_id = %tc.id, "Skipping tool call with empty arguments");
+                                        history.push(ChatMessage {
+                                            role: "tool".to_string(),
+                                            content: "Error: tool call had empty arguments, skipped".to_string(),
+                                            tool_calls: None,
+                                            tool_call_id: Some(tc.id.clone()),
+                                            reasoning_content: None,
+                                        });
+                                        continue;
+                                    }
+
+                                    let tool_start = std::time::Instant::now();
+                                    let result = tool_registry
+                                        .dispatch(&tc.function.name, &tc.function.arguments, &tool_ctx)
+                                        .await;
+
+                                    let result_str = match result {
+                                        Ok(r) => r,
+                                        Err(e) => format!("Error: {}", e),
+                                    };
+
+                                    let tool_duration_ms = tool_start.elapsed().as_millis() as u64;
+
+                                    let _ = ws_sender
+                                        .send(Message::Text(
+                                            serde_json::json!({
+                                                "type": "tool_call_end",
+                                                "name": tc.function.name,
+                                                "result": result_str.clone()
+                                            })
+                                                .to_string()
+                                                .into(),
+                                        ))
+                                        .await;
+
+                                    // Log tool call
+                                    let tool_log = ToolCallEntry::new(&user_id, &tc.function.name)
+                                        .into_log_entry_with(&tc.function.arguments, &result_str, tool_duration_ms);
+                                    let lw = log_writer.clone();
+                                    tokio::spawn(async move { lw.write(&tool_log).await });
+
+                                    history.push(ChatMessage {
+                                        role: "tool".to_string(),
+                                        content: result_str,
+                                        tool_calls: None,
+                                        tool_call_id: Some(tc.id.clone()),
+                                        reasoning_content: None,
+                                    });
+                                }
+                                // Loop continues - LLM will see tool results and respond
+                            }
+                        }
                     }
                 }
             }
@@ -523,8 +751,8 @@ fn build_reminder_context_msg(reminders: &[Reminder], cron_jobs: &[CronJob]) -> 
         parts.push(format!("User's active cron jobs:\n{}", lines.join("\n")));  
     }
     Some(ChatMessage {
-        role: "system".to_string(),
-        content: parts.join("\n\n"),
+        role: "user".to_string(),
+        content: format!("[Context] {}", parts.join("\n\n")),
         tool_calls: None,
         tool_call_id: None,
         reasoning_content: None,

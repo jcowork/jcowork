@@ -1,30 +1,5 @@
 [
   {
-    "id": "deepseek",
-    "name": "DeepSeek",
-    "env_key": "DEEPSEEK_API_KEY",
-    "base_url": "https://api.deepseek.com",
-    "default_model": "deepseek-v4-flash",
-    "context_length": 64000,
-    "models": [
-      { "id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "context_length": 64000 },
-      { "id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "context_length": 64000 }
-    ]
-  },
-  {
-    "id": "qwen",
-    "name": "Qwen / Tongyi Qianwen",
-    "env_key": "QWEN_API_KEY",
-    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "default_model": "qwen3.6-plus",
-    "context_length": 131072,
-    "models": [
-      { "id": "qwen3.6-plus", "name": "Qwen3.6 Plus", "context_length": 256000 },
-      { "id": "qwen3.6-flash", "name": "Qwen3.6 Flash", "context_length": 256000 },
-      { "id": "qwen3.7-max", "name": "Qwen3.7 Max", "context_length": 256000 }
-    ]
-  },
-  {
     "id": "moonshot",
     "name": "Moonshot",
     "env_key": "MOONSHOT_API_KEY",
@@ -37,39 +12,14 @@
     ]
   },
   {
-    "id": "openrouter",
-    "name": "OpenRouter",
-    "env_key": "OPENROUTER_API_KEY",
-    "base_url": "https://openrouter.ai/api/v1",
-    "default_model": "anthropic/claude-3.5-sonnet",
-    "context_length": 200000,
-    "models": [
-      { "id": "anthropic/claude-3.5-sonnet", "name": "Claude 3.5 Sonnet", "context_length": 200000 },
-      { "id": "anthropic/claude-3-haiku", "name": "Claude 3 Haiku", "context_length": 200000 },
-      { "id": "google/gemini-pro-1.5", "name": "Gemini Pro 1.5", "context_length": 1000000 },
-      { "id": "meta-llama/llama-3.1-70b-instruct", "name": "Llama 3.1 70B", "context_length": 131072 }
-    ]
-  },
-  {
-    "id": "local",
-    "name": "Local / Ollama",
-    "env_key": "",
-    "base_url": "http://localhost:11434/v1",
-    "default_model": "qwen3.5:35b-a3b",
-    "context_length": 32768,
-    "models": [
-      { "id": "qwen3.5:35b-a3b", "name": "Qwen3.5 35B-A3B", "context_length": 32768 }
-    ]
-  },
-  {
     "id": "llamacpp",
-    "name": "Local / llamacpp",
+    "name": "Local",
     "env_key": "",
-    "base_url": "http://localhost:8131/v1",
-    "default_model": "unsloth/Qwen3.5-35B-a3B-GGUF:Q4_K_M",
+    "base_url": "http://localhost:20261/v1",
+    "default_model": "qwen3.5-35b-a3b",
     "context_length": 131072,
     "models": [
-      { "id": "unsloth/Qwen3.5-35B-a3B-GGUF:Q4_K_M", "name": "Qwen3.5 35B-A3B (Q4_K_M)", "context_length": 131072 }
+      { "id": "qwen3.5-35b-a3b", "name": "Qwen3.5 35B-A3B", "context_length": 131072 }
     ]
   }
 

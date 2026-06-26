@@ -56,6 +56,16 @@ pub enum LogEntry {
         /// Tool execution result.
         output: String,
     },
+    /// Raw data from external sources (e.g., web search results).
+    #[serde(rename = "raw_data")]
+    RawData {
+        /// ISO 8601 timestamp of when the data was received.
+        timestamp: String,
+        /// Source of the data (e.g., "web_search").
+        source: String,
+        /// The raw data (e.g., search results).
+        data: serde_json::Value,
+    },
 }
 
 /// Summary of LLM input (messages sent to the model).

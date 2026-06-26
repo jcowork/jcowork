@@ -412,8 +412,8 @@ fn build_reminder_context_msg(
         parts.push(format!("User's active cron jobs:\n{}", lines.join("\n")));
     }
     Some(ChatMessage {
-        role: "system".to_string(),
-        content: parts.join("\n\n"),
+        role: "user".to_string(),
+        content: format!("[Context] {}", parts.join("\n\n")),
         tool_calls: None,
         tool_call_id: None,
         reasoning_content: None,

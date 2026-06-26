@@ -216,27 +216,158 @@ async def search_bing(query: str, num_results: int = 20) -> list[dict]:
         return (raw or [])[:num_results]
 
 
-async def search(query: str, num_results: int = 20) -> list[dict]:
-    """Search with Sogou primary, Bing fallback if Sogou returns < 3 results."""
+async def fetch_page_content(page, url: str, max_length: int = 3000) -> str:
+    """Fetch and extract main content from a page."""
+    try:
+        # Resolve sogou proxy URLs
+        if url.startswith('https://wap.sogou.com/web/id='):
+            # Navigate and wait for redirect
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=10000)
+                await asyncio.sleep(1.0)  # Wait for redirect
+                current_url = page.url
+                if 'url=' in current_url:
+                    # Still on proxy page, extract real URL
+                    import urllib.parse
+                    match = current_url.split('url=')
+                    if len(match) > 1:
+                        real_url = urllib.parse.unquote(match[1].split('&')[0])
+                        await page.goto(real_url, wait_until="domcontentloaded", timeout=10000)
+                url = page.url
+            except Exception as e:
+                return f"(Failed to resolve proxy URL: {str(e)[:80]})"
+        
+        # Navigate to final URL
+        if page.url != url:
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=10000)
+            except Exception as e:
+                return f"(Failed to load page: {str(e)[:80]})"
+        
+        # Wait a bit for JS content
+        await asyncio.sleep(0.5)
+        
+        # Extract main content
+        content = await page.evaluate("""
+            () => {
+                // Remove script, style, nav, footer, ads
+                const elements = document.querySelectorAll('script, style, nav, footer, aside, .ad, .ads, .advertisement, .sidebar, [class*="banner"], [id*="banner"]');
+                elements.forEach(el => el.remove());
+                
+                // Try to find main content
+                const selectors = [
+                    'article', '[role="main"]', 'main', 
+                    '.article-content', '.post-content', '.content', '.entry-content',
+                    '#article-content', '#content', '#main-content',
+                    '.article', '.post', '.entry',
+                    'section', '.detail', '.details', '.news-content'
+                ];
+                
+                let text = '';
+                for (const sel of selectors) {
+                    const el = document.querySelector(sel);
+                    if (el && el.textContent.trim().length > 100) {
+                        text = el.textContent.trim();
+                        break;
+                    }
+                }
+                
+                // Fallback to body if no main content found
+                if (!text && document.body) {
+                    text = document.body.textContent.trim();
+                }
+                
+                // Clean up
+                text = text
+                    .replace(/\\s+/g, ' ')
+                    .replace(/\\n\\s*\\n/g, '\\n')
+                    .replace(/广告|推荐|相关阅读|版权声明|免责声明|返回首页|返回顶部/g, '')
+                    .trim();
+                
+                return text;
+            }
+        """)
+        
+        # Truncate if too long
+        if len(content) > max_length:
+            content = content[:max_length] + "... (truncated)"
+        
+        return content or "(No content extracted)"
+    except Exception as e:
+        return f"(Failed to fetch: {str(e)[:100]})"
+
+
+async def fetch_top_contents(results: list[dict], num_fetch: int = 3, total_timeout: int = 25) -> list[dict]:
+    """Fetch detailed content for top N results with total timeout."""
+    if not results:
+        return results
+    
+    async def fetch_with_timeout():
+        async with async_playwright() as p:
+            browser, context = await _make_browser(p)
+            page = await context.new_page()
+            await page.set_viewport_size({"width": 1280, "height": 800})
+            
+            # Fetch first N results
+            for i, result in enumerate(results[:num_fetch]):
+                if i >= num_fetch:
+                    break
+                url = result.get('url', '')
+                if not url or url.startswith('javascript'):
+                    result['content'] = "(Invalid URL)"
+                    continue
+                
+                content = await fetch_page_content(page, url)
+                result['content'] = content
+            
+            await browser.close()
+        return results
+    
+    try:
+        # Add overall timeout for content fetching
+        return await asyncio.wait_for(fetch_with_timeout(), timeout=total_timeout)
+    except asyncio.TimeoutError:
+        # If timeout, mark remaining results as timeout
+        for i, result in enumerate(results[:num_fetch]):
+            if 'content' not in result:
+                result['content'] = "(Timeout fetching content)"
+        return results
+
+
+async def search(query: str, num_results: int = 20, fetch_contents: bool = False) -> list[dict]:
+    """Search with Sogou primary, Bing fallback if Sogou returns < 3 results.
+    Optionally fetch detailed content for top results."""
     results = await search_sogou(query, num_results)
     if len(results) < 3:
         # Sogou failed or returned too few results, try Bing
         bing_results = await search_bing(query, num_results)
         if len(bing_results) > len(results):
             results = bing_results
+    
+    # Fetch detailed content for top 3 results with timeout (only if requested)
+    if fetch_contents and results:
+        try:
+            results = await fetch_top_contents(results, num_fetch=3, total_timeout=20)
+        except Exception as e:
+            # If content fetching fails, return results without content
+            for r in results[:3]:
+                if 'content' not in r:
+                    r['content'] = f"(Failed to fetch: {str(e)[:50]})"
+    
     return results
 
 
 def main():
     if len(sys.argv) < 2:
-        print(json.dumps({"error": "Usage: web_search.py <query> [num_results]"}))
+        print(json.dumps({"error": "Usage: web_search.py <query> [num_results] [fetch_contents]"}))
         sys.exit(1)
 
     query = sys.argv[1]
     num_results = int(sys.argv[2]) if len(sys.argv) > 2 else 20
+    fetch_contents = sys.argv[3].lower() == "true" if len(sys.argv) > 3 else False
 
     try:
-        results = asyncio.run(search(query, num_results))
+        results = asyncio.run(search(query, num_results, fetch_contents))
         print(json.dumps(results, ensure_ascii=False))
     except Exception as e:
         print(json.dumps({"error": str(e)}))

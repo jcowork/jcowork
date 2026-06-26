@@ -32,6 +32,9 @@ pub struct Reminder {
     pub message: String,
     /// Whether the reminder has been triggered.
     pub triggered: bool,
+    /// Optional action to execute when the reminder fires (e.g., "search 俄乌战争最新进展")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
 }
 
 /// Manages per-user cron jobs and reminders.
@@ -73,6 +76,7 @@ impl CronScheduler {
         user_id: &str,
         fire_at: &str,
         message: &str,
+        action: Option<&str>,
     ) -> Result<String> {
         let fire_time = chrono::DateTime::parse_from_rfc3339(fire_at)
             .map_err(|e| anyhow::anyhow!("Invalid datetime format '{}': {}. Expected ISO 8601 (e.g., 2026-05-15T11:41:00+08:00)", fire_at, e))?;
@@ -84,6 +88,7 @@ impl CronScheduler {
             fire_at: fire_at.to_string(),
             message: message.to_string(),
             triggered: false,
+            action: action.map(|s| s.to_string()),
         };
 
         // Calculate delay
@@ -219,6 +224,7 @@ impl CronScheduler {
                     fire_at: Utc::now().to_rfc3339(),
                     message: format!("[Cron] {}", prompt_clone),
                     triggered: true,
+                    action: None,
                 };
                 let _ = reminder_tx.send(reminder.clone());
                 tracing::info!(id = %job_id, prompt = %prompt_clone, "Cron job triggered");

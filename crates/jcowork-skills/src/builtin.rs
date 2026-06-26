@@ -220,7 +220,7 @@ IMPORTANT: Do NOT generate HTML unless the user explicitly asks for it. The Mark
     BuiltinSkill {
         id: "builtin:web_search",
         name: "web_search",
-        description: "Search the web using a headless browser (Sogou WAP), retrieve top results, and answer questions based on live internet content.",
+        description: "Search the web using a headless browser (Sogou WAP), retrieve top results with full page content, and answer questions based on live internet content.",
         content: r#"## Skill: web_search — Web Search & Answer
 
 When a question requires up-to-date or real-world information that you don't know from training data, use the `web_search` tool to find answers on the internet.
@@ -235,6 +235,7 @@ When a question requires up-to-date or real-world information that you don't kno
 - Keep queries concise: 3-6 key terms work best
 - For Chinese topics, use natural Chinese: `"海淀小升初好学校"`, `"北京小学奥数报名条件 2025"`
 - Add specifics to narrow results: year, city, organization name
+- **IMPORTANT: When searching for news or recent events, ALWAYS include the full date with year** (e.g., `"俄乌战争 2026年6月26日 最新消息"` instead of just `"俄乌战争 6月26日"`). This ensures results are from the correct time period.
 - If Round 1 returns unrelated results, try rephrasing or splitting the query
 
 ### Search loop (max 3 rounds)
@@ -242,7 +243,7 @@ When a question requires up-to-date or real-world information that you don't kno
 Round 1:
 1. Formulate a concise, specific query.
 2. Call `web_search` with the query and `num_results: 20`.
-3. Read the titles and snippets carefully.
+3. Read the titles, snippets, AND the full page content (for top 5 results) carefully.
 4. If sufficient information found, synthesize and respond.
 
 Round 2 (if Round 1 is insufficient):
@@ -255,10 +256,25 @@ Round 3 (final):
 9. Answer based on all gathered information.
 10. If still insufficient, state clearly what was and wasn't found.
 
+### Content Available in Search Results
+Each search result contains:
+- **title**: The page title
+- **URL**: The page URL
+- **Snippet**: A short description from search results
+- **Content**: **FULL PAGE CONTENT** (up to 3000 characters) for the top 3 results
+
+**IMPORTANT**: The `Content:` field contains the actual page content extracted from the website. Use this detailed content as the primary source for your answer, not just the snippet.
+
 ### Answer guidelines
+- **STRICTLY BASED ON SEARCH RESULTS**: Your answer MUST be based ONLY on the information returned by web_search. DO NOT add, infer, or make up any facts not present in the search results.
+- **USE FULL PAGE CONTENT**: The top 3 results include full page content in the `Content:` field (up to 3000 chars each). Read and analyze this content carefully to answer questions accurately.
+- **NO HALLUCINATION**: If the search results don't contain certain information, clearly state "搜索结果显示未找到相关信息" — NEVER invent details, names, dates, or events.
+- **NO FABRICATION**: Do NOT create fake quotes, fake officials, fake organizations, or fake events. Every single piece of information must be traceable to the search results.
+- **VERIFY DATES**: When results mention dates, verify they match the query timeframe. Reject results that are clearly from wrong years.
 - Cite sources: "According to [title](url)..."
 - Synthesize across multiple results; don't just paste snippets.
 - Favor authoritative/recent sources when results conflict.
+- **ACKNOWLEDGE LIMITATIONS**: If search results are insufficient or conflicting, acknowledge this rather than fabricating a coherent narrative.
 - Keep answers focused and structured."#,
     },
     BuiltinSkill {
