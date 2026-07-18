@@ -21,3 +21,6 @@ schemars = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true }
 shellexpand = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

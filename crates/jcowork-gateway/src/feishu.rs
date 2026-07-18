@@ -151,6 +151,7 @@ async fn handle_feishu_message(
             let skill_required = match t.function.name.as_str() {
                 "web_search" => Some("builtin:web_search"),
                 "report_search" | "report_list_companies" => Some("builtin:write_research_report"),
+                "file_read" | "file_write" | "file_list" | "file_delete" | "file_move" | "file_copy" | "file_search" | "dir_create" | "dir_list" | "file_info" | "shell" => Some("builtin:code_engineer"),
                 _ => None,
             };
             match skill_required {
@@ -160,9 +161,12 @@ async fn handle_feishu_message(
         })
         .collect();
 
+    // Compute per-user workspace root and ensure it exists
+    let workspace_root = format!("{}/{}/workspace", state.data_dir, user_id);
+    let _ = tokio::fs::create_dir_all(&workspace_root).await;
     let tool_ctx = ToolContext {
         user_id: user_id.clone(),
-        workspace_root: String::new(),
+        workspace_root,
     };
 
     // Fetch active reminders/cron jobs for context

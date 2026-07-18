@@ -340,4 +340,362 @@ IMPORTANT: 创建 7 条目标时，在单次 turn 内完成所有 memory_save �
    - 追加反思：【7习惯·3】父母 | 🟢践行中 | 目标：每周高质量陪伴孩子5小时 | 陪孩子时间有保障但容易忽视自己
 3. 保持【7习惯·N】前缀和目标：字段完整，便于识别和排序"#,
     },
+    BuiltinSkill {
+        id: "builtin:code_engineer",
+        name: "code_engineer",
+        description: "Create, read, modify files and directories; build, compile, and run code projects in the user's workspace.",
+        content: r##"## Skill: code_engineer — Project & Code Engineering
+
+You have a sandboxed workspace where you can create files, write code, compile, and run programs. Use these tools when the user asks you to create a project, write code, build an app, run a script, or debug a program.
+
+---
+
+## Available Tools
+
+### File Operations
+- **file_read** — Read a file's contents. Param: `path` (relative to workspace root).
+- **file_write** — Write content to a file (creates parent dirs automatically). Params: `path`, `content`.
+- **file_list** — List entries in a directory with type info (file/dir). Param: `path` (default: `.`).
+- **file_delete** — Delete a file. Param: `path`.
+- **file_move** — Move/rename a file or directory. Params: `from`, `to`.
+- **file_copy** — Copy a file to a new location. Params: `from`, `to`.
+- **file_search** — Search file contents (substring grep) recursively. Params: `pattern`, `path` (default: `.`). Returns `path:line:content`.
+- **dir_create** — Create a directory (and parents). Param: `path`.
+- **dir_list** — Recursively list all files under a directory (skips .git, node_modules, target, __pycache__). Use to understand project structure. Param: `path` (default: `.`).
+- **file_info** — Get file metadata (type, size, modified time). Param: `path`.
+
+### Shell
+- **shell** — Execute a shell command in the workspace directory. Returns stdout + stderr. Timeout: 120s. Blocked patterns: `rm -rf /`, `mkfs`, `dd if=`, etc.
+
+---
+
+## Workflow: Creating a Project
+
+### Step 1: Scaffold the project structure
+Use `dir_create` and `file_write` to set up the project. Example for a Node.js project:
+```
+file_write({ path: "myapp/package.json", content: "{...}" })
+file_write({ path: "myapp/src/index.js", content: "..." })
+file_write({ path: "myapp/README.md", content: "..." })
+```
+
+### Step 2: Install dependencies (if needed)
+```
+shell({ command: "cd myapp && npm install" })
+```
+
+### Step 3: Run / build / compile
+```
+shell({ command: "cd myapp && npm start" })
+shell({ command: "cd myapp && npm run build" })
+```
+
+---
+
+## Language-Specific Quick Start
+
+### Python
+```
+file_write({ path: "hello.py", content: "print('Hello, World!')" })
+shell({ command: "python3 hello.py" })
+```
+For venv: `python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`
+
+### Node.js / TypeScript
+```
+file_write({ path: "app/package.json", content: "{\"name\":\"app\",\"scripts\":{\"start\":\"node index.js\"}}" })
+file_write({ path: "app/index.js", content: "console.log('Hello')" })
+shell({ command: "cd app && npm install && npm start" })
+```
+For TypeScript: `npx tsc` then `node dist/index.js`
+
+### Rust
+```
+shell({ command: "cargo new myproject --bin" })
+file_write({ path: "myproject/src/main.rs", content: "fn main() { println!(\"Hello\"); }" })
+shell({ command: "cd myproject && cargo run" })
+```
+
+### Go
+```
+shell({ command: "go mod init myproject" })
+file_write({ path: "main.go", content: "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"Hello\") }" })
+shell({ command: "go run main.go" })
+```
+
+### C / C++
+```
+file_write({ path: "hello.c", content: "#include <stdio.h>\nint main() { printf(\"Hello\\n\"); return 0; }" })
+shell({ command: "gcc hello.c -o hello && ./hello" })
+```
+For C++: `g++ hello.cpp -o hello && ./hello`
+
+### Java
+```
+file_write({ path: "Hello.java", content: "public class Hello { public static void main(String[] args) { System.out.println(\"Hello\"); } }" })
+shell({ command: "javac Hello.java && java Hello" })
+```
+
+---
+
+## Best Practices
+
+1. **Always read before modifying**: Use `file_read` to see current content before rewriting a file.
+2. **Use dir_list to understand structure**: Before making changes, run `dir_list({ path: "." })` to see the full project layout.
+3. **Compile incrementally**: After writing code, compile/run immediately to catch errors early. Fix and iterate.
+4. **Debug with file_search**: When tracking down a bug, use `file_search({ pattern: "function_name" })` to find where code is defined.
+5. **One file at a time**: Write each file completely with `file_write`. Don't use shell echo/cat for writing — `file_write` is atomic and handles paths.
+6. **Keep workspace clean**: Use `file_delete` for temporary files. Don't leave build artifacts.
+7. **Report results**: After running code, show the user the output (stdout/stderr) and explain any errors.
+8. **Iterate on errors**: If compilation or runtime fails, read the error, fix the code with `file_write`, and re-run. Repeat until it works.
+
+---
+
+## Security Notes
+- All paths are relative to the user's workspace and sandboxed — you cannot escape it.
+- Do not attempt path traversal (`../`).
+- The shell runs in the workspace root directory. Use `cd <subdir> && <command>` for subdirectories.
+- Avoid long-running foreground processes. If a command needs to stay running (e.g., a dev server), inform the user it will run in background."##,
+    },
 ];
+>>>>>>> 8d4ce95 (feat: add file tools, workspace isolation, Documents browser, and chat context features)
+3. 保持【7习惯·N】前缀和目标：字段完整，便于识别和排序"#,
+    },
+    BuiltinSkill {
+        id: "builtin:code_engineer",
+        name: "code_engineer",
+        description: "Create, read, modify files and directories; build, compile, and run code projects in the user's workspace.",
+        content: r##"## Skill: code_engineer — Project & Code Engineering
+
+You have a sandboxed workspace where you can create files, write code, compile, and run programs. Use these tools when the user asks you to create a project, write code, build an app, run a script, or debug a program.
+
+---
+
+## Available Tools
+
+### File Operations
+- **file_read** — Read a file's contents. Param: `path` (relative to workspace root).
+- **file_write** — Write content to a file (creates parent dirs automatically). Params: `path`, `content`.
+- **file_list** — List entries in a directory with type info (file/dir). Param: `path` (default: `.`).
+- **file_delete** — Delete a file. Param: `path`.
+- **file_move** — Move/rename a file or directory. Params: `from`, `to`.
+- **file_copy** — Copy a file to a new location. Params: `from`, `to`.
+- **file_search** — Search file contents (substring grep) recursively. Params: `pattern`, `path` (default: `.`). Returns `path:line:content`.
+- **dir_create** — Create a directory (and parents). Param: `path`.
+- **dir_list** — Recursively list all files under a directory (skips .git, node_modules, target, __pycache__). Use to understand project structure. Param: `path` (default: `.`).
+- **file_info** — Get file metadata (type, size, modified time). Param: `path`.
+
+### Shell
+- **shell** — Execute a shell command in the workspace directory. Returns stdout + stderr. Timeout: 120s. Blocked patterns: `rm -rf /`, `mkfs`, `dd if=`, etc.
+
+---
+
+## Workflow: Creating a Project
+
+### Step 1: Scaffold the project structure
+Use `dir_create` and `file_write` to set up the project. Example for a Node.js project:
+```
+file_write({ path: "myapp/package.json", content: "{...}" })
+file_write({ path: "myapp/src/index.js", content: "..." })
+file_write({ path: "myapp/README.md", content: "..." })
+```
+
+### Step 2: Install dependencies (if needed)
+```
+shell({ command: "cd myapp && npm install" })
+```
+
+### Step 3: Run / build / compile
+```
+shell({ command: "cd myapp && npm start" })
+shell({ command: "cd myapp && npm run build" })
+```
+
+---
+
+## Language-Specific Quick Start
+
+### Python
+```
+file_write({ path: "hello.py", content: "print('Hello, World!')" })
+shell({ command: "python3 hello.py" })
+```
+For venv: `python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`
+
+### Node.js / TypeScript
+```
+file_write({ path: "app/package.json", content: "{\"name\":\"app\",\"scripts\":{\"start\":\"node index.js\"}}" })
+file_write({ path: "app/index.js", content: "console.log('Hello')" })
+shell({ command: "cd app && npm install && npm start" })
+```
+For TypeScript: `npx tsc` then `node dist/index.js`
+
+### Rust
+```
+shell({ command: "cargo new myproject --bin" })
+file_write({ path: "myproject/src/main.rs", content: "fn main() { println!(\"Hello\"); }" })
+shell({ command: "cd myproject && cargo run" })
+```
+
+### Go
+```
+shell({ command: "go mod init myproject" })
+file_write({ path: "main.go", content: "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"Hello\") }" })
+shell({ command: "go run main.go" })
+```
+
+### C / C++
+```
+file_write({ path: "hello.c", content: "#include <stdio.h>\nint main() { printf(\"Hello\\n\"); return 0; }" })
+shell({ command: "gcc hello.c -o hello && ./hello" })
+```
+For C++: `g++ hello.cpp -o hello && ./hello`
+
+### Java
+```
+file_write({ path: "Hello.java", content: "public class Hello { public static void main(String[] args) { System.out.println(\"Hello\"); } }" })
+shell({ command: "javac Hello.java && java Hello" })
+```
+
+---
+
+## Best Practices
+
+1. **Always read before modifying**: Use `file_read` to see current content before rewriting a file.
+2. **Use dir_list to understand structure**: Before making changes, run `dir_list({ path: "." })` to see the full project layout.
+3. **Compile incrementally**: After writing code, compile/run immediately to catch errors early. Fix and iterate.
+4. **Debug with file_search**: When tracking down a bug, use `file_search({ pattern: "function_name" })` to find where code is defined.
+5. **One file at a time**: Write each file completely with `file_write`. Don't use shell echo/cat for writing — `file_write` is atomic and handles paths.
+6. **Keep workspace clean**: Use `file_delete` for temporary files. Don't leave build artifacts.
+7. **Report results**: After running code, show the user the output (stdout/stderr) and explain any errors.
+8. **Iterate on errors**: If compilation or runtime fails, read the error, fix the code with `file_write`, and re-run. Repeat until it works.
+
+---
+
+## Security Notes
+- All paths are relative to the user's workspace and sandboxed — you cannot escape it.
+- Do not attempt path traversal (`../`).
+- The shell runs in the workspace root directory. Use `cd <subdir> && <command>` for subdirectories.
+- Avoid long-running foreground processes. If a command needs to stay running (e.g., a dev server), inform the user it will run in background."##,
+    },
+];
+=======
+    BuiltinSkill {
+        id: "builtin:code_engineer",
+        name: "code_engineer",
+        description: "Create, read, modify files and directories; build, compile, and run code projects in the user's workspace.",
+        content: r##"## Skill: code_engineer — Project & Code Engineering
+
+You have a sandboxed workspace where you can create files, write code, compile, and run programs. Use these tools when the user asks you to create a project, write code, build an app, run a script, or debug a program.
+
+---
+
+## Available Tools
+
+### File Operations
+- **file_read** — Read a file's contents. Param: `path` (relative to workspace root).
+- **file_write** — Write content to a file (creates parent dirs automatically). Params: `path`, `content`.
+- **file_list** — List entries in a directory with type info (file/dir). Param: `path` (default: `.`).
+- **file_delete** — Delete a file. Param: `path`.
+- **file_move** — Move/rename a file or directory. Params: `from`, `to`.
+- **file_copy** — Copy a file to a new location. Params: `from`, `to`.
+- **file_search** — Search file contents (substring grep) recursively. Params: `pattern`, `path` (default: `.`). Returns `path:line:content`.
+- **dir_create** — Create a directory (and parents). Param: `path`.
+- **dir_list** — Recursively list all files under a directory (skips .git, node_modules, target, __pycache__). Use to understand project structure. Param: `path` (default: `.`).
+- **file_info** — Get file metadata (type, size, modified time). Param: `path`.
+
+### Shell
+- **shell** — Execute a shell command in the workspace directory. Returns stdout + stderr. Timeout: 120s. Blocked patterns: `rm -rf /`, `mkfs`, `dd if=`, etc.
+
+---
+
+## Workflow: Creating a Project
+
+### Step 1: Scaffold the project structure
+Use `dir_create` and `file_write` to set up the project. Example for a Node.js project:
+```
+file_write({ path: "myapp/package.json", content: "{...}" })
+file_write({ path: "myapp/src/index.js", content: "..." })
+file_write({ path: "myapp/README.md", content: "..." })
+```
+
+### Step 2: Install dependencies (if needed)
+```
+shell({ command: "cd myapp && npm install" })
+```
+
+### Step 3: Run / build / compile
+```
+shell({ command: "cd myapp && npm start" })
+shell({ command: "cd myapp && npm run build" })
+```
+
+---
+
+## Language-Specific Quick Start
+
+### Python
+```
+file_write({ path: "hello.py", content: "print('Hello, World!')" })
+shell({ command: "python3 hello.py" })
+```
+For venv: `python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`
+
+### Node.js / TypeScript
+```
+file_write({ path: "app/package.json", content: "{\"name\":\"app\",\"scripts\":{\"start\":\"node index.js\"}}" })
+file_write({ path: "app/index.js", content: "console.log('Hello')" })
+shell({ command: "cd app && npm install && npm start" })
+```
+For TypeScript: `npx tsc` then `node dist/index.js`
+
+### Rust
+```
+shell({ command: "cargo new myproject --bin" })
+file_write({ path: "myproject/src/main.rs", content: "fn main() { println!(\"Hello\"); }" })
+shell({ command: "cd myproject && cargo run" })
+```
+
+### Go
+```
+shell({ command: "go mod init myproject" })
+file_write({ path: "main.go", content: "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"Hello\") }" })
+shell({ command: "go run main.go" })
+```
+
+### C / C++
+```
+file_write({ path: "hello.c", content: "#include <stdio.h>\nint main() { printf(\"Hello\\n\"); return 0; }" })
+shell({ command: "gcc hello.c -o hello && ./hello" })
+```
+For C++: `g++ hello.cpp -o hello && ./hello`
+
+### Java
+```
+file_write({ path: "Hello.java", content: "public class Hello { public static void main(String[] args) { System.out.println(\"Hello\"); } }" })
+shell({ command: "javac Hello.java && java Hello" })
+```
+
+---
+
+## Best Practices
+
+1. **Always read before modifying**: Use `file_read` to see current content before rewriting a file.
+2. **Use dir_list to understand structure**: Before making changes, run `dir_list({ path: "." })` to see the full project layout.
+3. **Compile incrementally**: After writing code, compile/run immediately to catch errors early. Fix and iterate.
+4. **Debug with file_search**: When tracking down a bug, use `file_search({ pattern: "function_name" })` to find where code is defined.
+5. **One file at a time**: Write each file completely with `file_write`. Don't use shell echo/cat for writing — `file_write` is atomic and handles paths.
+6. **Keep workspace clean**: Use `file_delete` for temporary files. Don't leave build artifacts.
+7. **Report results**: After running code, show the user the output (stdout/stderr) and explain any errors.
+8. **Iterate on errors**: If compilation or runtime fails, read the error, fix the code with `file_write`, and re-run. Repeat until it works.
+
+---
+
+## Security Notes
+- All paths are relative to the user's workspace and sandboxed — you cannot escape it.
+- Do not attempt path traversal (`../`).
+- The shell runs in the workspace root directory. Use `cd <subdir> && <command>` for subdirectories.
+- Avoid long-running foreground processes. If a command needs to stay running (e.g., a dev server), inform the user it will run in background."##,
+    },
+];
+>>>>>>> 8d4ce95 (feat: add file tools, workspace isolation, Documents browser, and chat context features)

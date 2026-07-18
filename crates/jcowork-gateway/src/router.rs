@@ -9,7 +9,7 @@ use axum::{
     middleware,
     extract::Request,
 };
-use axum::extract::{ws::WebSocketUpgrade, Path, Query};
+use axum::extract::{ws::WebSocketUpgrade, Multipart, Path, Query};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -23,7 +23,7 @@ use jcowork_llm::LlmRouter;
 use jcowork_logs::LogWriter;
 use jcowork_memory::MemoryManager;
 use jcowork_skills::{builtin_skills, SkillManager};
-use jcowork_storage::{FeishuConfigStore, UserStore};
+use jcowork_storage::{FeishuConfigStore, FileStore, UserStore};
 use jcowork_tools::registry::ToolRegistry;
 
 /// Shared application state.
@@ -43,6 +43,8 @@ pub struct AppState {
     pub feishu_config_store: Arc<FeishuConfigStore>,
     /// Cache of FeishuClient instances keyed by app_id.
     pub feishu_client_cache: Arc<DashMap<String, Arc<FeishuClient>>>,
+    /// Data directory for per-user workspaces.
+    pub data_dir: String,
 }
 
 // --- Request/Response types ---
@@ -152,6 +154,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/feishu/config", get(get_feishu_config))
         .route("/api/feishu/config", put(set_feishu_config))
         .route("/api/feishu/config", delete(delete_feishu_config))
+        .route("/api/workspace/files", get(list_workspace_files))
+        .route("/api/workspace/download", get(download_workspace_file))
+        .route("/api/workspace/upload-pdf", post(upload_pdf))
+        .route("/api/workspace/files-recursive", get(list_workspace_files_recursive))
+        .route("/api/fetch-url", post(fetch_url))
         .route("/api/ws", get(ws_upgrade))
         .layer(auth_mw);
 
@@ -650,8 +657,9 @@ async fn ws_upgrade(
     let log_writer = state.log_writer.clone();
     let memory_manager = state.memory_manager.clone();
     let skill_manager = state.skill_manager.clone();
+    let data_dir = state.data_dir.clone();
     ws.on_upgrade(move |socket| {
-        ws::ws_handler(socket, user_id, state.session_manager, state.llm_router, default_model, tool_registry, cron_scheduler, log_writer, memory_manager, skill_manager)
+        ws::ws_handler(socket, user_id, state.session_manager, state.llm_router, default_model, tool_registry, cron_scheduler, log_writer, memory_manager, skill_manager, data_dir)
     })
 }
 
@@ -759,5 +767,433 @@ fn mask_secret(secret: &str) -> String {
         "****".to_string()
     } else {
         format!("{}{}", "*".repeat(secret.len() - 4), &secret[secret.len() - 4..])
+    }
+}
+
+// --- Workspace Files API ---
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceFilesQuery {
+    path: Option<String>,
+}
+
+async fn list_workspace_files(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Query(params): Query<WorkspaceFilesQuery>,
+) -> impl IntoResponse {
+    let workspace_root = format!("{}/{}/workspace", state.data_dir, auth_user.user_id);
+    // Ensure workspace exists
+    let _ = tokio::fs::create_dir_all(&workspace_root).await;
+
+    let store = FileStore::new(&workspace_root);
+    let path = params.path.unwrap_or_else(|| ".".to_string());
+
+    match store.list_dir_detailed(&path).await {
+        Ok(entries) => {
+            let items: Vec<serde_json::Value> = entries
+                .iter()
+                .filter_map(|entry| {
+                    let parts: Vec<&str> = entry.splitn(2, '\t').collect();
+                    if parts.len() == 2 {
+                        Some(serde_json::json!({
+                            "name": parts[0],
+                            "type": parts[1],
+                        }))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            (StatusCode::OK, Json(serde_json::json!(items))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ).into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DownloadFileQuery {
+    path: String,
+}
+
+// --- PDF Upload API ---
+
+/// Inline Python script for PDF text extraction using pdftext.
+/// Must match the script in jcowork-tools/pdf_parse.rs.
+const PDF_PARSE_SCRIPT: &str = r#"
+import sys
+import os
+
+path = sys.argv[1]
+
+if not os.path.isfile(path):
+    print(f"Error: path does not exist: {path}", file=sys.stderr)
+    sys.exit(1)
+
+from pdftext.extraction import plain_text_output
+
+try:
+    text = plain_text_output(path)
+    print(text)
+except Exception as e:
+    print(f"Error parsing PDF: {e}", file=sys.stderr)
+    sys.exit(1)
+"#;
+
+async fn upload_pdf(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    let workspace_root = format!("{}/{}/workspace", state.data_dir, auth_user.user_id);
+    let _ = tokio::fs::create_dir_all(&workspace_root).await;
+    let uploads_dir = format!("{}/uploads", workspace_root);
+    let _ = tokio::fs::create_dir_all(&uploads_dir).await;
+
+    let mut result_files: Vec<serde_json::Value> = Vec::new();
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let filename = field
+            .file_name()
+            .unwrap_or("uploaded.pdf")
+            .to_string();
+        // Sanitize filename
+        let safe_name = filename
+            .replace("..", "")
+            .replace('/', "_")
+            .replace('\\', "_");
+        let file_path = format!("{}/{}", uploads_dir, safe_name);
+        let relative_path = format!("uploads/{}", safe_name);
+
+        let data = match field.bytes().await {
+            Ok(d) => d,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": format!("Failed to read file: {}", e) })),
+                ).into_response();
+            }
+        };
+
+        // Save PDF to workspace
+        if let Err(e) = tokio::fs::write(&file_path, &data).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Failed to save file: {}", e) })),
+            ).into_response();
+        }
+
+        // Parse PDF using pdftext
+        let python_bin = {
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .unwrap_or_else(|_| "/tmp".to_string());
+            if cfg!(windows) {
+                format!("{}\\.jcowork\\venv\\Scripts\\python.exe", home)
+            } else {
+                format!("{}/.jcowork/venv/bin/python", home)
+            }
+        };
+
+        let parsed_text = if std::path::Path::new(&python_bin).exists() {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(120),
+                tokio::process::Command::new(&python_bin)
+                    .arg("-c")
+                    .arg(PDF_PARSE_SCRIPT)
+                    .arg(&file_path)
+                    .output(),
+            ).await {
+                Ok(Ok(output)) if output.status.success() => {
+                    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+                    // Truncate if too large
+                    if text.len() > 200 * 1024 {
+                        text.truncate(200 * 1024);
+                        text.push_str("\n\n[... OUTPUT TRUNCATED: document exceeds 200KB ...]");
+                    }
+                    text
+                }
+                Ok(Ok(output)) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    format!("[PDF parse error: {}]", stderr)
+                }
+                Ok(Err(e)) => format!("[Failed to run PDF parser: {}]", e),
+                Err(_) => "[PDF parsing timed out after 120s]".to_string(),
+            }
+        } else {
+            "[Python venv not found. Run scripts/setup-python.sh first.]".to_string()
+        };
+
+        result_files.push(serde_json::json!({
+            "filename": safe_name,
+            "path": relative_path,
+            "size": data.len(),
+            "text": parsed_text,
+        }));
+    }
+
+    if result_files.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "No files uploaded" })),
+        ).into_response();
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({ "files": result_files }))).into_response()
+}
+
+// --- URL Fetch API ---
+
+#[derive(Debug, Deserialize)]
+struct FetchUrlRequest {
+    url: String,
+}
+
+/// Convert HTML to plain text by stripping tags and decoding entities.
+/// Good enough for LLM context — no external HTML parser dependency needed.
+fn html_to_text(html: &str) -> String {
+    let mut text = html.to_string();
+
+    // Remove script and style blocks (including content)
+    for tag in ["script", "style", "noscript", "head"] {
+        let open = format!("<{}", tag);
+        let close = format!("</{}>", tag);
+        while let Some(start) = text.to_lowercase().find(&open) {
+            if let Some(end) = text.to_lowercase()[start..].find(&close) {
+                let abs_end = start + end + close.len();
+                text.replace_range(start..abs_end, " ");
+            } else {
+                // No closing tag — remove to end of open tag
+                if let Some(gt) = text[start..].find('>') {
+                    text.replace_range(start..start + gt + 1, " ");
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Replace <br>, <p>, <div>, <li> tags with newlines
+    for tag in ["<br", "<br/", "<br /", "<p", "</p>", "<div", "</div>", "<li", "</li>", "<h1", "<h2", "<h3", "<h4", "<h5", "<h6", "</h1>", "</h2>", "</h3>", "</h4>", "</h5>", "</h6>", "<tr", "</tr>"] {
+        let replacement = if tag.starts_with("</") { "\n" } else { "\n" };
+        text = text.replace(tag, replacement);
+    }
+
+    // Strip all remaining HTML tags
+    let mut result = String::with_capacity(text.len());
+    let mut in_tag = false;
+    for ch in text.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => result.push(ch),
+            _ => {}
+        }
+    }
+
+    // Decode common HTML entities
+    let result = result
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+        .replace("&#x27;", "'")
+        .replace("&mdash;", "—")
+        .replace("&ndash;", "–")
+        .replace("&hellip;", "…")
+        .replace("&copy;", "©")
+        .replace("&reg;", "®");
+
+    // Collapse multiple whitespace/newlines
+    let mut cleaned = String::with_capacity(result.len());
+    let mut prev_was_space = false;
+    for line in result.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if !prev_was_space {
+                cleaned.push('\n');
+                prev_was_space = true;
+            }
+        } else {
+            // Collapse internal whitespace
+            let collapsed: String = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+            cleaned.push_str(&collapsed);
+            cleaned.push('\n');
+            prev_was_space = false;
+        }
+    }
+
+    // Truncate to 100KB to avoid token overflow
+    let mut final_text = cleaned.trim().to_string();
+    if final_text.len() > 100 * 1024 {
+        final_text.truncate(100 * 1024);
+        final_text.push_str("\n\n[... CONTENT TRUNCATED: page exceeds 100KB ...]");
+    }
+    final_text
+}
+
+/// Extract the page title from HTML.
+fn extract_title(html: &str) -> String {
+    let lower = html.to_lowercase();
+    if let Some(start) = lower.find("<title") {
+        if let Some(gt) = lower[start..].find('>') {
+            let content_start = start + gt + 1;
+            if let Some(end_tag) = lower[content_start..].find("</title>") {
+                return html[content_start..content_start + end_tag].trim().to_string();
+            }
+        }
+    }
+    "Untitled".to_string()
+}
+
+async fn fetch_url(
+    axum::Extension(_auth_user): axum::Extension<AuthUser>,
+    Json(req): Json<FetchUrlRequest>,
+) -> impl IntoResponse {
+    let url = req.url.trim();
+
+    // Basic URL validation
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "URL must start with http:// or https://" })),
+        ).into_response();
+    }
+
+    // Fetch the page
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .user_agent("Mozilla/5.0 (compatible; JcoworkBot/1.0)")
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Failed to create HTTP client: {}", e) })),
+            ).into_response();
+        }
+    };
+
+    let resp = match client.get(url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("Failed to fetch URL: {}", e) })),
+            ).into_response();
+        }
+    };
+
+    let status = resp.status();
+    if !status.is_success() {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": format!("HTTP {} from {}", status, url) })),
+        ).into_response();
+    }
+
+    let html = match resp.text().await {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("Failed to read response: {}", e) })),
+            ).into_response();
+        }
+    };
+
+    let title = extract_title(&html);
+    let text = html_to_text(&html);
+
+    Json(serde_json::json!({
+        "url": url,
+        "title": title,
+        "text": text,
+    })).into_response()
+}
+
+// --- Workspace Files Recursive API ---
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceFilesRecursiveQuery {
+    path: Option<String>,
+}
+
+async fn list_workspace_files_recursive(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Query(params): Query<WorkspaceFilesRecursiveQuery>,
+) -> impl IntoResponse {
+    let workspace_root = format!("{}/{}/workspace", state.data_dir, auth_user.user_id);
+    let _ = tokio::fs::create_dir_all(&workspace_root).await;
+
+    let store = FileStore::new(&workspace_root);
+    let path = params.path.unwrap_or_else(|| ".".to_string());
+
+    match store.list_dir_recursive(&path).await {
+        Ok(files) => {
+            (StatusCode::OK, Json(serde_json::json!(files))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ).into_response(),
+    }
+}
+
+async fn download_workspace_file(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Query(params): Query<DownloadFileQuery>,
+) -> impl IntoResponse {
+    let workspace_root = format!("{}/{}/workspace", state.data_dir, auth_user.user_id);
+    let store = FileStore::new(&workspace_root);
+
+    match store.read_file(&params.path).await {
+        Ok(content) => {
+            // Determine content type from extension
+            let content_type = if params.path.ends_with(".html") || params.path.ends_with(".htm") {
+                "text/html; charset=utf-8"
+            } else if params.path.ends_with(".css") {
+                "text/css; charset=utf-8"
+            } else if params.path.ends_with(".js") || params.path.ends_with(".mjs") {
+                "application/javascript; charset=utf-8"
+            } else if params.path.ends_with(".json") {
+                "application/json; charset=utf-8"
+            } else if params.path.ends_with(".svg") {
+                "image/svg+xml"
+            } else if params.path.ends_with(".png") || params.path.ends_with(".jpg")
+                || params.path.ends_with(".jpeg") || params.path.ends_with(".gif")
+                || params.path.ends_with(".webp") || params.path.ends_with(".ico")
+            {
+                // For binary images, we'd need a different approach; return as download
+                "application/octet-stream"
+            } else {
+                "text/plain; charset=utf-8"
+            };
+
+            let filename = params.path.rsplit('/').next().unwrap_or("file");
+            (
+                StatusCode::OK,
+                [
+                    (axum::http::header::CONTENT_TYPE, content_type.to_string()),
+                    (axum::http::header::CONTENT_DISPOSITION, format!("inline; filename=\"{}\"", filename)),
+                ],
+                content,
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }

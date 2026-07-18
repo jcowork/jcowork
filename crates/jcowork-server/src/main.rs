@@ -102,6 +102,7 @@ async fn main() -> Result<()> {
         log_writer,
         feishu_config_store: Arc::new(FeishuConfigStore::new(pool)),
         feishu_client_cache: Arc::new(dashmap::DashMap::new()),
+        data_dir: data_dir.clone(),
     };
 
     // Build router

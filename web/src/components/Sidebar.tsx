@@ -6,6 +6,7 @@ interface SidebarProps {
   onSchedule: () => void;
   onMemory: () => void;
   onSkills: () => void;
+  onDocuments: () => void;
   currentView: string;
   mobileOpen?: boolean;
   onClose?: () => void;
@@ -13,14 +14,15 @@ interface SidebarProps {
 
 const NAV_ITEMS = [
   { key: 'chat', label: 'Chat' },
+  { key: 'documents', label: 'Documents' },
   { key: 'schedule', label: 'Schedule' },
   { key: 'memory', label: 'Memory' },
   { key: 'skills', label: 'Skills' },
   { key: 'settings', label: 'Settings' },
 ];
 
-export default function Sidebar({ username, onLogout, onChat, onSettings, onSchedule, onMemory, onSkills, currentView, mobileOpen, onClose }: SidebarProps) {
-  const navHandlers: Record<string, () => void> = { chat: onChat, schedule: onSchedule, memory: onMemory, skills: onSkills, settings: onSettings };
+export default function Sidebar({ username, onLogout, onChat, onSettings, onSchedule, onMemory, onSkills, onDocuments, currentView, mobileOpen, onClose }: SidebarProps) {
+  const navHandlers: Record<string, () => void> = { chat: onChat, documents: onDocuments, schedule: onSchedule, memory: onMemory, skills: onSkills, settings: onSettings };
 
   const handleNav = (key: string) => {
     navHandlers[key]?.();

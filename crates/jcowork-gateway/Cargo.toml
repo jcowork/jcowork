@@ -28,4 +28,5 @@ jsonwebtoken = { workspace = true }
 argon2 = { workspace = true, features = ["std"] }
 dashmap = { workspace = true }
 futures = { workspace = true }
+reqwest = { workspace = true }
 rand_core = { version = "0.6", features = ["std"] }

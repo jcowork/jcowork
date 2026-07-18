@@ -178,7 +178,7 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
         }
         // If no saved preference, use server default
         if (!initialProvider && serverDefault.includes(':')) {
-          const colonIdx = serverDefault.slice(':');
+          const colonIdx = serverDefault.indexOf(':');
           initialProvider = serverDefault.slice(0, colonIdx);
           initialModel = serverDefault.slice(colonIdx + 1);
         }

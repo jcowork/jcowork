@@ -15,10 +15,12 @@ use jcowork_skills::{builtin_skills, SkillManager};
 use jcowork_tools::base::ToolContext;
 use jcowork_tools::cron::{ReminderAddTool, ReminderListTool, ReminderRemoveTool, CronAddTool, CronListTool, CronRemoveTool};
 use jcowork_tools::bing_search::WebSearchTool;
+use jcowork_tools::file_ops::{FileReadTool, FileWriteTool, FileListTool, FileDeleteTool, FileMoveTool, FileCopyTool, FileSearchTool, DirCreateTool, DirListTool, FileInfoTool};
 use jcowork_tools::memory::{MemorySaveTool, MemoryUpdateTool, MemoryRecallTool, MemorySearchTool};
 use jcowork_tools::pdf_parse::PdfParseTool;
 use jcowork_tools::report_search::{ReportListCompaniesTool, ReportSearchTool};
 use jcowork_tools::registry::ToolRegistry;
+use jcowork_tools::shell::ShellTool;
 
 use crate::session::SessionManager;
 
@@ -29,6 +31,16 @@ pub struct WsInput {
     pub content: String,
     /// Model string in "provider:model" format. Defaults to server default if not provided.
     pub model: Option<String>,
+    /// Optional context documents (workspace files or uploaded PDFs) to include as reference.
+    pub context_documents: Option<Vec<ContextDocument>>,
+}
+
+/// A reference document provided as context for a chat message.
+#[derive(Debug, Deserialize)]
+pub struct ContextDocument {
+    pub name: String,
+    pub path: Option<String>,
+    pub content: String,
 }
 
 /// Outgoing WebSocket message to client.
@@ -82,6 +94,19 @@ pub fn build_tool_registry(
     // Report search tools
     registry.register(Arc::new(ReportSearchTool::default()));
     registry.register(Arc::new(ReportListCompaniesTool::default()));
+    // File operations tools (skill-gated behind builtin:code_engineer)
+    registry.register(Arc::new(FileReadTool));
+    registry.register(Arc::new(FileWriteTool));
+    registry.register(Arc::new(FileListTool));
+    registry.register(Arc::new(FileDeleteTool));
+    registry.register(Arc::new(FileMoveTool));
+    registry.register(Arc::new(FileCopyTool));
+    registry.register(Arc::new(FileSearchTool));
+    registry.register(Arc::new(DirCreateTool));
+    registry.register(Arc::new(DirListTool));
+    registry.register(Arc::new(FileInfoTool));
+    // Shell tool (skill-gated behind builtin:code_engineer)
+    registry.register(Arc::new(ShellTool::new(120)));
     Arc::new(registry)
 }
 
@@ -97,6 +122,7 @@ pub async fn ws_handler(
     log_writer: Arc<LogWriter>,
     memory_manager: Arc<MemoryManager>,
     skill_manager: Arc<SkillManager>,
+    data_dir: String,
 ) {
     let (mut ws_sender, mut ws_receiver) = ws.split();
 
@@ -148,6 +174,34 @@ pub async fn ws_handler(
                 };
 
                 // Add user message to history
+                // If context documents are provided, inject them as a system message
+                // right before the user message so the LLM can reference them.
+                if let Some(docs) = &input.context_documents {
+                    if !docs.is_empty() {
+                        let mut parts = Vec::new();
+                        for doc in docs {
+                            let path_info = doc.path.as_deref().unwrap_or("");
+                            parts.push(format!(
+                                "--- Document: {} (path: {}) ---\n{}\n--- End of document ---",
+                                doc.name, path_info, doc.content
+                            ));
+                        }
+                        let context_msg = format!(
+                            "The user has attached the following reference document(s). \
+                            You may read, analyze, and if requested, modify them. \
+                            When modifying a document, use file_write to save changes to the workspace.\n\n{}",
+                            parts.join("\n\n")
+                        );
+                        history.push(ChatMessage {
+                            role: "system".to_string(),
+                            content: context_msg,
+                            tool_calls: None,
+                            tool_call_id: None,
+                            reasoning_content: None,
+                        });
+                    }
+                }
+
                 history.push(ChatMessage {
                     role: "user".to_string(),
                     content: input.content.clone(),
@@ -183,6 +237,7 @@ pub async fn ws_handler(
                         let skill_required = match t.function.name.as_str() {
                             "web_search" => Some("builtin:web_search"),
                             "report_search" | "report_list_companies" => Some("builtin:write_research_report"),
+                            "file_read" | "file_write" | "file_list" | "file_delete" | "file_move" | "file_copy" | "file_search" | "dir_create" | "dir_list" | "file_info" | "shell" => Some("builtin:code_engineer"),
                             _ => None,
                         };
                         match skill_required {
@@ -191,9 +246,12 @@ pub async fn ws_handler(
                         }
                     })
                     .collect();
+                // Compute per-user workspace root and ensure it exists
+                let workspace_root = format!("{}/{}/workspace", data_dir, user_id);
+                let _ = tokio::fs::create_dir_all(&workspace_root).await;
                 let tool_ctx = ToolContext {
                     user_id: user_id.clone(),
-                    workspace_root: String::new(),
+                    workspace_root,
                 };
 
                 // Fetch active reminders and cron jobs to inject as context

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import Chat from './components/Chat';
+import Documents from './components/Documents';
 import Memory from './components/Memory';
 import Schedule from './components/Schedule';
 import Sidebar from './components/Sidebar';
@@ -23,6 +24,7 @@ export default function App() {
   const [showSchedule, setShowSchedule] = useState(false);
   const [showMemory, setShowMemory] = useState(false);
   const [showSkills, setShowSkills] = useState(false);
+  const [showDocuments, setShowDocuments] = useState(false);
   const [mobileSidebar, setMobileSidebar] = useState(false);
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [isRegister, setIsRegister] = useState(false);
@@ -100,12 +102,13 @@ export default function App() {
   return (
     <div style={{ display: 'flex', height: '100vh', background: '#111', color: '#eee' }}>
       <Sidebar username={auth.username} onLogout={logout}
-        onChat={() => { setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); }}
-        onSettings={() => { setShowSettings(true); setShowSchedule(false); setShowMemory(false); setShowSkills(false); }}
-        onSchedule={() => { setShowSchedule(true); setShowSettings(false); setShowMemory(false); setShowSkills(false); }}
-        onMemory={() => { setShowMemory(true); setShowSchedule(false); setShowSettings(false); setShowSkills(false); }}
-        onSkills={() => { setShowSkills(true); setShowMemory(false); setShowSchedule(false); setShowSettings(false); }}
-        currentView={showSettings ? 'settings' : showSchedule ? 'schedule' : showMemory ? 'memory' : showSkills ? 'skills' : 'chat'}
+        onChat={() => { setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); }}
+        onDocuments={() => { setShowDocuments(true); setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); }}
+        onSettings={() => { setShowSettings(true); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); }}
+        onSchedule={() => { setShowSchedule(true); setShowSettings(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); }}
+        onMemory={() => { setShowMemory(true); setShowSchedule(false); setShowSettings(false); setShowSkills(false); setShowDocuments(false); }}
+        onSkills={() => { setShowSkills(true); setShowMemory(false); setShowSchedule(false); setShowSettings(false); setShowDocuments(false); }}
+        currentView={showSettings ? 'settings' : showSchedule ? 'schedule' : showMemory ? 'memory' : showSkills ? 'skills' : showDocuments ? 'documents' : 'chat'}
         mobileOpen={mobileSidebar}
         onClose={() => setMobileSidebar(false)}
       />
@@ -125,6 +128,8 @@ export default function App() {
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
           {showSettings ? (
             <Settings onClose={() => setShowSettings(false)} userId={auth.userId} token={auth.token} />
+          ) : showDocuments ? (
+            <Documents userId={auth.userId} token={auth.token} />
           ) : showSchedule ? (
             <Schedule userId={auth.userId} token={auth.token} />
           ) : showMemory ? (

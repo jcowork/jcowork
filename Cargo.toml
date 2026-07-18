@@ -38,7 +38,7 @@ jcowork-logs = { path = "crates/jcowork-logs" }
 tokio = { version = "1", features = ["full"] }
 
 # Web framework
-axum = { version = "0.8", features = ["ws", "macros"] }
+axum = { version = "0.8", features = ["ws", "macros", "multipart"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 tower = "0.5"
 
@@ -101,3 +101,6 @@ shellexpand = "3"
 # Crypto / hashing
 sha2 = "0.10"
 hex = "0.4"
+
+# Test utilities
+tempfile = "3"
