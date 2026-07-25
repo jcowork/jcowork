@@ -142,7 +142,7 @@ pub async fn ws_handler(
     let system_prompt = build_system_prompt_with_identity(custom_identity.as_deref(), &skill_prompt);
     history.push(ChatMessage {
         role: "system".to_string(),
-        content: system_prompt,
+        content: system_prompt.clone(),
         tool_calls: None,
         tool_call_id: None,
         reasoning_content: None,
@@ -174,34 +174,43 @@ pub async fn ws_handler(
                 };
 
                 // Add user message to history
-                // If context documents are provided, inject them as a system message
-                // right before the user message so the LLM can reference them.
+                // If context documents are provided, inject them DIRECTLY into the system prompt
+                // so the LLM sees them as part of its core instructions.
+                // First, reset system prompt to original (in case previous message had docs appended)
+                if !history.is_empty() {
+                    history[0].content = system_prompt.clone();
+                }
                 if let Some(docs) = &input.context_documents {
-                    if !docs.is_empty() {
+                    if !docs.is_empty() && !history.is_empty() {
                         let mut parts = Vec::new();
                         for doc in docs {
                             let path_info = doc.path.as_deref().unwrap_or("");
+                            // Truncate very long documents to avoid exceeding context window
+                            let max_len = 12000;
+                            let content = if doc.content.len() > max_len {
+                                format!("{}\n\n[... content truncated, {} chars total ...]", &doc.content[..max_len], doc.content.len())
+                            } else {
+                                doc.content.clone()
+                            };
                             parts.push(format!(
-                                "--- Document: {} (path: {}) ---\n{}\n--- End of document ---",
-                                doc.name, path_info, doc.content
+                                "=== {} (path: {}) ===\n{}\n=== END ===",
+                                doc.name, path_info, content
                             ));
                         }
-                        let context_msg = format!(
-                            "The user has attached the following reference document(s) for this conversation.\n\n\
-                             **IMPORTANT**: When answering the user's question, you MUST prioritize the content from these attached documents.\n\
-                             - First, check if the answer can be found in the attached documents. If so, answer based on the document content.\n\
-                             - Only use web_search or other external tools if the documents do NOT contain the relevant information.\n\
-                             - Do NOT ignore the attached documents and go directly to web search.\n\
-                             - When modifying a document, use file_write to save changes to the workspace.\n\n{}",
+                        let doc_block = format!(
+                            "\n\n## ATTACHED REFERENCE DOCUMENTS\n\
+                             The user has attached document(s) to this conversation. \
+                             Their FULL TEXT CONTENT is provided below — you ALREADY have all the information.\n\n\
+                             ⚠️ CRITICAL RULES — YOU MUST FOLLOW THESE:\n\
+                             1. The document content is RIGHT HERE below. You DO NOT need to read, parse, or access any files.\n\
+                             2. ANSWER DIRECTLY using the content below. Do NOT call pdf_parse, file_read, dir_list, shell, or ANY tool to access these files.\n\
+                             3. ONLY use external tools if the user explicitly asks for info BEYOND what's in the documents.\n\
+                             4. If asked to modify a document, use file_write to save changes.\n\n\
+                             {}\n",
                             parts.join("\n\n")
                         );
-                        history.push(ChatMessage {
-                            role: "system".to_string(),
-                            content: context_msg,
-                            tool_calls: None,
-                            tool_call_id: None,
-                            reasoning_content: None,
-                        });
+                        // Append to the system prompt (history[0])
+                        history[0].content = format!("{}{}", history[0].content, doc_block);
                     }
                 }
 
