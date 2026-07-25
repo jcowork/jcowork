@@ -187,9 +187,12 @@ pub async fn ws_handler(
                             ));
                         }
                         let context_msg = format!(
-                            "The user has attached the following reference document(s). \
-                            You may read, analyze, and if requested, modify them. \
-                            When modifying a document, use file_write to save changes to the workspace.\n\n{}",
+                            "The user has attached the following reference document(s) for this conversation.\n\n\
+                             **IMPORTANT**: When answering the user's question, you MUST prioritize the content from these attached documents.\n\
+                             - First, check if the answer can be found in the attached documents. If so, answer based on the document content.\n\
+                             - Only use web_search or other external tools if the documents do NOT contain the relevant information.\n\
+                             - Do NOT ignore the attached documents and go directly to web search.\n\
+                             - When modifying a document, use file_write to save changes to the workspace.\n\n{}",
                             parts.join("\n\n")
                         );
                         history.push(ChatMessage {
