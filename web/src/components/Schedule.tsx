@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useT } from '../i18n';
 
 interface Reminder {
   id: string;
@@ -24,6 +25,7 @@ interface ScheduleProps {
 }
 
 export default function Schedule({ userId, token }: ScheduleProps) {
+  const t = useT();
   const [reminders, setReminders] = useState<Reminder[]>([]);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [loading, setLoading] = useState(true);
@@ -121,7 +123,7 @@ export default function Schedule({ userId, token }: ScheduleProps) {
         alignItems: 'center',
         justifyContent: 'space-between',
       }}>
-        <span style={{ fontWeight: 600, fontSize: 16 }}>Schedule</span>
+        <span style={{ fontWeight: 600, fontSize: 16 }}>{t('schedule')}</span>
         <button
           onClick={() => { fetchReminders(); fetchCronJobs(); }}
           style={{
@@ -134,7 +136,7 @@ export default function Schedule({ userId, token }: ScheduleProps) {
             fontSize: 12,
           }}
         >
-          Refresh
+          {t('refresh')}
         </button>
       </div>
 
@@ -143,11 +145,11 @@ export default function Schedule({ userId, token }: ScheduleProps) {
         {/* Reminders section */}
         <div style={{ marginBottom: 24 }}>
           <h3 style={{ fontSize: 14, color: '#888', textTransform: 'uppercase', marginBottom: 12, letterSpacing: 1 }}>
-            🔔 Reminders
+            🔔 {t('reminders')}
           </h3>
 
           {loading ? (
-            <div style={{ color: '#666', padding: 16, textAlign: 'center' }}>Loading...</div>
+            <div style={{ color: '#666', padding: 16, textAlign: 'center' }}>{t('loading')}</div>
           ) : reminders.length === 0 ? (
             <div style={{
               color: '#666',
@@ -156,9 +158,9 @@ export default function Schedule({ userId, token }: ScheduleProps) {
               border: '1px dashed #444',
               borderRadius: 8,
             }}>
-              No active reminders.<br />
+              {t('noReminders')}<br />
               <span style={{ fontSize: 12, color: '#555' }}>
-                Try saying "提醒我下午3点开会" in chat
+                {t('trySayingReminder')}
               </span>
             </div>
           ) : (
@@ -195,7 +197,7 @@ export default function Schedule({ userId, token }: ScheduleProps) {
                       marginLeft: 12,
                     }}
                   >
-                    Cancel
+                    {t('cancel')}
                   </button>
                 </div>
               ))}
@@ -206,11 +208,11 @@ export default function Schedule({ userId, token }: ScheduleProps) {
         {/* Cron Jobs section */}
         <div>
           <h3 style={{ fontSize: 14, color: '#888', textTransform: 'uppercase', marginBottom: 12, letterSpacing: 1 }}>
-            Cron Jobs
+            {t('cronJobs')}
           </h3>
 
           {loading ? (
-            <div style={{ color: '#666', padding: 16, textAlign: 'center' }}>Loading...</div>
+            <div style={{ color: '#666', padding: 16, textAlign: 'center' }}>{t('loading')}</div>
           ) : cronJobs.length === 0 ? (
             <div style={{
               color: '#666',
@@ -219,9 +221,9 @@ export default function Schedule({ userId, token }: ScheduleProps) {
               border: '1px dashed #444',
               borderRadius: 8,
             }}>
-              No cron jobs yet.<br />
+              {t('noCronJobs')}<br />
               <span style={{ fontSize: 12, color: '#555' }}>
-                Try saying "每天早上9点提醒我写日报" in chat
+                {t('trySayingCron')}
               </span>
             </div>
           ) : (
@@ -252,7 +254,7 @@ export default function Schedule({ userId, token }: ScheduleProps) {
                         background: '#81c78420',
                         marginRight: 8,
                       }}>{j.schedule}</span>
-                      {j.last_run && <span>Last run: {formatTime(j.last_run)}</span>}
+                      {j.last_run && <span>{t('lastRunLabel')}: {formatTime(j.last_run)}</span>}
                     </div>
                   </div>
                   <button
@@ -268,7 +270,7 @@ export default function Schedule({ userId, token }: ScheduleProps) {
                       marginLeft: 12,
                     }}
                   >
-                    Cancel
+                    {t('cancel')}
                   </button>
                 </div>
               ))}

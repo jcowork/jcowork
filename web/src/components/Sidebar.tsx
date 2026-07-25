@@ -1,3 +1,5 @@
+import { useLang, useT } from '../i18n';
+
 interface SidebarProps {
   username: string;
   onLogout: () => void;
@@ -12,21 +14,28 @@ interface SidebarProps {
   onClose?: () => void;
 }
 
-const NAV_ITEMS = [
-  { key: 'chat', label: 'Chat' },
-  { key: 'documents', label: 'Documents' },
-  { key: 'schedule', label: 'Schedule' },
-  { key: 'memory', label: 'Memory' },
-  { key: 'skills', label: 'Skills' },
-  { key: 'settings', label: 'Settings' },
-];
-
 export default function Sidebar({ username, onLogout, onChat, onSettings, onSchedule, onMemory, onSkills, onDocuments, currentView, mobileOpen, onClose }: SidebarProps) {
+  const t = useT();
+  const { lang, setLang } = useLang();
+
+  const NAV_ITEMS = [
+    { key: 'chat', label: t('chat') },
+    { key: 'documents', label: t('documents') },
+    { key: 'schedule', label: t('schedule') },
+    { key: 'memory', label: t('memory') },
+    { key: 'skills', label: t('skills') },
+    { key: 'settings', label: t('settings') },
+  ];
+
   const navHandlers: Record<string, () => void> = { chat: onChat, documents: onDocuments, schedule: onSchedule, memory: onMemory, skills: onSkills, settings: onSettings };
 
   const handleNav = (key: string) => {
     navHandlers[key]?.();
     onClose?.();
+  };
+
+  const toggleLang = () => {
+    setLang(lang === 'zh' ? 'en' : 'zh');
   };
 
   return (
@@ -60,12 +69,12 @@ export default function Sidebar({ username, onLogout, onChat, onSettings, onSche
           Jcowork
         </div>
 
-        <div style={{ color: '#888', fontSize: 12, marginBottom: 8 }}>Signed in as</div>
+        <div style={{ color: '#888', fontSize: 12, marginBottom: 8 }}>{t('signedInAs')}</div>
         <div style={{ marginBottom: 24, fontWeight: 500 }}>{username}</div>
 
         <div style={{ flex: 1 }}>
           <div style={{ color: '#888', fontSize: 12, marginBottom: 8, textTransform: 'uppercase' }}>
-            Navigation
+            {t('navigation')}
           </div>
           {NAV_ITEMS.map(item => (
             <button
@@ -90,6 +99,26 @@ export default function Sidebar({ username, onLogout, onChat, onSettings, onSche
           ))}
         </div>
 
+        {/* Language toggle */}
+        <button
+          onClick={toggleLang}
+          style={{
+            padding: '8px 12px',
+            borderRadius: 6,
+            border: '1px solid #444',
+            background: '#222',
+            color: '#aaa',
+            cursor: 'pointer',
+            fontSize: 13,
+            marginBottom: 8,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+          }}
+        >
+          🌐 {lang === 'zh' ? 'English' : '中文'}
+        </button>
+
         <button
           onClick={onLogout}
           style={{
@@ -102,7 +131,7 @@ export default function Sidebar({ username, onLogout, onChat, onSettings, onSche
             fontSize: 14,
           }}
         >
-          Logout
+          {t('logout')}
         </button>
       </div>
     </>

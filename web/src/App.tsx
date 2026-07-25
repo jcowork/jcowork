@@ -6,6 +6,7 @@ import Schedule from './components/Schedule';
 import Sidebar from './components/Sidebar';
 import Settings from './components/Settings';
 import SkillsSquare from './components/SkillsSquare';
+import { I18nProvider, useT } from './i18n';
 
 const API_BASE = '';
 
@@ -16,6 +17,15 @@ interface AuthState {
 }
 
 export default function App() {
+  return (
+    <I18nProvider>
+      <AppInner />
+    </I18nProvider>
+  );
+}
+
+function AppInner() {
+  const t = useT();
   const [auth, setAuth] = useState<AuthState | null>(() => {
     const saved = localStorage.getItem('jcowork_auth');
     return saved ? JSON.parse(saved) : null;
@@ -69,14 +79,14 @@ export default function App() {
           <form onSubmit={handleAuth}>
             <input
               type="text"
-              placeholder="Username"
+              placeholder={t('username')}
               value={loginForm.username}
               onChange={(e) => setLoginForm({ ...loginForm, username: e.target.value })}
               style={{ width: '100%', padding: 10, marginBottom: 12, borderRadius: 8, border: '1px solid #555', background: '#1a1a1a', color: '#eee', fontSize: 16 }}
             />
             <input
               type="password"
-              placeholder="Password"
+              placeholder={t('password')}
               value={loginForm.password}
               onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })}
               style={{ width: '100%', padding: 10, marginBottom: 16, borderRadius: 8, border: '1px solid #555', background: '#1a1a1a', color: '#eee', fontSize: 16 }}
@@ -85,13 +95,13 @@ export default function App() {
               type="submit"
               style={{ width: '100%', padding: 10, borderRadius: 8, border: 'none', background: '#1a73e8', color: '#fff', fontSize: 16, cursor: 'pointer' }}
             >
-              {isRegister ? 'Register' : 'Login'}
+              {isRegister ? t('register') : t('login')}
             </button>
           </form>
           <p style={{ marginTop: 16, textAlign: 'center' }}>
-            <span style={{ color: '#888' }}>{isRegister ? 'Already have an account?' : "Don't have an account?"}</span>{' '}
+            <span style={{ color: '#888' }}>{isRegister ? t('alreadyHaveAccount') : t('dontHaveAccount')}</span>{' '}
             <a href="#" onClick={() => setIsRegister(!isRegister)} style={{ color: '#1a73e8' }}>
-              {isRegister ? 'Login' : 'Register'}
+              {isRegister ? t('login') : t('register')}
             </a>
           </p>
         </div>

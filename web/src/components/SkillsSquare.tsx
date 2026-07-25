@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useT } from '../i18n';
 
 interface SkillEntry {
   id: string;
@@ -18,6 +19,7 @@ interface SkillsSquareProps {
 type FilterTab = 'all' | 'builtin' | 'user';
 
 export default function SkillsSquare({ token }: SkillsSquareProps) {
+  const t = useT();
   const [skills, setSkills] = useState<SkillEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [toggling, setToggling] = useState<Set<string>>(new Set());
@@ -140,9 +142,9 @@ export default function SkillsSquare({ token }: SkillsSquareProps) {
         flexShrink: 0,
       }}>
         <div>
-          <h2 style={{ fontSize: 20, fontWeight: 600 }}>Skills Square</h2>
+          <h2 style={{ fontSize: 20, fontWeight: 600 }}>{t('skillsSquare')}</h2>
           <div style={{ fontSize: 12, color: '#666', marginTop: 2 }}>
-            {enabledCount} skill{enabledCount !== 1 ? 's' : ''} enabled — active skills are injected into the agent on each new session
+            {enabledCount} {t('skillsEnabled')}
           </div>
         </div>
       </div>
@@ -156,23 +158,23 @@ export default function SkillsSquare({ token }: SkillsSquareProps) {
         flexShrink: 0,
       }}>
         <button style={tabStyle(filter === 'all')} onClick={() => setFilter('all')}>
-          All ({skills.length})
+          {t('all')} ({skills.length})
         </button>
         <button style={tabStyle(filter === 'builtin')} onClick={() => setFilter('builtin')}>
-          Built-in ({skills.filter(s => s.source === 'builtin').length})
+          {t('builtIn')} ({skills.filter(s => s.source === 'builtin').length})
         </button>
         <button style={tabStyle(filter === 'user')} onClick={() => setFilter('user')}>
-          My Skills ({skills.filter(s => s.source === 'user').length})
+          {t('mySkills')} ({skills.filter(s => s.source === 'user').length})
         </button>
       </div>
 
       {/* Content */}
       <div style={{ flex: 1, overflowY: 'auto', padding: 24 }}>
         {loading ? (
-          <div style={{ color: '#666', textAlign: 'center', paddingTop: 60 }}>Loading skills...</div>
+          <div style={{ color: '#666', textAlign: 'center', paddingTop: 60 }}>{t('loadingSkills')}</div>
         ) : filtered.length === 0 ? (
           <div style={{ color: '#555', textAlign: 'center', paddingTop: 60 }}>
-            {filter === 'user' ? 'No custom skills yet.' : 'No skills found.'}
+            {filter === 'user' ? t('noCustomSkills') : t('noSkillsFound')}
           </div>
         ) : (
           <div className="skills-grid" style={{
@@ -211,7 +213,7 @@ export default function SkillsSquare({ token }: SkillsSquareProps) {
                           color: skill.source === 'builtin' ? '#3fb950' : '#58a6ff',
                           fontWeight: 500,
                         }}>
-                          {skill.source === 'builtin' ? 'Built-in' : 'My Skill'}
+                          {skill.source === 'builtin' ? t('builtIn') : t('mySkills')}
                         </span>
                         {skill.source === 'user' && (
                           <span style={{ fontSize: 11, color: '#555' }}>v{skill.version}</span>
@@ -244,7 +246,7 @@ export default function SkillsSquare({ token }: SkillsSquareProps) {
                       }}
                     >
                       <div style={{ fontSize: 11, color: '#666', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                        Skill instructions (injected into system prompt when enabled)
+                        {t('skillInstructions')}
                       </div>
                       <pre style={{
                         fontSize: 12,
@@ -262,7 +264,7 @@ export default function SkillsSquare({ token }: SkillsSquareProps) {
 
                   {/* Footer hint */}
                   <div style={{ fontSize: 11, color: '#555' }}>
-                    {isExpanded ? 'Click to collapse' : 'Click to preview instructions'}
+                    {isExpanded ? t('clickToCollapse') : t('clickToPreview')}
                   </div>
                 </div>
               );

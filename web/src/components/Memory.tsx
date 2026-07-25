@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useT } from '../i18n';
 
 interface MemoryItem {
   id: string;
@@ -12,6 +13,7 @@ interface MemoryProps {
 }
 
 export default function Memory({ userId, token }: MemoryProps) {
+  const t = useT();
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
@@ -125,11 +127,11 @@ export default function Memory({ userId, token }: MemoryProps) {
         justifyContent: 'space-between',
         gap: 12,
       }}>
-        <span style={{ fontWeight: 600, fontSize: 16 }}>Memory</span>
+        <span style={{ fontWeight: 600, fontSize: 16 }}>{t('memory')}</span>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <input
             type="text"
-            placeholder="Search memories..."
+            placeholder={t('searchMemories')}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
@@ -155,7 +157,7 @@ export default function Memory({ userId, token }: MemoryProps) {
               fontSize: 12,
             }}
           >
-            Search
+            {t('search')}
           </button>
           {searchResults && (
             <button
@@ -170,7 +172,7 @@ export default function Memory({ userId, token }: MemoryProps) {
                 fontSize: 12,
               }}
             >
-              Clear
+              {t('clear')}
             </button>
           )}
           <button
@@ -185,7 +187,7 @@ export default function Memory({ userId, token }: MemoryProps) {
               fontSize: 12,
             }}
           >
-            Refresh
+            {t('refresh')}
           </button>
         </div>
       </div>
@@ -193,7 +195,7 @@ export default function Memory({ userId, token }: MemoryProps) {
       {/* Content */}
       <div style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
         {loading ? (
-          <div style={{ color: '#666', padding: 16, textAlign: 'center' }}>Loading...</div>
+          <div style={{ color: '#666', padding: 16, textAlign: 'center' }}>{t('loading')}</div>
         ) : displayMemories.length === 0 ? (
           <div style={{
             color: '#666',
@@ -202,9 +204,9 @@ export default function Memory({ userId, token }: MemoryProps) {
             border: '1px dashed #444',
             borderRadius: 8,
           }}>
-            {searchResults !== null ? 'No matching memories found.' : 'No memories yet.'}<br />
+            {searchResults !== null ? t('noMatchingMemories') : t('noMemories')}<br />
             <span style={{ fontSize: 12, color: '#555' }}>
-              {searchResults !== null ? 'Try a different search term.' : 'Try saying "记住，我喜欢深色主题" in chat'}
+              {searchResults !== null ? t('tryDifferentSearch') : t('trySaying')}
             </span>
           </div>
         ) : (
@@ -244,7 +246,7 @@ export default function Memory({ userId, token }: MemoryProps) {
                         type="text"
                         value={editCategory}
                         onChange={(e) => setEditCategory(e.target.value)}
-                        placeholder="Category"
+                        placeholder={t('category')}
                         style={{
                           padding: '4px 10px',
                           borderRadius: 6,
@@ -267,7 +269,7 @@ export default function Memory({ userId, token }: MemoryProps) {
                           fontSize: 13,
                         }}
                       >
-                        Save
+                        {t('save')}
                       </button>
                       <button
                         onClick={cancelEdit}
@@ -281,7 +283,7 @@ export default function Memory({ userId, token }: MemoryProps) {
                           fontSize: 13,
                         }}
                       >
-                        Cancel
+                        {t('cancel')}
                       </button>
                     </div>
                   </div>
@@ -319,7 +321,7 @@ export default function Memory({ userId, token }: MemoryProps) {
                             fontSize: 12,
                           }}
                         >
-                          Edit
+                          {t('edit')}
                         </button>
                         <button
                           onClick={() => deleteMemory(m.id)}
@@ -333,7 +335,7 @@ export default function Memory({ userId, token }: MemoryProps) {
                             fontSize: 12,
                           }}
                         >
-                          Delete
+                          {t('removeMemory')}
                         </button>
                       </div>
                     </div>

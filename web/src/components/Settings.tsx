@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useT } from '../i18n';
 
 interface ModelInfo {
   id: string;
@@ -19,6 +20,7 @@ interface SettingsProps {
 }
 
 export default function Settings({ onClose, userId, token }: SettingsProps) {
+  const t = useT();
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [selectedProvider, setSelectedProvider] = useState<string>('');
   const [selectedModel, setSelectedModel] = useState<string>('');
@@ -271,7 +273,7 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
   return (
     <div style={{ padding: 24, maxWidth: 600, margin: '0 auto' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 28 }}>
-        <h2 style={{ fontSize: 22, fontWeight: 600 }}>Settings</h2>
+        <h2 style={{ fontSize: 22, fontWeight: 600 }}>{t('settings')}</h2>
         <button
           onClick={onClose}
           style={{
@@ -279,7 +281,7 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
             background: 'transparent', color: '#ccc', cursor: 'pointer', fontSize: 14,
           }}
         >
-          Back to Chat
+          {t('backToChat')}
         </button>
       </div>
 
@@ -290,7 +292,7 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
         </h3>
 
         {loading ? (
-          <div style={{ color: '#888', textAlign: 'center', padding: 20 }}>Loading providers...</div>
+          <div style={{ color: '#888', textAlign: 'center', padding: 20 }}>{t('loadingProviders')}</div>
         ) : providers.length === 0 ? (
           <div style={{ color: '#f87171', textAlign: 'center', padding: 20 }}>
             No LLM providers registered. Please set API keys in .env
@@ -299,7 +301,7 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
           <>
             {/* Provider Select */}
             <div style={{ marginBottom: 20 }}>
-              <label style={labelStyle}>Provider</label>
+              <label style={labelStyle}>{t('provider')}</label>
               <select
                 value={selectedProvider}
                 onChange={e => handleProviderChange(e.target.value)}
@@ -317,7 +319,7 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
             {/* Model Select */}
             {currentProvider && currentProvider.models.length > 0 && (
               <div style={{ marginBottom: 16 }}>
-                <label style={labelStyle}>Model</label>
+                <label style={labelStyle}>{t('model')}</label>
                 <select
                   value={selectedModel}
                   onChange={e => { setSelectedModel(e.target.value); saveModel(selectedProvider, e.target.value); }}
@@ -341,7 +343,7 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
                 background: '#0d1117',
                 border: '1px solid #30363d',
               }}>
-                <div style={{ fontSize: 13, color: '#888', marginBottom: 4 }}>Active Selection</div>
+                <div style={{ fontSize: 13, color: '#888', marginBottom: 4 }}>{t('activeSelection')}</div>
                 <div style={{ fontSize: 15, fontWeight: 500 }}>
                   {currentProvider.name}
                   <span style={{ ...tagStyle, background: '#1f6feb22', color: '#58a6ff' }}>
@@ -365,19 +367,19 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
       {/* Agent Identity Section */}
       <div style={{ ...cardStyle, marginTop: 16 }}>
         <h3 style={{ fontSize: 16, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 20 }}>🪪</span> Agent Identity
+          <span style={{ fontSize: 20 }}>🪪</span> {t('agentIdentity')}
         </h3>
         <div style={{ color: '#888', fontSize: 13, lineHeight: 1.6, marginBottom: 12 }}>
-          Customize how the agent identifies itself and its core behavior. Leave empty to use the default identity.
+          {t('agentIdentityDesc')}
         </div>
         {identityLoading ? (
-          <div style={{ color: '#888', fontSize: 13 }}>Loading...</div>
+          <div style={{ color: '#888', fontSize: 13 }}>{t('loading')}</div>
         ) : (
           <>
             <textarea
               value={agentIdentity}
               onChange={e => setAgentIdentity(e.target.value)}
-              placeholder="You are Jcowork Agent, an intelligent AI assistant. (default)"
+              placeholder={t('identityPlaceholder')}
               rows={5}
               style={{
                 width: '100%',
@@ -409,7 +411,7 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
                   fontWeight: 500,
                 }}
               >
-                {identitySaving ? 'Saving...' : 'Save'}
+                {identitySaving ? t('saving') : t('saveIdentity')}
               </button>
               {agentIdentity && (
                 <button
@@ -424,14 +426,14 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
                     fontSize: 14,
                   }}
                 >
-                  Reset to default
+                  {t('resetDefault')}
                 </button>
               )}
               {identityStatus === 'saved' && (
-                <span style={{ color: '#3fb950', fontSize: 13 }}>Saved</span>
+                <span style={{ color: '#3fb950', fontSize: 13 }}>{t('saved')}</span>
               )}
               {identityStatus === 'error' && (
-                <span style={{ color: '#f87171', fontSize: 13 }}>Failed to save</span>
+                <span style={{ color: '#f87171', fontSize: 13 }}>{t('failedToSave')}</span>
               )}
             </div>
           </>
@@ -441,16 +443,16 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
       {/* Feishu Integration Section */}
       <div style={{ ...cardStyle, marginTop: 16 }}>
         <h3 style={{ fontSize: 16, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 20 }}>🐤</span> Feishu Integration
+          <span style={{ fontSize: 20 }}>🐤</span> {t('feishuIntegration')}
           {feishuConfigured && (
-            <span style={{ ...tagStyle, background: '#23863622', color: '#3fb950' }}>Connected</span>
+            <span style={{ ...tagStyle, background: '#23863622', color: '#3fb950' }}>{t('connected')}</span>
           )}
         </h3>
         <div style={{ color: '#888', fontSize: 13, lineHeight: 1.6, marginBottom: 12 }}>
-          Configure your Feishu app to enable bot messaging. Messages sent to your bot will be processed by your agent.
+          {t('feishuDesc')}
         </div>
         {feishuLoading ? (
-          <div style={{ color: '#888', fontSize: 13 }}>Loading...</div>
+          <div style={{ color: '#888', fontSize: 13 }}>{t('loading')}</div>
         ) : (
           <>
             <div style={{ marginBottom: 12 }}>
@@ -472,7 +474,7 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
                 type="password"
                 value={feishuAppSecret}
                 onChange={e => setFeishuAppSecret(e.target.value)}
-                placeholder={feishuConfigured ? 'Leave empty to keep current' : 'Enter app secret'}
+                placeholder={feishuConfigured ? t('keepCurrent') : t('enterSecret')}
                 style={{
                   width: '100%', padding: '10px 12px', borderRadius: 8,
                   border: '1px solid #444', background: '#1a1a1a', color: '#eee',
@@ -485,7 +487,7 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
               <input
                 value={feishuVerificationToken}
                 onChange={e => setFeishuVerificationToken(e.target.value)}
-                placeholder="Token from Feishu Developer Console"
+                placeholder={t('tokenFromFeishu')}
                 style={{
                   width: '100%', padding: '10px 12px', borderRadius: 8,
                   border: '1px solid #444', background: '#1a1a1a', color: '#eee',
@@ -494,11 +496,11 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
               />
             </div>
             <div style={{ marginBottom: 16 }}>
-              <label style={labelStyle}>Encrypt Key (optional)</label>
+              <label style={labelStyle}>{t('encryptKey')} ({t('optional')})</label>
               <input
                 value={feishuEncryptKey}
                 onChange={e => setFeishuEncryptKey(e.target.value)}
-                placeholder="Optional"
+                placeholder={t('optional')}
                 style={{
                   width: '100%', padding: '10px 12px', borderRadius: 8,
                   border: '1px solid #444', background: '#1a1a1a', color: '#eee',
@@ -517,7 +519,7 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
                   fontSize: 14, fontWeight: 500,
                 }}
               >
-                {feishuSaving ? 'Saving...' : 'Save'}
+                {feishuSaving ? t('saving') : t('saveFeishu')}
               </button>
               {feishuConfigured && (
                 <button
@@ -529,12 +531,12 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
                     fontSize: 14,
                   }}
                 >
-                  Delete
+                  {t('deleteFeishu')}
                 </button>
               )}
-              {feishuStatus === 'saved' && <span style={{ color: '#3fb950', fontSize: 13 }}>Saved</span>}
-              {feishuStatus === 'deleted' && <span style={{ color: '#f87171', fontSize: 13 }}>Deleted</span>}
-              {feishuStatus === 'error' && <span style={{ color: '#f87171', fontSize: 13 }}>Failed</span>}
+              {feishuStatus === 'saved' && <span style={{ color: '#3fb950', fontSize: 13 }}>{t('saved')}</span>}
+              {feishuStatus === 'deleted' && <span style={{ color: '#f87171', fontSize: 13 }}>{t('deleted')}</span>}
+              {feishuStatus === 'error' && <span style={{ color: '#f87171', fontSize: 13 }}>{t('failedToSave')}</span>}
             </div>
           </>
         )}
@@ -543,20 +545,20 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
       {/* Memory Section */}
       <div style={{ ...cardStyle, marginTop: 16 }}>
         <h3 style={{ fontSize: 16, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 20 }}>🧠</span> Memory
+          <span style={{ fontSize: 20 }}>🧠</span> {t('memory')}
         </h3>
         <div style={{ color: '#888', fontSize: 13, lineHeight: 1.6 }}>
-          Your agent has persistent memory across sessions. Saved facts include user preferences, environment details, and stable conventions.
+          {t('feishuMemoryDesc')}
         </div>
       </div>
 
       {/* Skills Section */}
       <div style={{ ...cardStyle, marginTop: 16 }}>
         <h3 style={{ fontSize: 16, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 20 }}>⚡</span> Skills
+          <span style={{ fontSize: 20 }}>⚡</span> {t('skills')}
         </h3>
         <div style={{ color: '#888', fontSize: 13, lineHeight: 1.6 }}>
-          Skills are reusable workflows that the agent creates from experience. They self-improve during use via the patch mechanism.
+          {t('feishuSkillsDesc')}
         </div>
       </div>
     </div>

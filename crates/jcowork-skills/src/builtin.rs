@@ -219,8 +219,8 @@ IMPORTANT: Do NOT generate HTML unless the user explicitly asks for it. The Mark
     },
     BuiltinSkill {
         id: "builtin:web_search",
-        name: "web_search",
-        description: "Search the web using a headless browser (Sogou WAP), retrieve top results with full page content, and answer questions based on live internet content.",
+        name: "网页搜索",
+        description: "通过无头浏览器搜索网页，获取最新信息和实时内容，基于搜索结果回答问题。",
         content: r#"## Skill: web_search — Web Search & Answer
 
 When a question requires up-to-date or real-world information that you don't know from training data, use the `web_search` tool to find answers on the internet.
@@ -342,11 +342,23 @@ IMPORTANT: 创建 7 条目标时，在单次 turn 内完成所有 memory_save �
     },
     BuiltinSkill {
         id: "builtin:code_engineer",
-        name: "code_engineer",
-        description: "Create, read, modify files and directories; build, compile, and run code projects in the user's workspace.",
-        content: r##"## Skill: code_engineer — Project & Code Engineering
+        name: "文档撰写",
+        description: "撰写和编辑文档，默认生成 HTML 格式，也支持 Markdown、代码等项目文件。可在用户工作区创建、读取、修改文件。",
+        content: r##"## Skill: 文档撰写 — Document Authoring
 
-You have a sandboxed workspace where you can create files, write code, compile, and run programs. Use these tools when the user asks you to create a project, write code, build an app, run a script, or debug a program.
+You have a sandboxed workspace where you can create files, write documents, and manage content.
+
+### Default Behavior: HTML Documents
+**Unless the user explicitly requests another format**, always generate well-structured HTML documents.
+- Use semantic HTML5 tags (<header>, <nav>, <main>, <section>, <article>, <footer>)
+- Include inline CSS for styling — make documents visually appealing
+- Support Chinese content with proper font stacks (e.g. `font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif`)
+- Save files with `.html` extension
+
+### When User Requests Other Formats
+- **Markdown (.md)**: Write clean Markdown with proper headings, lists, tables
+- **Code projects**: Scaffold and build as requested (Python, Node.js, Rust, etc.)
+- **Other text formats**: CSV, JSON, YAML, plain text, etc.
 
 ---
 
@@ -361,100 +373,51 @@ You have a sandboxed workspace where you can create files, write code, compile, 
 - **file_copy** — Copy a file to a new location. Params: `from`, `to`.
 - **file_search** — Search file contents (substring grep) recursively. Params: `pattern`, `path` (default: `.`). Returns `path:line:content`.
 - **dir_create** — Create a directory (and parents). Param: `path`.
-- **dir_list** — Recursively list all files under a directory (skips .git, node_modules, target, __pycache__). Use to understand project structure. Param: `path` (default: `.`).
+- **dir_list** — Recursively list all files under a directory. Param: `path` (default: `.`).
 - **file_info** — Get file metadata (type, size, modified time). Param: `path`.
 
 ### Shell
-- **shell** — Execute a shell command in the workspace directory. Returns stdout + stderr. Timeout: 120s. Blocked patterns: `rm -rf /`, `mkfs`, `dd if=`, etc.
+- **shell** — Execute a shell command in the workspace directory. Returns stdout + stderr. Timeout: 120s.
 
 ---
 
-## Workflow: Creating a Project
+## HTML Document Template
 
-### Step 1: Scaffold the project structure
-Use `dir_create` and `file_write` to set up the project. Example for a Node.js project:
-```
-file_write({ path: "myapp/package.json", content: "{...}" })
-file_write({ path: "myapp/src/index.js", content: "..." })
-file_write({ path: "myapp/README.md", content: "..." })
-```
-
-### Step 2: Install dependencies (if needed)
-```
-shell({ command: "cd myapp && npm install" })
-```
-
-### Step 3: Run / build / compile
-```
-shell({ command: "cd myapp && npm start" })
-shell({ command: "cd myapp && npm run build" })
-```
-
----
-
-## Language-Specific Quick Start
-
-### Python
-```
-file_write({ path: "hello.py", content: "print('Hello, World!')" })
-shell({ command: "python3 hello.py" })
-```
-For venv: `python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`
-
-### Node.js / TypeScript
-```
-file_write({ path: "app/package.json", content: "{\"name\":\"app\",\"scripts\":{\"start\":\"node index.js\"}}" })
-file_write({ path: "app/index.js", content: "console.log('Hello')" })
-shell({ command: "cd app && npm install && npm start" })
-```
-For TypeScript: `npx tsc` then `node dist/index.js`
-
-### Rust
-```
-shell({ command: "cargo new myproject --bin" })
-file_write({ path: "myproject/src/main.rs", content: "fn main() { println!(\"Hello\"); }" })
-shell({ command: "cd myproject && cargo run" })
-```
-
-### Go
-```
-shell({ command: "go mod init myproject" })
-file_write({ path: "main.go", content: "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"Hello\") }" })
-shell({ command: "go run main.go" })
-```
-
-### C / C++
-```
-file_write({ path: "hello.c", content: "#include <stdio.h>\nint main() { printf(\"Hello\\n\"); return 0; }" })
-shell({ command: "gcc hello.c -o hello && ./hello" })
-```
-For C++: `g++ hello.cpp -o hello && ./hello`
-
-### Java
-```
-file_write({ path: "Hello.java", content: "public class Hello { public static void main(String[] args) { System.out.println(\"Hello\"); } }" })
-shell({ command: "javac Hello.java && java Hello" })
+When creating an HTML document, follow this structure:
+```html
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Document Title</title>
+  <style>
+    body { font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; line-height: 1.8; max-width: 800px; margin: 0 auto; padding: 20px; color: #333; }
+    h1, h2, h3 { color: #1a1a1a; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 8px 12px; }
+  </style>
+</head>
+<body>
+  <!-- Content here -->
+</body>
+</html>
 ```
 
 ---
 
 ## Best Practices
 
-1. **Always read before modifying**: Use `file_read` to see current content before rewriting a file.
-2. **Use dir_list to understand structure**: Before making changes, run `dir_list({ path: "." })` to see the full project layout.
-3. **Compile incrementally**: After writing code, compile/run immediately to catch errors early. Fix and iterate.
-4. **Debug with file_search**: When tracking down a bug, use `file_search({ pattern: "function_name" })` to find where code is defined.
-5. **One file at a time**: Write each file completely with `file_write`. Don't use shell echo/cat for writing — `file_write` is atomic and handles paths.
-6. **Keep workspace clean**: Use `file_delete` for temporary files. Don't leave build artifacts.
-7. **Report results**: After running code, show the user the output (stdout/stderr) and explain any errors.
-8. **Iterate on errors**: If compilation or runtime fails, read the error, fix the code with `file_write`, and re-run. Repeat until it works.
+1. **Default to HTML**: Unless told otherwise, create `.html` files with good styling.
+2. **Always read before modifying**: Use `file_read` to see current content before rewriting.
+3. **One file at a time**: Write each file completely with `file_write`.
+4. **Report results**: After creating a file, confirm the path and summarize the content.
+5. **Iterate on feedback**: If the user wants changes, use `file_write` to update.
 
 ---
 
 ## Security Notes
-- All paths are relative to the user's workspace and sandboxed — you cannot escape it.
-- Do not attempt path traversal (`../`).
-- The shell runs in the workspace root directory. Use `cd <subdir> && <command>` for subdirectories.
-- Avoid long-running foreground processes. If a command needs to stay running (e.g., a dev server), inform the user it will run in background."##,
+- All paths are relative to the user's workspace and sandboxed.
+- The shell runs in the workspace root directory."##,
     },
 ];

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useT } from '../i18n';
 
 interface FileEntry {
   name: string;
@@ -22,6 +23,7 @@ interface DocumentsProps {
 const ALLOWED_EXTENSIONS = '.pdf,.md,.html,.htm,.xlsx,.xls,.docx,.doc';
 
 export default function Documents({ token }: DocumentsProps) {
+  const t = useT();
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
@@ -285,7 +287,7 @@ export default function Documents({ token }: DocumentsProps) {
           alignItems: 'center',
           justifyContent: 'space-between',
         }}>
-          <span style={{ fontWeight: 600, fontSize: 15 }}>My Documents</span>
+          <span style={{ fontWeight: 600, fontSize: 15 }}>{t('myDocuments')}</span>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <button
               onClick={() => { setCurrentDir(''); setShowNewFolder(true); setNewFolderName(''); }}
@@ -304,7 +306,7 @@ export default function Documents({ token }: DocumentsProps) {
             </button>
             <button
               onClick={() => { setCurrentDir(''); fileInputRef.current?.click(); }}
-              title="Upload files to root"
+              title={t('uploadHere')}
               disabled={uploading}
               style={{
                 padding: '3px 8px',
@@ -316,7 +318,7 @@ export default function Documents({ token }: DocumentsProps) {
                 fontSize: 11,
               }}
             >
-              {uploading ? '⏳' : '⬆ Upload'}
+              {uploading ? '⏳' : `⬆ ${t('upload')}`}
             </button>
             <button
               onClick={loadRoot}
@@ -330,7 +332,7 @@ export default function Documents({ token }: DocumentsProps) {
                 fontSize: 11,
               }}
             >
-              Refresh
+              {t('refresh')}
             </button>
           </div>
           <input
@@ -360,7 +362,7 @@ export default function Documents({ token }: DocumentsProps) {
                 if (e.key === 'Enter') handleCreateFolder();
                 if (e.key === 'Escape') { setShowNewFolder(false); setNewFolderName(''); }
               }}
-              placeholder="Folder name..."
+              placeholder={t('folderName')}
               style={{
                 flex: 1,
                 padding: '3px 8px',
@@ -386,7 +388,7 @@ export default function Documents({ token }: DocumentsProps) {
                 opacity: creatingFolder || !newFolderName.trim() ? 0.5 : 1,
               }}
             >
-              Create
+              {t('create')}
             </button>
             <button
               onClick={() => { setShowNewFolder(false); setNewFolderName(''); }}
@@ -400,7 +402,7 @@ export default function Documents({ token }: DocumentsProps) {
                 fontSize: 11,
               }}
             >
-              Cancel
+              {t('cancel')}
             </button>
           </div>
         )}
@@ -421,30 +423,30 @@ export default function Documents({ token }: DocumentsProps) {
             <div style={{ display: 'flex', gap: 4 }}>
               <button
                 onClick={() => { setShowNewFolder(true); setNewFolderName(''); }}
-                title="New subfolder here"
+                title={t('newSubfolder')}
                 style={{ padding: '2px 6px', borderRadius: 3, border: '1px solid #444', background: 'transparent', color: '#888', cursor: 'pointer', fontSize: 10 }}
               >
-                + Folder
+                + {t('newFolder')}
               </button>
               <button
                 onClick={() => fileInputRef.current?.click()}
                 disabled={uploading}
-                title="Upload here"
+                title={t('uploadHere')}
                 style={{ padding: '2px 6px', borderRadius: 3, border: '1px solid #444', background: 'transparent', color: uploading ? '#555' : '#888', cursor: uploading ? 'not-allowed' : 'pointer', fontSize: 10 }}
               >
-                ⬆ Upload
+                ⬆ {t('upload')}
               </button>
             </div>
           </div>
         )}
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px 4px' }}>
           {loading ? (
-            <div style={{ color: '#666', padding: 16, textAlign: 'center' }}>Loading...</div>
+            <div style={{ color: '#666', padding: 16, textAlign: 'center' }}>{t('loading')}</div>
           ) : tree.length === 0 ? (
             <div style={{ color: '#555', padding: 16, textAlign: 'center', fontSize: 13 }}>
-              Your workspace is empty.<br />
+              {t('workspaceEmpty')}<br />
               <span style={{ fontSize: 12, color: '#444' }}>
-                Use chat to create files and projects!
+                {t('useChatToCreate')}
               </span>
             </div>
           ) : (
@@ -482,7 +484,7 @@ export default function Documents({ token }: DocumentsProps) {
                       fontSize: 12,
                     }}
                   >
-                    Open in Browser
+                    {t('openInBrowser')}
                   </button>
                 )}
                 <button
@@ -497,7 +499,7 @@ export default function Documents({ token }: DocumentsProps) {
                     fontSize: 12,
                   }}
                 >
-                  Download
+                  {t('download')}
                 </button>
                 <button
                   onClick={() => { setPreviewPath(null); setPreviewContent(''); }}
@@ -511,13 +513,13 @@ export default function Documents({ token }: DocumentsProps) {
                     fontSize: 12,
                   }}
                 >
-                  Close
+                  {t('close')}
                 </button>
               </div>
             </div>
             <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
               {previewLoading ? (
-                <div style={{ color: '#666', textAlign: 'center', paddingTop: 40 }}>Loading...</div>
+                <div style={{ color: '#666', textAlign: 'center', paddingTop: 40 }}>{t('loading')}</div>
               ) : (
                 <pre style={{
                   margin: 0,
@@ -544,9 +546,9 @@ export default function Documents({ token }: DocumentsProps) {
           }}>
             <div style={{ textAlign: 'center' }}>
               <div style={{ fontSize: 48, marginBottom: 16 }}>📁</div>
-              <div>Select a file to preview</div>
+              <div>{t('selectFilePreview')}</div>
               <div style={{ fontSize: 12, color: '#333', marginTop: 8 }}>
-                Click a folder to expand · Click a file to view
+                {t('clickFolderToExpand')}
               </div>
             </div>
           </div>

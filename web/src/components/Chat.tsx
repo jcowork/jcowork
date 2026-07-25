@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { useT } from '../i18n';
 
 interface Message {
   role: 'user' | 'assistant' | 'system';
@@ -142,6 +143,7 @@ function saveMessages(userId: string, messages: Message[]) {
 }
 
 export default function Chat({ userId, token }: ChatProps) {
+  const t = useT();
   const [messages, setMessages] = useState<Message[]>(() => loadMessages(userId));
   const [input, setInput] = useState('');
   const [connected, setConnected] = useState(false);
@@ -741,9 +743,9 @@ export default function Chat({ userId, token }: ChatProps) {
                 </div>
                 <div style={{ flex: 1, overflowY: 'auto', padding: '4px' }}>
                   {workspaceFilesLoading ? (
-                    <div style={{ padding: 12, textAlign: 'center', color: '#555', fontSize: 12 }}>Loading...</div>
+                    <div style={{ padding: 12, textAlign: 'center', color: '#555', fontSize: 12 }}>{t('loading')}</div>
                   ) : filteredFiles.length === 0 ? (
-                    <div style={{ padding: 12, textAlign: 'center', color: '#555', fontSize: 12 }}>No files found</div>
+                    <div style={{ padding: 12, textAlign: 'center', color: '#555', fontSize: 12 }}>{t('noFiles')}</div>
                   ) : (
                     filteredFiles.map(f => (
                       <div
@@ -778,7 +780,7 @@ export default function Chat({ userId, token }: ChatProps) {
             <button
               onClick={() => { setShowUrlInput(!showUrlInput); setUrlInput(''); }}
               disabled={!connected || streaming || urlFetching}
-              title="Add web page URL as context"
+              title={t('referenceUrl')}
               style={{
                 padding: '8px 10px',
                 borderRadius: 8,
@@ -811,7 +813,7 @@ export default function Chat({ userId, token }: ChatProps) {
                   zIndex: 100,
                 }}
               >
-                <div style={{ fontSize: 12, color: '#888', marginBottom: 6 }}>Enter web page URL:</div>
+                <div style={{ fontSize: 12, color: '#888', marginBottom: 6 }}>{t('enterUrl')}</div>
                 <div style={{ display: 'flex', gap: 6 }}>
                   <input
                     type="text"
@@ -845,7 +847,7 @@ export default function Chat({ userId, token }: ChatProps) {
                       whiteSpace: 'nowrap',
                     }}
                   >
-                    {urlFetching ? '...' : 'Add'}
+                    {urlFetching ? '...' : t('add')}
                   </button>
                 </div>
               </div>
@@ -858,7 +860,7 @@ export default function Chat({ userId, token }: ChatProps) {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
-            placeholder={connected ? 'Type a message...' : 'Connecting...'}
+            placeholder={connected ? t('typeMessage') : t('loading')}
             disabled={!connected || streaming}
             style={{
               flex: 1,
@@ -883,7 +885,7 @@ export default function Chat({ userId, token }: ChatProps) {
               cursor: connected ? 'pointer' : 'not-allowed',
             }}
           >
-            Send
+            {t('send')}
           </button>
         </div>
       </div>
