@@ -159,6 +159,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/workspace/files", get(list_workspace_files))
         .route("/api/workspace/download", get(download_workspace_file))
         .route("/api/workspace/upload-pdf", post(upload_pdf))
+        .route("/api/workspace/parse-pdf", post(parse_workspace_pdf))
         .route("/api/workspace/upload", post(upload_file))
         .route("/api/workspace/mkdir", post(create_directory))
         .route("/api/workspace/files-recursive", get(list_workspace_files_recursive))
@@ -1010,6 +1011,90 @@ async fn upload_pdf(
     }
 
     (StatusCode::OK, Json(serde_json::json!({ "files": result_files }))).into_response()
+}
+
+// --- Parse workspace PDF API ---
+
+#[derive(Debug, Deserialize)]
+struct ParsePdfRequest {
+    path: String,
+}
+
+/// Parse a PDF file that already exists in the user's workspace.
+/// Returns the extracted text content.
+async fn parse_workspace_pdf(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Json(body): Json<ParsePdfRequest>,
+) -> impl IntoResponse {
+    let workspace_root = format!("{}/{}/workspace", state.data_dir, auth_user.user_id);
+    let store = FileStore::new(&workspace_root);
+
+    // Validate path is within workspace
+    let full_path = match store.validate_path_public(&body.path) {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            ).into_response();
+        }
+    };
+
+    // Check file exists
+    if !full_path.is_file() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("File not found: {}", body.path) })),
+        ).into_response();
+    }
+
+    // Parse PDF using pdftext
+    let python_bin = {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| "/tmp".to_string());
+        if cfg!(windows) {
+            format!("{}\\.jcowork\\venv\\Scripts\\python.exe", home)
+        } else {
+            format!("{}/.jcowork/venv/bin/python", home)
+        }
+    };
+
+    let parsed_text = if std::path::Path::new(&python_bin).exists() {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            tokio::process::Command::new(&python_bin)
+                .arg("-c")
+                .arg(PDF_PARSE_SCRIPT)
+                .arg(&full_path)
+                .output(),
+        ).await {
+            Ok(Ok(output)) if output.status.success() => {
+                let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+                if text.len() > 200 * 1024 {
+                    text.truncate(200 * 1024);
+                    text.push_str("\n\n[... OUTPUT TRUNCATED: document exceeds 200KB ...]");
+                }
+                text
+            }
+            Ok(Ok(output)) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                format!("[PDF parse error: {}]", stderr)
+            }
+            Ok(Err(e)) => format!("[Failed to run PDF parser: {}]", e),
+            Err(_) => "[PDF parsing timed out after 120s]".to_string(),
+        }
+    } else {
+        "[Python venv not found. Run scripts/setup-python.sh first.]".to_string()
+    };
+
+    let filename = body.path.rsplit('/').next().unwrap_or(&body.path);
+    (StatusCode::OK, Json(serde_json::json!({
+        "filename": filename,
+        "path": body.path,
+        "text": parsed_text,
+    }))).into_response()
 }
 
 // --- URL Fetch API ---

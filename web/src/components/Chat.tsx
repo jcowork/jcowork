@@ -403,26 +403,19 @@ export default function Chat({ userId, token }: ChatProps) {
 
     try {
       if (ext === 'pdf') {
-        // PDF: use upload-pdf endpoint to parse text content
-        const res = await fetch(`/api/workspace/download?path=${encodeURIComponent(filePath)}`, {
-          headers: { Authorization: `Bearer ${token}` },
+        // PDF: parse directly from workspace via dedicated endpoint
+        const res = await fetch('/api/workspace/parse-pdf', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: filePath }),
         });
         if (res.ok) {
-          const blob = await res.blob();
-          const formData = new FormData();
-          formData.append('file', blob, name);
-          const parseRes = await fetch('/api/workspace/upload-pdf', {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${token}` },
-            body: formData,
-          });
-          if (parseRes.ok) {
-            const data = await parseRes.json();
-            const text = data.files?.[0]?.text || '[PDF parsing failed]';
-            setSelectedDocs(prev => [...prev, { name, path: filePath, content: text }]);
-          } else {
-            setSelectedDocs(prev => [...prev, { name, path: filePath, content: '[PDF parsing unavailable]' }]);
-          }
+          const data = await res.json();
+          const text = data.text || '[PDF parsing failed]';
+          setSelectedDocs(prev => [...prev, { name, path: filePath, content: text }]);
+        } else {
+          const err = await res.json().catch(() => ({ error: 'Unknown error' }));
+          setSelectedDocs(prev => [...prev, { name, path: filePath, content: `[PDF error: ${err.error}]` }]);
         }
       } else if (binaryExtensions.includes(ext)) {
         // Binary files: add with placeholder content
