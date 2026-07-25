@@ -61,6 +61,7 @@ COPY providers.json /opt/jcowork/providers.json
 ENV JCWORK_HOST=0.0.0.0
 ENV JCWORK_PORT=3000
 ENV JCWORK_DATA_DIR=/data
+ENV JCWORK_WEB_DIR=/opt/jcowork/web/dist
 
 WORKDIR /opt/jcowork
 

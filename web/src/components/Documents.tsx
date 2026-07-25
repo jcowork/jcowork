@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 
 interface FileEntry {
   name: string;
@@ -19,12 +19,72 @@ interface DocumentsProps {
   token: string;
 }
 
+const ALLOWED_EXTENSIONS = '.pdf,.md,.html,.htm,.xlsx,.xls,.docx,.doc';
+
 export default function Documents({ token }: DocumentsProps) {
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
   const [previewContent, setPreviewContent] = useState<string>('');
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [showNewFolder, setShowNewFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState('');
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [currentDir, setCurrentDir] = useState<string>('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleCreateFolder = async () => {
+    if (!newFolderName.trim()) return;
+    setCreatingFolder(true);
+    const folderPath = currentDir ? `${currentDir}/${newFolderName.trim()}` : newFolderName.trim();
+    try {
+      const res = await fetch('/api/workspace/mkdir', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: folderPath }),
+      });
+      if (res.ok) {
+        setShowNewFolder(false);
+        setNewFolderName('');
+        await loadRoot();
+      } else {
+        const err = await res.json();
+        alert(err.error || 'Failed to create folder');
+      }
+    } catch {
+      alert('Network error');
+    }
+    setCreatingFolder(false);
+  };
+
+  const handleUploadFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setUploading(true);
+    try {
+      const formData = new FormData();
+      // Send target directory
+      formData.append('path', currentDir || '.');
+      for (let i = 0; i < files.length; i++) {
+        formData.append('files', files[i]);
+      }
+      const res = await fetch('/api/workspace/upload', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      });
+      if (res.ok) {
+        await loadRoot();
+      } else {
+        const err = await res.json();
+        alert(err.error || 'Upload failed');
+      }
+    } catch {
+      alert('Network error');
+    }
+    setUploading(false);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
 
   const fetchDir = useCallback(async (path: string): Promise<FileEntry[]> => {
     const res = await fetch(`/api/workspace/files?path=${encodeURIComponent(path)}`, {
@@ -54,6 +114,7 @@ export default function Documents({ token }: DocumentsProps) {
   }, [loadRoot]);
 
   const toggleDir = async (nodePath: string) => {
+    setCurrentDir(nodePath);
     setTree(prev => updateNode(prev, nodePath, (node) => {
       if (node.expanded) {
         return { ...node, expanded: false };
@@ -225,21 +286,157 @@ export default function Documents({ token }: DocumentsProps) {
           justifyContent: 'space-between',
         }}>
           <span style={{ fontWeight: 600, fontSize: 15 }}>My Documents</span>
-          <button
-            onClick={loadRoot}
-            style={{
-              padding: '3px 8px',
-              borderRadius: 4,
-              border: '1px solid #555',
-              background: 'transparent',
-              color: '#aaa',
-              cursor: 'pointer',
-              fontSize: 11,
-            }}
-          >
-            Refresh
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <button
+              onClick={() => { setCurrentDir(''); setShowNewFolder(true); setNewFolderName(''); }}
+              title="New folder in root"
+              style={{
+                padding: '3px 8px',
+                borderRadius: 4,
+                border: '1px solid #555',
+                background: 'transparent',
+                color: '#aaa',
+                cursor: 'pointer',
+                fontSize: 11,
+              }}
+            >
+              + Folder
+            </button>
+            <button
+              onClick={() => { setCurrentDir(''); fileInputRef.current?.click(); }}
+              title="Upload files to root"
+              disabled={uploading}
+              style={{
+                padding: '3px 8px',
+                borderRadius: 4,
+                border: '1px solid #555',
+                background: 'transparent',
+                color: uploading ? '#555' : '#aaa',
+                cursor: uploading ? 'not-allowed' : 'pointer',
+                fontSize: 11,
+              }}
+            >
+              {uploading ? '⏳' : '⬆ Upload'}
+            </button>
+            <button
+              onClick={loadRoot}
+              style={{
+                padding: '3px 8px',
+                borderRadius: 4,
+                border: '1px solid #555',
+                background: 'transparent',
+                color: '#aaa',
+                cursor: 'pointer',
+                fontSize: 11,
+              }}
+            >
+              Refresh
+            </button>
+          </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept={ALLOWED_EXTENSIONS}
+            multiple
+            style={{ display: 'none' }}
+            onChange={(e) => { handleUploadFiles(e.target.files); }}
+          />
         </div>
+        {/* New folder inline input */}
+        {showNewFolder && (
+          <div style={{
+            padding: '8px 12px',
+            borderBottom: '1px solid #333',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+          }}>
+            <span style={{ fontSize: 13 }}>📁</span>
+            <input
+              autoFocus
+              value={newFolderName}
+              onChange={(e) => setNewFolderName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleCreateFolder();
+                if (e.key === 'Escape') { setShowNewFolder(false); setNewFolderName(''); }
+              }}
+              placeholder="Folder name..."
+              style={{
+                flex: 1,
+                padding: '3px 8px',
+                borderRadius: 4,
+                border: '1px solid #555',
+                background: '#1a1a1a',
+                color: '#eee',
+                fontSize: 12,
+                outline: 'none',
+              }}
+            />
+            <button
+              onClick={handleCreateFolder}
+              disabled={creatingFolder || !newFolderName.trim()}
+              style={{
+                padding: '3px 8px',
+                borderRadius: 4,
+                border: '1px solid #1f6feb',
+                background: '#1f6feb',
+                color: '#fff',
+                cursor: 'pointer',
+                fontSize: 11,
+                opacity: creatingFolder || !newFolderName.trim() ? 0.5 : 1,
+              }}
+            >
+              Create
+            </button>
+            <button
+              onClick={() => { setShowNewFolder(false); setNewFolderName(''); }}
+              style={{
+                padding: '3px 8px',
+                borderRadius: 4,
+                border: '1px solid #555',
+                background: 'transparent',
+                color: '#888',
+                cursor: 'pointer',
+                fontSize: 11,
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        )}
+        {/* Current directory indicator */}
+        {currentDir && (
+          <div style={{
+            padding: '4px 12px',
+            borderBottom: '1px solid #333',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            fontSize: 11,
+            color: '#666',
+          }}>
+            <span style={{ fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              📂 {currentDir}
+            </span>
+            <div style={{ display: 'flex', gap: 4 }}>
+              <button
+                onClick={() => { setShowNewFolder(true); setNewFolderName(''); }}
+                title="New subfolder here"
+                style={{ padding: '2px 6px', borderRadius: 3, border: '1px solid #444', background: 'transparent', color: '#888', cursor: 'pointer', fontSize: 10 }}
+              >
+                + Folder
+              </button>
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploading}
+                title="Upload here"
+                style={{ padding: '2px 6px', borderRadius: 3, border: '1px solid #444', background: 'transparent', color: uploading ? '#555' : '#888', cursor: uploading ? 'not-allowed' : 'pointer', fontSize: 10 }}
+              >
+                ⬆ Upload
+              </button>
+            </div>
+          </div>
+        )}
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px 4px' }}>
           {loading ? (
             <div style={{ color: '#666', padding: 16, textAlign: 'center' }}>Loading...</div>

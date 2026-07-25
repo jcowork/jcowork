@@ -10,8 +10,10 @@ use axum::{
     extract::Request,
 };
 use axum::extract::{ws::WebSocketUpgrade, Multipart, Path, Query};
+use axum::http::header;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tower_http::services::{ServeDir, ServeFile};
 
 use crate::auth;
 use crate::session::SessionManager;
@@ -157,6 +159,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/workspace/files", get(list_workspace_files))
         .route("/api/workspace/download", get(download_workspace_file))
         .route("/api/workspace/upload-pdf", post(upload_pdf))
+        .route("/api/workspace/upload", post(upload_file))
+        .route("/api/workspace/mkdir", post(create_directory))
         .route("/api/workspace/files-recursive", get(list_workspace_files_recursive))
         .route("/api/fetch-url", post(fetch_url))
         .route("/api/ws", get(ws_upgrade))
@@ -165,7 +169,70 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .merge(public)
         .merge(protected)
+        .fallback_service(static_files_handler())
         .with_state(state)
+}
+
+/// Serve static frontend files with proper cache headers.
+/// - index.html: no-cache (always revalidate, so updates take effect immediately)
+/// - /assets/*: long cache (content-hashed filenames)
+/// - SPA fallback: serve index.html for unknown routes
+fn static_files_handler() -> Router {
+    // Determine web dist directory
+    let web_dir = std::env::var("JCWORK_WEB_DIR")
+        .unwrap_or_else(|_| {
+            let candidates = [
+                "web/dist",
+                "/opt/jcowork/web/dist",
+            ];
+            for c in &candidates {
+                if std::path::Path::new(c).exists() {
+                    return c.to_string();
+                }
+            }
+            "web/dist".to_string()
+        });
+
+    let index_html = format!("{}/index.html", web_dir);
+    let assets_dir = format!("{}/assets", web_dir);
+
+    // Assets with content hashes can be cached forever
+    let assets_service = ServeDir::new(&assets_dir);
+
+    // Fallback: serve from web_dir, with index.html as not-found fallback (SPA)
+    let fallback_service = ServeDir::new(&web_dir)
+        .not_found_service(ServeFile::new(&index_html));
+
+    Router::new()
+        // /assets/* → long cache (content-hashed filenames)
+        .nest_service("/assets", assets_service)
+        // / and /index.html → no-cache (always revalidate on update)
+        .route("/index.html", get({
+            let path = index_html.clone();
+            move || {
+                let path = path.clone();
+                async move { serve_index_no_cache(path).await }
+            }
+        }))
+        .route("/", get(move || {
+            async move { serve_index_no_cache(index_html).await }
+        }))
+        // Everything else → serve from dist, fallback to index.html (SPA routing)
+        .fallback_service(fallback_service)
+}
+
+/// Serve index.html with no-cache headers so browsers always fetch the latest version.
+async fn serve_index_no_cache(path: String) -> impl IntoResponse {
+    let content = tokio::fs::read(&path).await.unwrap_or_default();
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
+            (header::PRAGMA, "no-cache"),
+        ],
+        content,
+    )
 }
 
 /// JWT authentication middleware.
@@ -1196,4 +1263,164 @@ async fn download_workspace_file(
         )
             .into_response(),
     }
+}
+
+// --- Create Directory API ---
+
+#[derive(Debug, Deserialize)]
+struct MkdirRequest {
+    path: String,
+}
+
+async fn create_directory(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Json(body): Json<MkdirRequest>,
+) -> impl IntoResponse {
+    let workspace_root = format!("{}/{}/workspace", state.data_dir, auth_user.user_id);
+    let _ = tokio::fs::create_dir_all(&workspace_root).await;
+    let store = FileStore::new(&workspace_root);
+
+    // Validate path is within workspace
+    match store.validate_path_public(&body.path) {
+        Ok(full_path) => {
+            match tokio::fs::create_dir_all(&full_path).await {
+                Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "ok": true, "path": body.path }))).into_response(),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": format!("Failed to create directory: {}", e) })),
+                ).into_response(),
+            }
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ).into_response(),
+    }
+}
+
+// --- General File Upload API ---
+
+/// Allowed file extensions for upload.
+const ALLOWED_UPLOAD_EXTENSIONS: &[&str] = &["pdf", "md", "html", "htm", "xlsx", "xls", "docx", "doc"];
+
+async fn upload_file(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    let workspace_root = format!("{}/{}/workspace", state.data_dir, auth_user.user_id);
+    let _ = tokio::fs::create_dir_all(&workspace_root).await;
+
+    // Optional target directory (relative to workspace root)
+    let mut target_dir: Option<String> = None;
+    let mut uploaded_files: Vec<serde_json::Value> = Vec::new();
+
+    // First pass: collect all fields
+    let mut fields_data: Vec<(String, String, Vec<u8>)> = Vec::new();
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let field_name = field.name().unwrap_or("").to_string();
+        let filename = field.file_name().unwrap_or("").to_string();
+        let data = match field.bytes().await {
+            Ok(d) => d.to_vec(),
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": format!("Failed to read file: {}", e) })),
+                ).into_response();
+            }
+        };
+        fields_data.push((field_name, filename, data));
+    }
+
+    // Extract target_dir from form fields
+    for (field_name, filename, data) in &fields_data {
+        if field_name == "path" && filename.is_empty() {
+            // This is the target directory field; value is in data bytes
+            target_dir = Some(String::from_utf8_lossy(data).trim().to_string());
+        }
+    }
+
+    // Process file fields
+    for (field_name, filename, data) in &fields_data {
+        if field_name == "path" {
+            // Skip the directory path field
+            continue;
+        }
+
+        if filename.is_empty() {
+            continue;
+        }
+
+        // Check file extension
+        let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
+        if !ALLOWED_UPLOAD_EXTENSIONS.contains(&ext.as_str()) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("File type '{}' not allowed. Allowed types: pdf, md, html, xlsx, xls, docx, doc", ext)
+                })),
+            ).into_response();
+        }
+
+        // Sanitize filename
+        let safe_name = filename
+            .replace("..", "")
+            .replace('/', "_")
+            .replace('\\', "_");
+
+        // Determine target directory
+        let dest_dir = if let Some(ref dir) = target_dir {
+            if dir.is_empty() || dir == "." {
+                workspace_root.clone()
+            } else {
+                format!("{}/{}", workspace_root, dir)
+            }
+        } else {
+            workspace_root.clone()
+        };
+
+        // Ensure target directory exists
+        if let Err(e) = tokio::fs::create_dir_all(&dest_dir).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Failed to create directory: {}", e) })),
+            ).into_response();
+        }
+
+        let file_path = format!("{}/{}", dest_dir, safe_name);
+        let relative_path = if let Some(ref dir) = target_dir {
+            if dir.is_empty() || dir == "." {
+                safe_name.clone()
+            } else {
+                format!("{}/{}", dir, safe_name)
+            }
+        } else {
+            safe_name.clone()
+        };
+
+        // Save file
+        if let Err(e) = tokio::fs::write(&file_path, data).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Failed to save file: {}", e) })),
+            ).into_response();
+        }
+
+        uploaded_files.push(serde_json::json!({
+            "filename": safe_name,
+            "path": relative_path,
+            "size": data.len(),
+        }));
+    }
+
+    if uploaded_files.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "No files uploaded" })),
+        ).into_response();
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({ "files": uploaded_files }))).into_response()
 }

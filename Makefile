@@ -1,7 +1,14 @@
-.PHONY: build run run-search test clean check clippy setup setup-python
+.PHONY: build build-web run run-search test clean check clippy setup setup-python
 
 build:
 	cargo build --workspace
+
+# Build frontend (React + Vite)
+build-web:
+	cd web && npm run build
+
+# Full build: backend + frontend
+build-all: build build-web
 
 run: build
 	cargo run --bin jcowork

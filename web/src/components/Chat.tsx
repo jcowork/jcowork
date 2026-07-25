@@ -101,6 +101,24 @@ function DownloadButton({ text, filename }: { text: string; filename?: string })
 
 const STORAGE_KEY = (userId: string) => `jcowork_chat_${userId}`;
 
+function getFileIcon(name: string): string {
+  const ext = name.split('.').pop()?.toLowerCase() || '';
+  switch (ext) {
+    case 'pdf': return '📕';
+    case 'html': case 'htm': return '🌐';
+    case 'md': return '📝';
+    case 'xlsx': case 'xls': return '📊';
+    case 'docx': case 'doc': return '📃';
+    case 'pptx': case 'ppt': return '📊';
+    case 'py': return '🐍';
+    case 'js': case 'ts': case 'tsx': case 'jsx': return '⚡';
+    case 'json': return '📋';
+    case 'csv': return '📊';
+    case 'txt': return '📄';
+    default: return '📄';
+  }
+}
+
 function loadMessages(userId: string): Message[] {
   try {
     const saved = localStorage.getItem(STORAGE_KEY(userId));
@@ -139,8 +157,7 @@ export default function Chat({ userId, token }: ChatProps) {
   const [workspaceFilesLoading, setWorkspaceFilesLoading] = useState(false);
   const [selectedDocs, setSelectedDocs] = useState<ContextDoc[]>([]);
   const [docPickerSearch, setDocPickerSearch] = useState('');
-  const pdfInputRef = useRef<HTMLInputElement>(null);
-  const [pdfUploading, setPdfUploading] = useState(false);
+  const [showAllDocs, setShowAllDocs] = useState(false);
   const docPickerRef = useRef<HTMLDivElement>(null);
 
   // URL input state
@@ -378,15 +395,51 @@ export default function Chat({ userId, token }: ChatProps) {
     // Don't add if already selected
     if (selectedDocs.some(d => d.path === filePath)) return;
 
-    // Fetch file content
+    const name = filePath.split('/').pop() || filePath;
+    const ext = name.split('.').pop()?.toLowerCase() || '';
+
+    // Binary file types that can't be read as text
+    const binaryExtensions = ['xlsx', 'xls', 'docx', 'doc', 'pptx', 'ppt'];
+
     try {
-      const res = await fetch(`/api/workspace/download?path=${encodeURIComponent(filePath)}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (res.ok) {
-        const content = await res.text();
-        const name = filePath.split('/').pop() || filePath;
-        setSelectedDocs(prev => [...prev, { name, path: filePath, content }]);
+      if (ext === 'pdf') {
+        // PDF: use upload-pdf endpoint to parse text content
+        const res = await fetch(`/api/workspace/download?path=${encodeURIComponent(filePath)}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.ok) {
+          const blob = await res.blob();
+          const formData = new FormData();
+          formData.append('file', blob, name);
+          const parseRes = await fetch('/api/workspace/upload-pdf', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}` },
+            body: formData,
+          });
+          if (parseRes.ok) {
+            const data = await parseRes.json();
+            const text = data.files?.[0]?.text || '[PDF parsing failed]';
+            setSelectedDocs(prev => [...prev, { name, path: filePath, content: text }]);
+          } else {
+            setSelectedDocs(prev => [...prev, { name, path: filePath, content: '[PDF parsing unavailable]' }]);
+          }
+        }
+      } else if (binaryExtensions.includes(ext)) {
+        // Binary files: add with placeholder content
+        setSelectedDocs(prev => [...prev, {
+          name,
+          path: filePath,
+          content: `[Binary file: ${name}. Content not directly readable as text. The file is attached for reference.]`,
+        }]);
+      } else {
+        // Text files: fetch content directly
+        const res = await fetch(`/api/workspace/download?path=${encodeURIComponent(filePath)}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.ok) {
+          const content = await res.text();
+          setSelectedDocs(prev => [...prev, { name, path: filePath, content }]);
+        }
       }
     } catch (e) {
       console.error('Failed to fetch doc:', e);
@@ -396,42 +449,6 @@ export default function Chat({ userId, token }: ChatProps) {
 
   const removeDoc = (index: number) => {
     setSelectedDocs(prev => prev.filter((_, i) => i !== index));
-  };
-
-  const handlePdfUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-
-    setPdfUploading(true);
-    const formData = new FormData();
-    for (let i = 0; i < files.length; i++) {
-      formData.append('file', files[i]);
-    }
-
-    try {
-      const res = await fetch('/api/workspace/upload-pdf', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: formData,
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.files) {
-          for (const f of data.files) {
-            setSelectedDocs(prev => [...prev, {
-              name: f.filename,
-              path: f.path,
-              content: f.text || '[PDF parsing failed]',
-            }]);
-          }
-        }
-      }
-    } catch (e) {
-      console.error('PDF upload failed:', e);
-    }
-    setPdfUploading(false);
-    // Reset input so same file can be re-uploaded
-    if (pdfInputRef.current) pdfInputRef.current.value = '';
   };
 
   // Fetch URL content and add as context document
@@ -579,52 +596,91 @@ export default function Chat({ userId, token }: ChatProps) {
       <div style={{ padding: 16, borderTop: '1px solid #333' }}>
         {/* Selected documents chips */}
         {selectedDocs.length > 0 && (
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
-            {selectedDocs.map((doc, i) => (
-              <div
-                key={i}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 4,
-                  padding: '4px 4px 4px 10px',
-                  borderRadius: 12,
-                  background: '#1e3a5a',
-                  border: '1px solid #2d5a8a',
-                  fontSize: 12,
-                  color: '#8ab4f8',
-                }}
-              >
-                <span style={{ fontSize: 11 }}>{doc.path.startsWith('http') ? '🔗' : doc.path.endsWith('.pdf') ? '📕' : '📄'}</span>
-                <span style={{ maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {doc.name}
-                </span>
-                <button
-                  onClick={() => removeDoc(i)}
-                  title="Remove this document from context"
+          <div style={{ marginBottom: 8 }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {(showAllDocs ? selectedDocs : selectedDocs.slice(0, 5)).map((doc, i) => (
+                <div
+                  key={i}
                   style={{
                     display: 'flex',
                     alignItems: 'center',
-                    justifyContent: 'center',
-                    width: 18,
-                    height: 18,
-                    borderRadius: '50%',
-                    border: 'none',
-                    background: 'transparent',
+                    gap: 4,
+                    padding: '4px 4px 4px 8px',
+                    borderRadius: 12,
+                    background: '#1e3a5a',
+                    border: '1px solid #2d5a8a',
+                    fontSize: 12,
                     color: '#8ab4f8',
-                    cursor: 'pointer',
-                    fontSize: 13,
-                    lineHeight: 1,
-                    padding: 0,
-                    transition: 'background 0.15s, color 0.15s',
+                    maxWidth: 200,
                   }}
-                  onMouseEnter={e => { e.currentTarget.style.background = '#e53935'; e.currentTarget.style.color = '#fff'; }}
-                  onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = '#8ab4f8'; }}
+                  title={doc.name}
                 >
-                  ✕
+                  <span style={{ fontSize: 11, flexShrink: 0 }}>
+                    {doc.path.startsWith('http') ? '🔗' : getFileIcon(doc.name)}
+                  </span>
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0 }}>
+                    {doc.name}
+                  </span>
+                  <button
+                    onClick={() => removeDoc(i)}
+                    title="Remove this document from context"
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      width: 16,
+                      height: 16,
+                      borderRadius: '50%',
+                      border: 'none',
+                      background: 'transparent',
+                      color: '#8ab4f8',
+                      cursor: 'pointer',
+                      fontSize: 11,
+                      lineHeight: 1,
+                      padding: 0,
+                      flexShrink: 0,
+                      transition: 'background 0.15s, color 0.15s',
+                    }}
+                    onMouseEnter={e => { e.currentTarget.style.background = '#e53935'; e.currentTarget.style.color = '#fff'; }}
+                    onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = '#8ab4f8'; }}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+              {selectedDocs.length > 5 && !showAllDocs && (
+                <button
+                  onClick={() => setShowAllDocs(true)}
+                  style={{
+                    padding: '4px 10px',
+                    borderRadius: 12,
+                    border: '1px solid #444',
+                    background: 'transparent',
+                    color: '#888',
+                    cursor: 'pointer',
+                    fontSize: 11,
+                  }}
+                >
+                  +{selectedDocs.length - 5} more
                 </button>
-              </div>
-            ))}
+              )}
+              {showAllDocs && selectedDocs.length > 5 && (
+                <button
+                  onClick={() => setShowAllDocs(false)}
+                  style={{
+                    padding: '4px 10px',
+                    borderRadius: 12,
+                    border: '1px solid #444',
+                    background: 'transparent',
+                    color: '#888',
+                    cursor: 'pointer',
+                    fontSize: 11,
+                  }}
+                >
+                  Collapse
+                </button>
+              )}
+            </div>
           </div>
         )}
 
@@ -723,34 +779,6 @@ export default function Chat({ userId, token }: ChatProps) {
               </div>
             )}
           </div>
-
-          {/* PDF upload button */}
-          <button
-            onClick={() => pdfInputRef.current?.click()}
-            disabled={!connected || streaming || pdfUploading}
-            title="Upload PDF file"
-            style={{
-              padding: '8px 10px',
-              borderRadius: 8,
-              border: '1px solid #555',
-              background: '#1a1a1a',
-              color: '#aaa',
-              cursor: 'pointer',
-              fontSize: 14,
-              lineHeight: 1,
-              flexShrink: 0,
-            }}
-          >
-            {pdfUploading ? '⏳' : '📕'}
-          </button>
-          <input
-            ref={pdfInputRef}
-            type="file"
-            accept=".pdf"
-            multiple
-            style={{ display: 'none' }}
-            onChange={handlePdfUpload}
-          />
 
           {/* URL reference button */}
           <div style={{ position: 'relative' }} ref={urlInputRef}>

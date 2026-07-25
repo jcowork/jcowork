@@ -22,6 +22,11 @@ impl FileStore {
         }
     }
 
+    /// Validate that a path is within the workspace root (public wrapper).
+    pub fn validate_path_public(&self, path: &str) -> Result<PathBuf> {
+        self.validate_path(path)
+    }
+
     /// Validate that a path is within the workspace root.
     fn validate_path(&self, path: &str) -> Result<PathBuf> {
         let resolved = self.workspace_root.join(path);
