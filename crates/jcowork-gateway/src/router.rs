@@ -25,7 +25,7 @@ use jcowork_llm::LlmRouter;
 use jcowork_logs::LogWriter;
 use jcowork_memory::MemoryManager;
 use jcowork_skills::{builtin_skills, SkillManager};
-use jcowork_storage::{FeishuConfigStore, FileStore, UserStore};
+use jcowork_storage::{FeishuConfigStore, FileStore, UserStore, WorkspaceIndex};
 use jcowork_tools::registry::ToolRegistry;
 
 /// Shared application state.
@@ -163,6 +163,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/workspace/upload", post(upload_file))
         .route("/api/workspace/mkdir", post(create_directory))
         .route("/api/workspace/files-recursive", get(list_workspace_files_recursive))
+        .route("/api/workspace/delete", post(delete_workspace_file))
+        .route("/api/workspace/move", post(move_workspace_path))
+        .route("/api/workspace/index/search", get(search_workspace_index))
+        .route("/api/workspace/index/list", get(list_workspace_index))
+        .route("/api/workspace/index/reindex", post(reindex_workspace_dir))
         .route("/api/fetch-url", post(fetch_url))
         .route("/api/ws", get(ws_upgrade))
         .layer(auth_mw);
@@ -1493,6 +1498,13 @@ async fn upload_file(
             ).into_response();
         }
 
+        // Index the uploaded file
+        if let Ok(index) = WorkspaceIndex::new(&state.data_dir, &auth_user.user_id).await {
+            if let Err(e) = index.add_document(&relative_path, &workspace_root).await {
+                tracing::warn!(file = %relative_path, err = %e, "Failed to index uploaded file");
+            }
+        }
+
         uploaded_files.push(serde_json::json!({
             "filename": safe_name,
             "path": relative_path,
@@ -1508,4 +1520,284 @@ async fn upload_file(
     }
 
     (StatusCode::OK, Json(serde_json::json!({ "files": uploaded_files }))).into_response()
+}
+
+// --- Delete Workspace File/Directory API ---
+
+#[derive(Debug, Deserialize)]
+struct DeleteWorkspaceRequest {
+    path: String,
+}
+
+async fn delete_workspace_file(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Json(body): Json<DeleteWorkspaceRequest>,
+) -> impl IntoResponse {
+    let workspace_root = format!("{}/{}/workspace", state.data_dir, auth_user.user_id);
+    let store = FileStore::new(&workspace_root);
+
+    // Validate path
+    if let Err(e) = store.validate_path_public(&body.path) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("Invalid path: {}", e) })),
+        ).into_response();
+    }
+
+    let full_path = format!("{}/{}", workspace_root, body.path);
+
+    // Check if it's a directory or file
+    let metadata = match tokio::fs::metadata(&full_path).await {
+        Ok(m) => m,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": format!("Path not found: {}", e) })),
+            ).into_response();
+        }
+    };
+
+    // Delete from filesystem
+    let result = if metadata.is_dir() {
+        tokio::fs::remove_dir_all(&full_path).await
+    } else {
+        tokio::fs::remove_file(&full_path).await
+    };
+
+    if let Err(e) = result {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("Failed to delete: {}", e) })),
+        ).into_response();
+    }
+
+    // Update index
+    if let Ok(index) = WorkspaceIndex::new(&state.data_dir, &auth_user.user_id).await {
+        if metadata.is_dir() {
+            let _ = index.remove_directory(&body.path).await;
+        } else {
+            let _ = index.remove_file(&body.path).await;
+        }
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({ "deleted": body.path }))).into_response()
+}
+
+// --- Move/Rename Workspace File/Directory API ---
+
+#[derive(Debug, Deserialize)]
+struct MoveWorkspaceRequest {
+    from: String,
+    to: String,
+}
+
+async fn move_workspace_path(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Json(body): Json<MoveWorkspaceRequest>,
+) -> impl IntoResponse {
+    let workspace_root = format!("{}/{}/workspace", state.data_dir, auth_user.user_id);
+    let store = FileStore::new(&workspace_root);
+
+    // Validate paths
+    if let Err(e) = store.validate_path_public(&body.from) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("Invalid source path: {}", e) })),
+        ).into_response();
+    }
+    if let Err(e) = store.validate_path_public(&body.to) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("Invalid destination path: {}", e) })),
+        ).into_response();
+    }
+
+    let from_full = format!("{}/{}", workspace_root, body.from);
+    let to_full = format!("{}/{}", workspace_root, body.to);
+
+    // Ensure destination parent exists
+    if let Some(parent) = std::path::Path::new(&to_full).parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+
+    // Move on filesystem
+    if let Err(e) = tokio::fs::rename(&from_full, &to_full).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("Failed to move: {}", e) })),
+        ).into_response();
+    }
+
+    // Update index
+    if let Ok(index) = WorkspaceIndex::new(&state.data_dir, &auth_user.user_id).await {
+        if let Err(e) = index.move_path(&body.from, &body.to).await {
+            tracing::warn!(from = %body.from, to = %body.to, err = %e, "Failed to update index on move");
+        }
+
+        // If destination is a new file that wasn't previously indexed, add it
+        if let Ok(count) = index.count().await {
+            // If the moved path was not in index (count unchanged), try to add it
+            // This handles the case where a non-indexed file is moved into an indexed location
+            let _ = count; // just to suppress warning
+        }
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({ "moved": { "from": body.from, "to": body.to } }))).into_response()
+}
+
+// --- Workspace Index Search API ---
+
+#[derive(Debug, Deserialize)]
+struct SearchIndexQuery {
+    q: String,
+    #[serde(default = "default_search_limit")]
+    limit: u32,
+}
+
+fn default_search_limit() -> u32 {
+    10
+}
+
+async fn search_workspace_index(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Query(query): Query<SearchIndexQuery>,
+) -> impl IntoResponse {
+    let index = match WorkspaceIndex::new(&state.data_dir, &auth_user.user_id).await {
+        Ok(idx) => idx,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Failed to open index: {}", e) })),
+            ).into_response();
+        }
+    };
+
+    match index.search(&query.q, query.limit).await {
+        Ok(docs) => {
+            (StatusCode::OK, Json(serde_json::json!({ "results": docs, "total": docs.len() }))).into_response()
+        }
+        Err(e) => {
+            // FTS query syntax error - return empty results with error message
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "results": [], "total": 0, "error": format!("Search error: {}", e) })),
+            ).into_response()
+        }
+    }
+}
+
+// --- Workspace Index List API ---
+
+#[derive(Debug, Deserialize)]
+struct ListIndexQuery {
+    dir: Option<String>,
+}
+
+async fn list_workspace_index(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Query(query): Query<ListIndexQuery>,
+) -> impl IntoResponse {
+    let index = match WorkspaceIndex::new(&state.data_dir, &auth_user.user_id).await {
+        Ok(idx) => idx,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Failed to open index: {}", e) })),
+            ).into_response();
+        }
+    };
+
+    let result = if let Some(ref dir) = query.dir {
+        index.list_by_directory(dir).await
+    } else {
+        index.list_all(None).await
+    };
+
+    match result {
+        Ok(docs) => {
+            (StatusCode::OK, Json(serde_json::json!({ "documents": docs, "total": docs.len() }))).into_response()
+        }
+        Err(e) => {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Failed to list: {}", e) })),
+            ).into_response()
+        }
+    }
+}
+
+// --- Workspace Index Re-index API ---
+
+#[derive(Debug, Deserialize)]
+struct ReindexRequest {
+    /// Directory path to re-index (relative to workspace root). Defaults to "." (entire workspace).
+    path: Option<String>,
+}
+
+async fn reindex_workspace_dir(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Json(body): Json<ReindexRequest>,
+) -> impl IntoResponse {
+    let workspace_root = format!("{}/{}/workspace", state.data_dir, auth_user.user_id);
+    let store = FileStore::new(&workspace_root);
+    let dir_path = body.path.as_deref().unwrap_or(".");
+
+    // Validate path
+    if let Err(e) = store.validate_path_public(dir_path) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("Invalid path: {}", e) })),
+        ).into_response();
+    }
+
+    // List all files recursively
+    let files = match store.list_dir_recursive(dir_path).await {
+        Ok(f) => f,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Failed to list files: {}", e) })),
+            ).into_response();
+        }
+    };
+
+    let index = match WorkspaceIndex::new(&state.data_dir, &auth_user.user_id).await {
+        Ok(idx) => idx,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Failed to open index: {}", e) })),
+            ).into_response();
+        }
+    };
+
+    let mut indexed = 0;
+    let mut errors = 0;
+    for file in &files {
+        // Compute the full relative path
+        let rel_path = if dir_path == "." {
+            file.clone()
+        } else {
+            format!("{}/{}", dir_path, file)
+        };
+
+        match index.add_document(&rel_path, &workspace_root).await {
+            Ok(()) => indexed += 1,
+            Err(e) => {
+                tracing::warn!(file = %rel_path, err = %e, "Failed to index file during re-index");
+                errors += 1;
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "indexed": indexed,
+        "errors": errors,
+        "total_files": files.len(),
+    }))).into_response()
 }

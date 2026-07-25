@@ -102,6 +102,14 @@ impl Tool for FileDeleteTool {
         let path = parsed["path"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
         let store = FileStore::new(&ctx.workspace_root);
         store.delete_file(path).await?;
+
+        // Update workspace index
+        if let Some(data_dir) = compute_data_dir(&ctx.workspace_root) {
+            if let Ok(index) = jcowork_storage::WorkspaceIndex::new(&data_dir, &ctx.user_id).await {
+                let _ = index.remove_file(path).await;
+            }
+        }
+
         Ok(format!("Deleted {}", path))
     }
 }
@@ -129,6 +137,14 @@ impl Tool for FileMoveTool {
         let to = parsed["to"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'to'"))?;
         let store = FileStore::new(&ctx.workspace_root);
         store.move_path(from, to).await?;
+
+        // Update workspace index
+        if let Some(data_dir) = compute_data_dir(&ctx.workspace_root) {
+            if let Ok(index) = jcowork_storage::WorkspaceIndex::new(&data_dir, &ctx.user_id).await {
+                let _ = index.move_path(from, to).await;
+            }
+        }
+
         Ok(format!("Moved {} to {}", from, to))
     }
 }
@@ -266,6 +282,16 @@ impl Tool for FileInfoTool {
         let store = FileStore::new(&ctx.workspace_root);
         store.file_info(path).await
     }
+}
+
+/// Compute the data_dir from workspace_root.
+/// workspace_root = {data_dir}/{user_id}/workspace
+/// So data_dir = grandparent of workspace_root's parent.
+fn compute_data_dir(workspace_root: &str) -> Option<String> {
+    std::path::Path::new(workspace_root)
+        .parent() // {data_dir}/{user_id}
+        .and_then(|p| p.parent()) // {data_dir}
+        .map(|p| p.to_string_lossy().to_string())
 }
 
 #[cfg(test)]

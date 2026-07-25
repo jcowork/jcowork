@@ -50,7 +50,7 @@ reqwest-eventsource = "0.6"
 futures = "0.3"
 
 # Database
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "derive"] }
 
 # Chinese segmentation
 jieba-rs = "0.7"

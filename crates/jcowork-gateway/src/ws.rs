@@ -15,6 +15,7 @@ use jcowork_skills::{builtin_skills, SkillManager};
 use jcowork_tools::base::ToolContext;
 use jcowork_tools::cron::{ReminderAddTool, ReminderListTool, ReminderRemoveTool, CronAddTool, CronListTool, CronRemoveTool};
 use jcowork_tools::bing_search::WebSearchTool;
+use jcowork_tools::doc_search::{DocListTool, DocSearchTool};
 use jcowork_tools::file_ops::{FileReadTool, FileWriteTool, FileListTool, FileDeleteTool, FileMoveTool, FileCopyTool, FileSearchTool, DirCreateTool, DirListTool, FileInfoTool};
 use jcowork_tools::memory::{MemorySaveTool, MemoryUpdateTool, MemoryRecallTool, MemorySearchTool};
 use jcowork_tools::pdf_parse::PdfParseTool;
@@ -105,6 +106,9 @@ pub fn build_tool_registry(
     registry.register(Arc::new(DirCreateTool));
     registry.register(Arc::new(DirListTool));
     registry.register(Arc::new(FileInfoTool));
+    // Document search tools (workspace index)
+    registry.register(Arc::new(DocSearchTool));
+    registry.register(Arc::new(DocListTool));
     // Shell tool (skill-gated behind builtin:code_engineer)
     registry.register(Arc::new(ShellTool::new(120)));
     Arc::new(registry)
