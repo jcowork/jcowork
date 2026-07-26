@@ -1503,9 +1503,19 @@ async fn upload_file(
         }
 
         // Index the uploaded file
-        if let Ok(index) = WorkspaceIndex::new(&state.data_dir, &auth_user.user_id).await {
-            if let Err(e) = index.add_document(&relative_path, &workspace_root).await {
-                tracing::warn!(file = %relative_path, err = %e, "Failed to index uploaded file");
+        let mut index_error: Option<String> = None;
+        match WorkspaceIndex::new(&state.data_dir, &auth_user.user_id).await {
+            Ok(index) => {
+                if let Err(e) = index.add_document(&relative_path, &workspace_root).await {
+                    let err_msg = format!("Failed to index {}: {}", relative_path, e);
+                    tracing::error!(file = %relative_path, err = %e, "Failed to index uploaded file");
+                    index_error = Some(err_msg);
+                }
+            }
+            Err(e) => {
+                let err_msg = format!("Failed to open index database: {}", e);
+                tracing::error!(user_id = %auth_user.user_id, err = %e, "Failed to initialize workspace index");
+                index_error = Some(err_msg);
             }
         }
 
@@ -1513,6 +1523,8 @@ async fn upload_file(
             "filename": safe_name,
             "path": relative_path,
             "size": data.len(),
+            "indexed": index_error.is_none(),
+            "index_error": index_error,
         }));
     }
 

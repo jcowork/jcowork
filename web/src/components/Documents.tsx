@@ -76,7 +76,16 @@ export default function Documents({ token }: DocumentsProps) {
         body: formData,
       });
       if (res.ok) {
+        const data = await res.json();
         await loadRoot();
+        // Show indexing status
+        if (data.files) {
+          const failed = data.files.filter((f: any) => !f.indexed);
+          if (failed.length > 0) {
+            const msgs = failed.map((f: any) => `${f.filename}: ${f.index_error || 'indexing failed'}`).join('\n');
+            alert(`Upload succeeded but indexing failed for:\n${msgs}\n\nYou can try re-indexing from the directory menu.`);
+          }
+        }
       } else {
         const err = await res.json();
         alert(err.error || 'Upload failed');
