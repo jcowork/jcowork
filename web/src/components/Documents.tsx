@@ -148,16 +148,63 @@ export default function Documents({ token }: DocumentsProps) {
     setPreviewLoading(true);
     setPreviewContent('');
 
-    const res = await fetch(`/api/workspace/download?path=${encodeURIComponent(filePath)}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (res.ok) {
-      const text = await res.text();
-      setPreviewContent(text);
+    const ext = filePath.split('.').pop()?.toLowerCase();
+
+    // PDF files: extract text via parse-pdf API
+    if (ext === 'pdf') {
+      const res = await fetch('/api/workspace/parse-pdf', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: filePath }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPreviewContent(data.text || '[PDF parsing returned no content]');
+      } else {
+        const err = await res.json().catch(() => ({ error: 'Unknown error' }));
+        setPreviewContent(`[PDF parse error: ${err.error}]`);
+      }
     } else {
-      setPreviewContent('Failed to load file.');
+      // Text files: fetch directly
+      const res = await fetch(`/api/workspace/download?path=${encodeURIComponent(filePath)}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const text = await res.text();
+        setPreviewContent(text);
+      } else {
+        setPreviewContent('Failed to load file.');
+      }
     }
     setPreviewLoading(false);
+  };
+
+  const handleDelete = async (filePath: string, isDir: boolean) => {
+    const name = filePath.split('/').pop() || filePath;
+    const msg = isDir
+      ? `${t('confirmDelete')} "${name}"? (folder & contents)`
+      : `${t('confirmDelete')} "${name}"?`;
+    if (!window.confirm(msg)) return;
+    try {
+      const res = await fetch('/api/workspace/delete', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: filePath }),
+      });
+      if (res.ok) {
+        // If the deleted file/folder was being previewed, close preview
+        if (previewPath && (previewPath === filePath || previewPath.startsWith(filePath + '/'))) {
+          setPreviewPath(null);
+          setPreviewContent('');
+        }
+        await loadRoot();
+      } else {
+        const err = await res.json();
+        alert(err.error || 'Delete failed');
+      }
+    } catch {
+      alert('Network error');
+    }
   };
 
   const downloadFile = (filePath: string) => {
@@ -186,6 +233,9 @@ export default function Documents({ token }: DocumentsProps) {
       case 'yml': case 'yaml': return '⚙️';
       case 'sh': case 'bash': return '💻';
       case 'png': case 'jpg': case 'jpeg': case 'gif': case 'webp': return '🖼️';
+      case 'pdf': return '📕';
+      case 'xlsx': case 'xls': return '📊';
+      case 'docx': case 'doc': return '📃';
       default: return '📄';
     }
   };
@@ -194,6 +244,7 @@ export default function Documents({ token }: DocumentsProps) {
     return nodes.map(node => (
       <div key={node.path}>
         <div
+          className="tree-row"
           onClick={() => node.type === 'dir' ? toggleDir(node.path) : openFile(node.path)}
           style={{
             display: 'flex',
@@ -235,6 +286,18 @@ export default function Documents({ token }: DocumentsProps) {
           <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {node.name}
           </span>
+          {/* Delete button */}
+          <span
+            style={{
+              opacity: 0, fontSize: 11, flexShrink: 0, cursor: 'pointer',
+              transition: 'opacity 0.15s', color: '#f85149',
+            }}
+            className="delete-btn"
+            onClick={(e) => { e.stopPropagation(); handleDelete(node.path, node.type === 'dir'); }}
+            title={t('delete')}
+          >
+            ✕
+          </span>
           {node.type === 'file' && (
             <span
               style={{ opacity: 0.4, fontSize: 11, flexShrink: 0 }}
@@ -271,6 +334,10 @@ export default function Documents({ token }: DocumentsProps) {
 
   return (
     <div style={{ display: 'flex', height: '100%' }}>
+      <style>{`
+        .tree-row:hover .delete-btn { opacity: 0.6 !important; }
+        .tree-row:hover .delete-btn:hover { opacity: 1 !important; }
+      `}</style>
       {/* File tree sidebar */}
       <div style={{
         width: 280,
@@ -467,7 +534,13 @@ export default function Documents({ token }: DocumentsProps) {
               justifyContent: 'space-between',
               gap: 8,
             }}>
-              <span style={{ fontSize: 13, color: '#aaa', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <span style={{ fontSize: 13, color: '#aaa', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 6 }}>
+                {previewPath.endsWith('.pdf') && (
+                  <span style={{
+                    fontSize: 10, padding: '1px 6px', borderRadius: 3,
+                    background: '#da3633', color: '#fff', fontWeight: 600, flexShrink: 0,
+                  }}>PDF</span>
+                )}
                 {previewPath}
               </span>
               <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
