@@ -148,6 +148,7 @@ export default function Chat({ userId, token }: ChatProps) {
   const [input, setInput] = useState('');
   const [connected, setConnected] = useState(false);
   const [streaming, setStreaming] = useState(false);
+  const [statusMsg, setStatusMsg] = useState<string>('');
   const [alarmActive, setAlarmActive] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -195,6 +196,7 @@ export default function Chat({ userId, token }: ChatProps) {
         });
       } else if (data.type === 'done') {
         setStreaming(false);
+        setStatusMsg('');
         setMessages((prev) => {
           const last = prev[prev.length - 1];
           if (last?.role === 'assistant') {
@@ -220,10 +222,14 @@ export default function Chat({ userId, token }: ChatProps) {
         playAlarm();
       } else if (data.type === 'error') {
         setStreaming(false);
+        setStatusMsg('');
         setMessages((prev) => [
           ...prev,
           { role: 'system', content: `Error: ${data.message}`, timestamp: Date.now() },
         ]);
+      } else if (data.type === 'status') {
+        // Show transient status message (CoT steps)
+        setStatusMsg(data.message || '');
       }
     };
 
@@ -584,6 +590,33 @@ export default function Chat({ userId, token }: ChatProps) {
         <div ref={messagesEndRef} />
         </div>
       </div>
+
+      {/* CoT Status Bar - shows current processing step */}
+      {statusMsg && (
+        <div style={{
+          padding: '6px 16px',
+          background: '#1a2332',
+          borderTop: '1px solid #2a3a4a',
+          borderBottom: '1px solid #2a3a4a',
+          fontSize: 12,
+          color: '#8ab4f8',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+        }}>
+          <span style={{
+            display: 'inline-block',
+            width: 12,
+            height: 12,
+            border: '2px solid #8ab4f8',
+            borderTopColor: 'transparent',
+            borderRadius: '50%',
+            animation: 'spin 0.8s linear infinite',
+          }} />
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+          {statusMsg}
+        </div>
+      )}
 
       <div style={{ padding: 16, borderTop: '1px solid #333' }}>
         {/* Selected documents chips */}

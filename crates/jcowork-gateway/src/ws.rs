@@ -177,6 +177,15 @@ pub async fn ws_handler(
                     }
                 };
 
+                // Send status: message received
+                let _ = ws_sender
+                    .send(Message::Text(
+                        serde_json::json!({"type": "status", "message": "📨 收到消息，正在处理..."})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await;
+
                 // Add user message to history
                 // If context documents are provided, inject them DIRECTLY into the system prompt
                 // so the LLM sees them as part of its core instructions.
@@ -186,6 +195,17 @@ pub async fn ws_handler(
                 }
                 if let Some(docs) = &input.context_documents {
                     if !docs.is_empty() && !history.is_empty() {
+                        let doc_count = docs.len();
+                        let doc_names: Vec<&str> = docs.iter().map(|d| d.name.as_str()).collect();
+                        // Send status: documents loaded
+                        let _ = ws_sender
+                            .send(Message::Text(
+                                serde_json::json!({"type": "status", "message": format!("📄 已加载 {} 个文档: {}", doc_count, doc_names.join(", "))})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await;
+
                         let mut parts = Vec::new();
                         for doc in docs {
                             let path_info = doc.path.as_deref().unwrap_or("");
@@ -294,6 +314,25 @@ pub async fn ws_handler(
                     let llm_start = std::time::Instant::now();
                     let llm_input = build_llm_input(&effective_history.iter().map(|m| (m.role.as_str(), m.content.as_str())).collect::<Vec<_>>());
                     let provider_name = provider.name().to_string();
+
+                    // Send status: LLM call starting
+                    if _turn == 0 {
+                        let _ = ws_sender
+                            .send(Message::Text(
+                                serde_json::json!({"type": "status", "message": format!("🤖 正在调用 {} ...", provider_name)})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await;
+                    } else {
+                        let _ = ws_sender
+                            .send(Message::Text(
+                                serde_json::json!({"type": "status", "message": format!("🔄 工具调用完成，继续思考 (第{}轮)...", _turn + 1)})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await;
+                    }
                     
                     // Add timeout: if LLM doesn't respond within 60 seconds, abort
                     let stream_result = tokio::time::timeout(
