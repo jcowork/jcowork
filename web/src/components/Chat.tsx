@@ -405,19 +405,16 @@ export default function Chat({ userId, token }: ChatProps) {
 
     try {
       if (ext === 'pdf') {
-        // PDF: parse directly from workspace via dedicated endpoint
-        const res = await fetch('/api/workspace/parse-pdf', {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ path: filePath }),
+        // PDF: get extracted text from workspace index (parsed during upload)
+        const res = await fetch(`/api/workspace/index/content?path=${encodeURIComponent(filePath)}`, {
+          headers: { Authorization: `Bearer ${token}` },
         });
         if (res.ok) {
           const data = await res.json();
-          const text = data.text || '[PDF parsing failed]';
+          const text = data.content || '[No indexed content found]';
           setSelectedDocs(prev => [...prev, { name, path: filePath, content: text }]);
         } else {
-          const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-          setSelectedDocs(prev => [...prev, { name, path: filePath, content: `[PDF error: ${err.error}]` }]);
+          setSelectedDocs(prev => [...prev, { name, path: filePath, content: '[PDF not indexed. Please re-upload or re-index the directory.]' }]);
         }
       } else if (binaryExtensions.includes(ext)) {
         // Binary files: add with placeholder content

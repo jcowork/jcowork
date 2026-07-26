@@ -290,17 +290,38 @@ pub async fn ws_handler(
 
                     };
 
-                    // Call LLM with streaming
+                    // Call LLM with streaming (with timeout to prevent hanging on large contexts)
                     let llm_start = std::time::Instant::now();
                     let llm_input = build_llm_input(&effective_history.iter().map(|m| (m.role.as_str(), m.content.as_str())).collect::<Vec<_>>());
                     let provider_name = provider.name().to_string();
-                    let stream_result = provider.chat_stream(&effective_history, &tools).await;
+                    
+                    // Add timeout: if LLM doesn't respond within 60 seconds, abort
+                    let stream_result = tokio::time::timeout(
+                        std::time::Duration::from_secs(60),
+                        provider.chat_stream(&effective_history, &tools)
+                    ).await;
+                    
                     let mut stream = match stream_result {
-                        Ok(s) => s,
-                        Err(e) => {
+                        Ok(Ok(s)) => s,
+                        Ok(Err(e)) => {
                             let _ = ws_sender
                                 .send(Message::Text(
                                     serde_json::json!({"type": "error", "message": format!("LLM error: {}", e)})
+                                        .to_string()
+                                        .into(),
+                                ))
+                                .await;
+                            break;
+                        }
+                        Err(_) => {
+                            // Timeout - likely due to context being too large
+                            let elapsed = llm_start.elapsed();
+                            let _ = ws_sender
+                                .send(Message::Text(
+                                    serde_json::json!({
+                                        "type": "error",
+                                        "message": format!("LLM request timed out after {:.1}s. The attached document(s) may be too large for the model's context window. Try asking a more specific question or using a smaller document.", elapsed.as_secs_f64())
+                                    })
                                         .to_string()
                                         .into(),
                                 ))
@@ -316,7 +337,29 @@ pub async fn ws_handler(
                     let mut had_error = false;
                     let mut final_usage: Option<(i32, i32, i32)> = None;
 
-                    while let Some(chunk) = stream.next().await {
+                    loop {
+                        let chunk = match tokio::time::timeout(
+                            std::time::Duration::from_secs(120),
+                            stream.next()
+                        ).await {
+                            Ok(Some(c)) => c,
+                            Ok(None) => break, // Stream ended normally
+                            Err(_) => {
+                                // Stream timeout - LLM stopped responding mid-stream
+                                let _ = ws_sender
+                                    .send(Message::Text(
+                                        serde_json::json!({
+                                            "type": "error",
+                                            "message": "LLM stream timed out. The response was too large or the connection was lost."
+                                        })
+                                            .to_string()
+                                            .into(),
+                                    ))
+                                    .await;
+                                had_error = true;
+                                break;
+                            }
+                        };
                         match chunk {
                             Ok(StreamChunk::Delta(delta)) => {
                                 assistant_content.push_str(&delta);
@@ -576,11 +619,18 @@ pub async fn ws_handler(
                                 let llm_input = build_llm_input(&history.iter().map(|m| (m.role.as_str(), m.content.as_str())).collect::<Vec<_>>());
                                 let provider_name = provider.name().to_string();
 
-                                let stream_result = provider.chat_stream(&history, &tools).await;
+                                let stream_result = tokio::time::timeout(
+                                    std::time::Duration::from_secs(60),
+                                    provider.chat_stream(&history, &tools)
+                                ).await;
                                 let mut stream = match stream_result {
-                                    Ok(s) => s,
-                                    Err(e) => {
+                                    Ok(Ok(s)) => s,
+                                    Ok(Err(e)) => {
                                         tracing::error!(err = %e, "Failed to start LLM stream for reminder action");
+                                        break;
+                                    }
+                                    Err(_) => {
+                                        tracing::error!("LLM stream timed out for reminder action");
                                         break;
                                     }
                                 };
@@ -590,7 +640,18 @@ pub async fn ws_handler(
                                 let mut current_tool_args: HashMap<String, (String, String, String)> = HashMap::new();
                                 let mut tool_call_started: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-                                while let Some(chunk) = stream.next().await {
+                                loop {
+                                    let chunk = match tokio::time::timeout(
+                                        std::time::Duration::from_secs(120),
+                                        stream.next()
+                                    ).await {
+                                        Ok(Some(c)) => c,
+                                        Ok(None) => break,
+                                        Err(_) => {
+                                            tracing::error!("LLM stream timed out mid-response for reminder action");
+                                            break;
+                                        }
+                                    };
                                     match chunk {
                                         Ok(StreamChunk::Delta(delta)) => {
                                             assistant_content.push_str(&delta);
