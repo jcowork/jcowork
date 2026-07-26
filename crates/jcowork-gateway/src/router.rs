@@ -8,6 +8,7 @@ use axum::{
     Json, Router,
     middleware,
     extract::Request,
+    extract::DefaultBodyLimit,
 };
 use axum::extract::{ws::WebSocketUpgrade, Multipart, Path, Query};
 use axum::http::header;
@@ -171,7 +172,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/workspace/index/reindex", post(reindex_workspace_dir))
         .route("/api/fetch-url", post(fetch_url))
         .route("/api/ws", get(ws_upgrade))
-        .layer(auth_mw);
+        .layer(auth_mw)
+        // Allow up to 50MB for file uploads (default axum limit is only 2MB)
+        .layer(DefaultBodyLimit::max(50 * 1024 * 1024));
 
     Router::new()
         .merge(public)
