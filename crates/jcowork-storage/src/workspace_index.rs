@@ -410,6 +410,19 @@ impl WorkspaceIndex {
             .collect())
     }
 
+    /// Get the full indexed content of a document by its file path.
+    /// Returns None if the file is not indexed.
+    pub async fn get_content(&self, file_path: &str) -> Result<Option<String>> {
+        let row = sqlx::query_as::<_, (String,)>(
+            "SELECT content_text FROM documents WHERE file_path = ?1"
+        )
+        .bind(file_path)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| r.0))
+    }
+
     /// List all indexed documents (optionally filtered by directory prefix).
     pub async fn list_all(&self, dir_prefix: Option<&str>) -> Result<Vec<IndexedDocument>> {
         let docs = if let Some(prefix) = dir_prefix {

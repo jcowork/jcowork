@@ -167,6 +167,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/workspace/move", post(move_workspace_path))
         .route("/api/workspace/index/search", get(search_workspace_index))
         .route("/api/workspace/index/list", get(list_workspace_index))
+        .route("/api/workspace/index/content", get(get_indexed_content))
         .route("/api/workspace/index/reindex", post(reindex_workspace_dir))
         .route("/api/fetch-url", post(fetch_url))
         .route("/api/ws", get(ws_upgrade))
@@ -1725,6 +1726,44 @@ async fn list_workspace_index(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": format!("Failed to list: {}", e) })),
+            ).into_response()
+        }
+    }
+}
+
+// --- Get Indexed Document Content API ---
+
+#[derive(Debug, Deserialize)]
+struct ContentIndexQuery {
+    path: String,
+}
+
+async fn get_indexed_content(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Query(query): Query<ContentIndexQuery>,
+) -> impl IntoResponse {
+    let index = match WorkspaceIndex::new(&state.data_dir, &auth_user.user_id).await {
+        Ok(idx) => idx,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Failed to open index: {}", e) })),
+            ).into_response();
+        }
+    };
+
+    match index.get_content(&query.path).await {
+        Ok(Some(content)) => {
+            (StatusCode::OK, Json(serde_json::json!({ "path": query.path, "content": content }))).into_response()
+        }
+        Ok(None) => {
+            (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Document not indexed" }))).into_response()
+        }
+        Err(e) => {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Failed to get content: {}", e) })),
             ).into_response()
         }
     }

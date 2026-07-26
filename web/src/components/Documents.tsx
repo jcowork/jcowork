@@ -150,19 +150,16 @@ export default function Documents({ token }: DocumentsProps) {
 
     const ext = filePath.split('.').pop()?.toLowerCase();
 
-    // PDF files: extract text via parse-pdf API
+    // PDF files: get extracted text from workspace index (parsed during upload)
     if (ext === 'pdf') {
-      const res = await fetch('/api/workspace/parse-pdf', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: filePath }),
+      const res = await fetch(`/api/workspace/index/content?path=${encodeURIComponent(filePath)}`, {
+        headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
         const data = await res.json();
-        setPreviewContent(data.text || '[PDF parsing returned no content]');
+        setPreviewContent(data.content || '[No indexed content found]');
       } else {
-        const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-        setPreviewContent(`[PDF parse error: ${err.error}]`);
+        setPreviewContent('[PDF not indexed. Please re-upload or re-index the directory.]');
       }
     } else {
       // Text files: fetch directly
