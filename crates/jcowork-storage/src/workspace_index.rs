@@ -214,9 +214,14 @@ impl WorkspaceIndex {
             String::new()
         };
 
-        // Truncate very long content
+        // Truncate very long content (use char boundary to avoid cutting UTF-8 mid-character)
         let content_text = if content_text.len() > MAX_INDEX_CONTENT_LEN {
-            let mut truncated = content_text[..MAX_INDEX_CONTENT_LEN].to_string();
+            let mut end = MAX_INDEX_CONTENT_LEN;
+            // Walk back to find a valid char boundary
+            while end > 0 && !content_text.is_char_boundary(end) {
+                end -= 1;
+            }
+            let mut truncated = content_text[..end].to_string();
             truncated.push_str("\n\n[... content truncated for indexing ...]");
             truncated
         } else {
