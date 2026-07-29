@@ -46,6 +46,8 @@ const MAX_INDEX_CONTENT_LEN: usize = 50_000;
 #[derive(Debug, Clone)]
 pub struct WorkspaceIndex {
     pool: SqlitePool,
+    data_dir: String,
+    user_id: String,
 }
 
 impl WorkspaceIndex {
@@ -68,7 +70,11 @@ impl WorkspaceIndex {
 
         Self::run_migrations(&pool).await?;
         info!(user_id = user_id, "Workspace index initialized");
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            data_dir: data_dir.to_string(),
+            user_id: user_id.to_string(),
+        })
     }
 
     /// Run database migrations to create required tables.
@@ -153,7 +159,9 @@ impl WorkspaceIndex {
     ///
     /// For PDF files, automatically parses the content using pdftext.
     /// For text files, reads the content directly.
-    /// Binary files (xlsx, docx, etc.) are indexed with metadata only.
+    /// Excel files (xlsx/xls) are imported into a per-document SQLite database
+    /// (see `excel_db` module) and a structural summary is indexed.
+    /// Other binary files (docx, etc.) are indexed with metadata only.
     pub async fn add_document(&self, file_path: &str, workspace_root: &str) -> Result<()> {
         let full_path = Path::new(workspace_root).join(file_path);
         if !full_path.exists() {
@@ -209,8 +217,18 @@ impl WorkspaceIndex {
                     String::new()
                 }
             }
+        } else if matches!(ext.as_str(), "xlsx" | "xls") {
+            // Excel files: parse into a per-document SQLite database (one table
+            // per sheet, every column indexed) and index a structural summary.
+            match crate::excel_db::import_excel(&self.data_dir, &self.user_id, file_path, workspace_root).await {
+                Ok(summary) => summary.to_index_text(),
+                Err(e) => {
+                    warn!(file = %file_path, err = %e, "Failed to import Excel into SQLite");
+                    format!("[Excel import error: {}]", e)
+                }
+            }
         } else {
-            // Binary files (xlsx, docx, etc.) - no content extraction for now
+            // Binary files (docx, etc.) - no content extraction for now
             String::new()
         };
 
@@ -264,6 +282,15 @@ impl WorkspaceIndex {
             .bind(file_path)
             .execute(&self.pool)
             .await?;
+
+        // If it was an Excel file, also drop its imported SQLite database.
+        let ext = file_path.rsplit('.').next().unwrap_or("").to_lowercase();
+        if matches!(ext.as_str(), "xlsx" | "xls") {
+            if let Err(e) = crate::excel_db::remove_db_for(&self.data_dir, &self.user_id, file_path).await {
+                warn!(file = %file_path, err = %e, "Failed to remove Excel database");
+            }
+        }
+
         info!(file = %file_path, "Document removed from index");
         Ok(())
     }
@@ -655,5 +682,47 @@ mod tests {
 
         index.remove_directory("docs").await.unwrap();
         assert_eq!(index.count().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_add_excel_imports_sqlite_database() {
+        use rust_xlsxwriter::Workbook;
+
+        let (index, dir) = setup_test_index().await;
+        let workspace = dir.path().join("test-workspace");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+
+        // Build a real .xlsx on disk
+        let mut wb = Workbook::new();
+        let ws = wb.add_worksheet().set_name("库存").unwrap();
+        ws.write_string(0, 0, "商品").unwrap();
+        ws.write_string(0, 1, "数量").unwrap();
+        ws.write_string(1, 0, "苹果").unwrap();
+        ws.write_number(1, 1, 42).unwrap();
+        wb.save(workspace.join("库存表.xlsx")).unwrap();
+
+        let ws_str = workspace.to_string_lossy().to_string();
+        index.add_document("库存表.xlsx", &ws_str).await.unwrap();
+
+        // The FTS index holds the structural summary
+        let content = index.get_content("库存表.xlsx").await.unwrap().unwrap();
+        assert!(content.contains("库存"), "summary should mention the table name");
+        assert!(content.contains("库存表.xlsx"));
+
+        // The SQLite database was created with one table, two indexed columns
+        let db_path = crate::excel_db::db_path_for(
+            dir.path().to_str().unwrap(),
+            "test-user",
+            "库存表.xlsx",
+        );
+        let info = crate::excel_db::describe_database(&db_path).await.unwrap();
+        assert_eq!(info.len(), 1);
+        assert_eq!(info[0].name, "库存");
+        assert_eq!(info[0].row_count, 1);
+        assert_eq!(info[0].indexes.len(), 2);
+
+        // Removing the file also removes the database
+        index.remove_file("库存表.xlsx").await.unwrap();
+        assert!(!db_path.exists());
     }
 }

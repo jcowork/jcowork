@@ -20,6 +20,20 @@ interface DocumentsProps {
   token: string;
 }
 
+interface ExcelTablePreview {
+  name: string;
+  columns: [string, string][];
+  row_count: number;
+  rows: (string | number | null)[][];
+}
+
+interface ExcelPreview {
+  path: string;
+  db_name: string;
+  preview_rows: number;
+  tables: ExcelTablePreview[];
+}
+
 const ALLOWED_EXTENSIONS = '.pdf,.md,.html,.htm,.xlsx,.xls,.docx,.doc';
 
 export default function Documents({ token }: DocumentsProps) {
@@ -29,6 +43,8 @@ export default function Documents({ token }: DocumentsProps) {
   const [previewPath, setPreviewPath] = useState<string | null>(null);
   const [previewContent, setPreviewContent] = useState<string>('');
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [excelData, setExcelData] = useState<ExcelPreview | null>(null);
+  const [activeTable, setActiveTable] = useState(0);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [creatingFolder, setCreatingFolder] = useState(false);
@@ -156,8 +172,26 @@ export default function Documents({ token }: DocumentsProps) {
     setPreviewPath(filePath);
     setPreviewLoading(true);
     setPreviewContent('');
+    setExcelData(null);
 
     const ext = filePath.split('.').pop()?.toLowerCase();
+
+    // Excel files: show the parsed SQLite database tables
+    if (ext === 'xlsx' || ext === 'xls') {
+      setActiveTable(0);
+      const res = await fetch(`/api/workspace/excel-db?path=${encodeURIComponent(filePath)}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setExcelData(data);
+      } else {
+        const err = await res.json().catch(() => null);
+        setPreviewContent(err?.error || '[Excel not parsed yet. Try re-uploading the file.]');
+      }
+      setPreviewLoading(false);
+      return;
+    }
 
     // PDF files: get extracted text from workspace index (parsed during upload)
     if (ext === 'pdf') {
@@ -202,6 +236,7 @@ export default function Documents({ token }: DocumentsProps) {
         if (previewPath && (previewPath === filePath || previewPath.startsWith(filePath + '/'))) {
           setPreviewPath(null);
           setPreviewContent('');
+          setExcelData(null);
         }
         await loadRoot();
       } else {
@@ -547,6 +582,12 @@ export default function Documents({ token }: DocumentsProps) {
                     background: '#da3633', color: '#fff', fontWeight: 600, flexShrink: 0,
                   }}>PDF</span>
                 )}
+                {(previewPath.endsWith('.xlsx') || previewPath.endsWith('.xls')) && (
+                  <span style={{
+                    fontSize: 10, padding: '1px 6px', borderRadius: 3,
+                    background: '#1f6feb', color: '#fff', fontWeight: 600, flexShrink: 0,
+                  }}>EXCEL → SQLITE</span>
+                )}
                 {previewPath}
               </span>
               <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
@@ -581,7 +622,7 @@ export default function Documents({ token }: DocumentsProps) {
                   {t('download')}
                 </button>
                 <button
-                  onClick={() => { setPreviewPath(null); setPreviewContent(''); }}
+                  onClick={() => { setPreviewPath(null); setPreviewContent(''); setExcelData(null); }}
                   style={{
                     padding: '3px 10px',
                     borderRadius: 4,
@@ -599,6 +640,8 @@ export default function Documents({ token }: DocumentsProps) {
             <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
               {previewLoading ? (
                 <div style={{ color: '#666', textAlign: 'center', paddingTop: 40 }}>{t('loading')}</div>
+              ) : excelData ? (
+                renderExcelPreview(excelData, activeTable, setActiveTable, t)
               ) : (
                 <pre style={{
                   margin: 0,
@@ -647,6 +690,82 @@ function findNode(nodes: TreeNode[], path: string): TreeNode | null {
     }
   }
   return null;
+}
+
+// Render the parsed SQLite database of an Excel file as tabbed tables.
+function renderExcelPreview(
+  data: ExcelPreview,
+  activeTable: number,
+  setActiveTable: (i: number) => void,
+  t: ReturnType<typeof useT>,
+): React.ReactNode {
+  if (data.tables.length === 0) {
+    return <div style={{ color: '#888', textAlign: 'center', paddingTop: 40 }}>{t('excelNoTables')}</div>;
+  }
+  const active = Math.min(activeTable, data.tables.length - 1);
+  const table = data.tables[active];
+  return (
+    <div>
+      {data.tables.length > 1 && (
+        <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
+          {data.tables.map((tb, i) => (
+            <button
+              key={tb.name}
+              onClick={() => setActiveTable(i)}
+              style={{
+                padding: '4px 12px',
+                borderRadius: 4,
+                border: i === active ? '1px solid #1f6feb' : '1px solid #444',
+                background: i === active ? '#1f6feb' : 'transparent',
+                color: i === active ? '#fff' : '#aaa',
+                cursor: 'pointer',
+                fontSize: 12,
+              }}
+            >
+              {tb.name} ({tb.row_count})
+            </button>
+          ))}
+        </div>
+      )}
+      <div style={{ fontSize: 12, color: '#777', marginBottom: 8, fontFamily: 'monospace' }}>
+        SQLite: {data.db_name}.db · "{table.name}" — {table.row_count} {t('rows')}
+        {table.row_count > table.rows.length && ` · ${t('excelPreviewFirst')} ${table.rows.length} ${t('rows')}`}
+      </div>
+      <div style={{ overflow: 'auto', border: '1px solid #333', borderRadius: 6 }}>
+        <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 12 }}>
+          <thead>
+            <tr>
+              {table.columns.map(([name, ty]) => (
+                <th key={name} style={{
+                  position: 'sticky', top: 0, background: '#161b22', textAlign: 'left',
+                  padding: '6px 12px', borderBottom: '1px solid #333', whiteSpace: 'nowrap',
+                  color: '#c9d1d9', fontWeight: 600,
+                }}>
+                  {name} <span style={{ color: '#555', fontWeight: 400, fontSize: 10 }}>{ty}</span>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {table.rows.map((row, ri) => (
+              <tr key={ri} style={{ background: ri % 2 ? '#11151c' : 'transparent' }}>
+                {row.map((cell, ci) => (
+                  <td key={ci} style={{
+                    padding: '4px 12px', borderTop: '1px solid #21262d', color: '#c9d1d9',
+                    maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }} title={cell === null ? 'NULL' : String(cell)}>
+                    {cell === null
+                      ? <span style={{ color: '#555', fontStyle: 'italic' }}>NULL</span>
+                      : String(cell)}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
 }
 
 function updateNode(nodes: TreeNode[], path: string, updater: (node: TreeNode) => TreeNode): TreeNode[] {

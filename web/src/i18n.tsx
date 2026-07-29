@@ -65,6 +65,9 @@ const translations = {
     clickFolderToExpand: '点击文件夹展开 · 点击文件查看',
     workspaceEmpty: '工作区为空',
     useChatToCreate: '使用对话来创建文件和项目！',
+    rows: '行',
+    excelPreviewFirst: '预览前',
+    excelNoTables: '该 Excel 没有可显示的数据表',
 
     // Schedule
     reminders: '提醒',
@@ -219,6 +222,9 @@ const translations = {
     clickFolderToExpand: 'Click a folder to expand · Click a file to view',
     workspaceEmpty: 'Your workspace is empty',
     useChatToCreate: 'Use chat to create files and projects!',
+    rows: 'rows',
+    excelPreviewFirst: 'showing first',
+    excelNoTables: 'No displayable tables in this Excel file',
 
     // Schedule
     reminders: 'Reminders',

@@ -16,6 +16,7 @@ use jcowork_tools::base::ToolContext;
 use jcowork_tools::cron::{ReminderAddTool, ReminderListTool, ReminderRemoveTool, CronAddTool, CronListTool, CronRemoveTool};
 use jcowork_tools::bing_search::WebSearchTool;
 use jcowork_tools::doc_search::{DocListTool, DocSearchTool};
+use jcowork_tools::excel_db::ExcelDbTool;
 use jcowork_tools::file_ops::{FileReadTool, FileWriteTool, FileListTool, FileDeleteTool, FileMoveTool, FileCopyTool, FileSearchTool, DirCreateTool, DirListTool, FileInfoTool};
 use jcowork_tools::memory::{MemorySaveTool, MemoryUpdateTool, MemoryRecallTool, MemorySearchTool};
 use jcowork_tools::pdf_parse::PdfParseTool;
@@ -109,6 +110,8 @@ pub fn build_tool_registry(
     // Document search tools (workspace index)
     registry.register(Arc::new(DocSearchTool));
     registry.register(Arc::new(DocListTool));
+    // Excel database CRUD tool (skill-gated behind builtin:excel_data)
+    registry.register(Arc::new(ExcelDbTool));
     // Shell tool (skill-gated behind builtin:code_engineer)
     registry.register(Arc::new(ShellTool::new(120)));
     Arc::new(registry)
@@ -273,6 +276,7 @@ pub async fn ws_handler(
                         let skill_required = match t.function.name.as_str() {
                             "web_search" => Some("builtin:web_search"),
                             "report_search" | "report_list_companies" => Some("builtin:write_research_report"),
+                            "excel_db" => Some("builtin:excel_data"),
                             "file_read" | "file_write" | "file_list" | "file_delete" | "file_move" | "file_copy" | "file_search" | "dir_create" | "dir_list" | "file_info" | "shell" => Some("builtin:code_engineer"),
                             _ => None,
                         };

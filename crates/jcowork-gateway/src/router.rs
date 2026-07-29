@@ -170,6 +170,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/workspace/index/list", get(list_workspace_index))
         .route("/api/workspace/index/content", get(get_indexed_content))
         .route("/api/workspace/index/reindex", post(reindex_workspace_dir))
+        .route("/api/workspace/excel-db", get(get_excel_db_content))
         .route("/api/fetch-url", post(fetch_url))
         .route("/api/ws", get(ws_upgrade))
         .layer(auth_mw)
@@ -1784,8 +1785,84 @@ async fn get_indexed_content(
     }
 }
 
-// --- Workspace Index Re-index API ---
+// --- Excel Database Preview API ---
 
+/// Max rows per table returned by the excel-db preview endpoint.
+const EXCEL_PREVIEW_ROWS: usize = 100;
+
+#[derive(Debug, Deserialize)]
+struct ExcelDbQuery {
+    path: String,
+}
+
+/// Preview the SQLite database parsed from an uploaded Excel file.
+/// Returns all tables with their schema and the first rows of each table.
+/// If the database does not exist yet (e.g. file uploaded before Excel import
+/// existed), it is built on demand from the source file.
+async fn get_excel_db_content(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Query(query): Query<ExcelDbQuery>,
+) -> impl IntoResponse {
+    let ext = query.path.rsplit('.').next().unwrap_or("").to_lowercase();
+    if !matches!(ext.as_str(), "xlsx" | "xls") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "Not an Excel file" })),
+        ).into_response();
+    }
+
+    let workspace_root = format!("{}/{}/workspace", state.data_dir, auth_user.user_id);
+    let store = FileStore::new(&workspace_root);
+    if let Err(e) = store.validate_path_public(&query.path) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("Invalid path: {}", e) })),
+        ).into_response();
+    }
+
+    let db_path = jcowork_storage::excel_db::db_path_for(&state.data_dir, &auth_user.user_id, &query.path);
+
+    // Build the database on demand when missing (older uploads)
+    if !db_path.exists() {
+        let src = std::path::Path::new(&workspace_root).join(&query.path);
+        if !src.exists() {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "File not found in workspace" })),
+            ).into_response();
+        }
+        if let Err(e) = jcowork_storage::excel_db::import_excel(
+            &state.data_dir,
+            &auth_user.user_id,
+            &query.path,
+            &workspace_root,
+        ).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Failed to parse Excel file: {}", e) })),
+            ).into_response();
+        }
+    }
+
+    match jcowork_storage::excel_db::preview_database(&db_path, EXCEL_PREVIEW_ROWS).await {
+        Ok(tables) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "path": query.path,
+                "db_name": jcowork_storage::excel_db::db_name_for(&query.path),
+                "preview_rows": EXCEL_PREVIEW_ROWS,
+                "tables": tables,
+            })),
+        ).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("Failed to read Excel database: {}", e) })),
+        ).into_response(),
+    }
+}
+
+// --- Workspace Index Re-index API ---
 #[derive(Debug, Deserialize)]
 struct ReindexRequest {
     /// Directory path to re-index (relative to workspace root). Defaults to "." (entire workspace).

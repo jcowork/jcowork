@@ -420,4 +420,37 @@ When creating an HTML document, follow this structure:
 - All paths are relative to the user's workspace and sandboxed.
 - The shell runs in the workspace root directory."##,
     },
+    BuiltinSkill {
+        id: "builtin:excel_data",
+        name: "Excel数据分析",
+        description: "查询和分析已上传的 Excel 文件：上传后自动解析为带索引的 SQLite 数据库，对话中可直接对其增删改查。",
+        content: r#"## Skill: Excel数据分析 — Excel Data Query & Management
+
+用户上传的每个 Excel 文件（.xlsx/.xls）都会被自动解析成一个独立的 SQLite 数据库：每个工作表对应一张表（表名 = 工作表名），所有列均已建立索引。你通过 `excel_db` 工具对这些数据库做增删改查。
+
+**当对话涉及已上传的 Excel 数据时（查询、统计、筛选、对比、录入、修改、删除），直接使用本 skill 的 `excel_db` 工具处理，不要绕开它去读原始文件，也不要凭空回答。**
+
+### 何时使用
+- 用户提到某个已上传的 Excel / 表格 / 工作表 / 报表里的数据
+- 用户要求统计、筛选、排序、分组、对比表格数据
+- 用户要求向表格录入新数据，或修改、删除已有数据
+
+### 标准工作流程
+1. **先发现**：调用 `excel_db(action="list")` 查看所有 Excel 数据库；再对目标库调用 `excel_db(action="list", db="...")` 拿到表结构（表名、列名、类型、行数）。不确定列名/表名时必须先 list，不要猜测。
+2. **再取数**：`excel_db(action="query", db="...", sql="SELECT ...")` 查询。表名和列名与 Excel 中完全一致（含中文），在 SQL 中用双引号包裹，例如：
+   `SELECT "部门", COUNT(*), AVG("月薪") FROM "员工表" GROUP BY "部门" ORDER BY 2 DESC`
+3. **后作答**：严格基于查询结果回答，数据用 Markdown 表格呈现；结果里没有的信息明确说"数据中没有"，不得编造。
+
+### 修改数据
+- 新增：`excel_db(action="insert", db, table, rows=[{"列名": 值, ...}, ...])`
+- 更新：`excel_db(action="update", db, table, set={"列名": 值}, where="条件")`
+- 删除：`excel_db(action="delete", db, table, where="条件")`
+- update/delete **必须带 where 条件**。执行前先 SELECT 相同条件确认将影响的数据范围并告知用户；执行后报告实际影响行数。
+- 修改的是解析出的 SQLite 数据库，**不会回写原始 Excel 文件**；用户需要原始文件同步时要提醒这一点。
+
+### 规则
+- query 只接受单条只读 SELECT（可用 WITH 子句）；写操作必须走 insert/update/delete action。
+- 默认 limit=100；确需更多数据时调大 limit（上限 1000），并优先用 WHERE 收窄范围。
+- 数据库尚未上传任何 Excel 时，引导用户去文档页面上传 .xlsx/.xls 文件。"#,
+    },
 ];

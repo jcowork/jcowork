@@ -1,6 +1,7 @@
 //! Jcowork Storage - Database and file storage layer.
 
 pub mod database;
+pub mod excel_db;
 pub mod feishu_store;
 pub mod file_store;
 pub mod migration;
