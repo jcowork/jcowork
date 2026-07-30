@@ -4,6 +4,7 @@ pub mod base;
 pub mod bing_search;
 pub mod cron;
 pub mod delegate;
+pub mod doc_retrieve;
 pub mod doc_search;
 pub mod excel_db;
 pub mod file_ops;

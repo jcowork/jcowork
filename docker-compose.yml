@@ -14,7 +14,25 @@ services:
       - JCWORK_JWT_SECRET=${JCWORK_JWT_SECRET:-change-me-in-production}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      - DOCLING_SERVICE_URL=${DOCLING_SERVICE_URL:-http://docling:50060}
+      - EMBEDDING_DIM=${EMBEDDING_DIM:-384}
+    depends_on:
+      - docling
+    restart: unless-stopped
+
+  docling:
+    build: ./services/docling
+    ports:
+      - "50060:50060"
+    volumes:
+      - docling-models:/home/docling/.cache
+      - docling-assets:/home/docling/assets
+    environment:
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-paraphrase-multilingual-MiniLM-L12-v2}
+      - PORT=50060
     restart: unless-stopped
 
 volumes:
   jcowork-data:
+  docling-models:
+  docling-assets:

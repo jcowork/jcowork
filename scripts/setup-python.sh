@@ -51,8 +51,8 @@ echo "Upgrading pip..."
 "${VENV_DIR}/bin/pip" install --upgrade pip --quiet
 
 # Install packages
-echo "Installing Python packages (playwright, pdftext)..."
-"${VENV_DIR}/bin/pip" install --quiet playwright pdftext
+echo "Installing Python packages (playwright, pdftext, docling, sentence-transformers)..."
+"${VENV_DIR}/bin/pip" install --quiet playwright pdftext docling sentence-transformers fastapi uvicorn python-multipart Pillow
 
 # Install Playwright browsers with system dependencies
 # --with-deps auto-installs OS libs (libatk, libnspr, etc.) on Linux

@@ -1,40 +1,19 @@
-//! Workspace document indexing with full-text search.
+//! Workspace document indexing with full-text search and vector search.
 //!
 //! Provides per-user SQLite-based document indexing for files uploaded to the workspace.
-//! PDF files are automatically parsed via pdftext before indexing.
+//! PDF files are automatically parsed via Docling service into structured Markdown.
 //! Text-based files (md, html, etc.) are indexed directly from their content.
+//! Document chunks are embedded using the Docling embedding service for semantic search.
 
 use anyhow::Result;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteJournalMode};
 use sqlx::SqlitePool;
 use std::path::Path;
 use std::str::FromStr;
-use tokio::process::Command;
 use tracing::{info, warn};
 
-/// Resolve the Python binary path in the jcowork venv.
-fn resolve_python_bin() -> String {
-    let base = shellexpand::tilde("~/.jcowork/venv").to_string();
-    if cfg!(windows) {
-        format!("{}\\Scripts\\python.exe", base)
-    } else {
-        format!("{}/bin/python", base)
-    }
-}
-
-/// Python script for PDF text extraction using pdftext.
-const PDF_EXTRACT_SCRIPT: &str = r#"
-import sys
-from pdftext.extraction import plain_text_output
-
-path = sys.argv[1]
-try:
-    text = plain_text_output(path)
-    print(text, end='')
-except Exception as e:
-    print(f"ERROR: {e}", file=sys.stderr)
-    sys.exit(1)
-"#;
+use crate::doc_chunker::{DocChunk, chunk_markdown};
+use crate::embedding_client::{EmbeddingClient, bytes_to_embedding, embedding_to_bytes, cosine_similarity};
 
 /// Maximum content size to index (characters). Larger content is truncated.
 const MAX_INDEX_CONTENT_LEN: usize = 50_000;
@@ -152,16 +131,96 @@ impl WorkspaceIndex {
             .execute(pool)
             .await?;
 
+        // --- Vector search tables ---
+        
+        // Document chunks table (for semantic search)
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS doc_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path TEXT NOT NULL,
+                chunk_type TEXT NOT NULL DEFAULT 'text',
+                content TEXT NOT NULL,
+                heading TEXT NOT NULL DEFAULT '',
+                chunk_index INTEGER NOT NULL DEFAULT 0,
+                image_path TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        // Chunk embeddings table (vector storage)
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS chunk_embeddings (
+                chunk_id INTEGER PRIMARY KEY REFERENCES doc_chunks(id) ON DELETE CASCADE,
+                embedding BLOB NOT NULL
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        // FTS5 virtual table for chunk full-text search
+        sqlx::query(
+            r#"
+            CREATE VIRTUAL TABLE IF NOT EXISTS doc_chunks_fts USING fts5(
+                content,
+                heading,
+                content='doc_chunks',
+                content_rowid='id'
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        // Triggers for chunk FTS sync
+        sqlx::query(
+            r#"
+            CREATE TRIGGER IF NOT EXISTS doc_chunks_fts_insert AFTER INSERT ON doc_chunks BEGIN
+                INSERT INTO doc_chunks_fts(rowid, content, heading)
+                VALUES (NEW.id, NEW.content, NEW.heading);
+            END
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TRIGGER IF NOT EXISTS doc_chunks_fts_delete AFTER DELETE ON doc_chunks BEGIN
+                INSERT INTO doc_chunks_fts(doc_chunks_fts, rowid, content, heading)
+                VALUES ('delete', OLD.id, OLD.content, OLD.heading);
+            END
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        // Indexes for chunk queries
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_doc_chunks_file ON doc_chunks(file_path)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_doc_chunks_type ON doc_chunks(chunk_type)")
+            .execute(pool)
+            .await?;
+
         Ok(())
     }
 
     /// Add or update a document in the index.
     ///
-    /// For PDF files, automatically parses the content using pdftext.
+    /// For PDF files, automatically parses the content using Docling service.
     /// For text files, reads the content directly.
     /// Excel files (xlsx/xls) are imported into a per-document SQLite database
     /// (see `excel_db` module) and a structural summary is indexed.
     /// Other binary files (docx, etc.) are indexed with metadata only.
+    /// 
+    /// For PDF and Markdown files, document chunks are also stored and embedded
+    /// for semantic (vector) search.
     pub async fn add_document(&self, file_path: &str, workspace_root: &str) -> Result<()> {
         let full_path = Path::new(workspace_root).join(file_path);
         if !full_path.exists() {
@@ -200,11 +259,11 @@ impl WorkspaceIndex {
 
         // Extract text content based on file type
         let content_text = if ext == "pdf" {
-            // Parse PDF using pdftext
-            match self.extract_pdf_text(&full_path.to_string_lossy()).await {
-                Ok(text) => text,
+            // Parse PDF using Docling service
+            match self.parse_with_docling(&full_path.to_string_lossy(), file_path, workspace_root).await {
+                Ok(markdown) => markdown,
                 Err(e) => {
-                    warn!(file = %file_path, err = %e, "Failed to parse PDF for indexing");
+                    warn!(file = %file_path, err = %e, "Failed to parse PDF with Docling");
                     format!("[PDF parse error: {}]", e)
                 }
             }
@@ -272,6 +331,18 @@ impl WorkspaceIndex {
         .execute(&self.pool)
         .await?;
 
+        // For PDF and Markdown files, also store chunks for vector search
+        if matches!(ext.as_str(), "pdf" | "md" | "markdown") && !content_text.is_empty() {
+            // Delete existing chunks first (in case of re-index)
+            self.delete_file_chunks(file_path).await?;
+            
+            // Chunk the document and store with embeddings
+            if let Err(e) = self.store_document_chunks(file_path, &content_text).await {
+                warn!(file = %file_path, err = %e, "Failed to store document chunks for vector search");
+                // Don't fail the whole operation - FTS still works
+            }
+        }
+
         info!(file = %file_path, content_type = %content_type, "Document indexed");
         Ok(())
     }
@@ -282,6 +353,9 @@ impl WorkspaceIndex {
             .bind(file_path)
             .execute(&self.pool)
             .await?;
+
+        // Also delete document chunks (cascades to embeddings via FK)
+        self.delete_file_chunks(file_path).await?;
 
         // If it was an Excel file, also drop its imported SQLite database.
         let ext = file_path.rsplit('.').next().unwrap_or("").to_lowercase();
@@ -304,11 +378,25 @@ impl WorkspaceIndex {
             format!("{}%", dir_path)
         };
 
+        // Get file paths before deleting (to also delete chunks)
+        let files: Vec<String> = sqlx::query_scalar(
+            "SELECT file_path FROM documents WHERE dir_path = ?1 OR dir_path LIKE ?2"
+        )
+        .bind(dir_path)
+        .bind(&pattern)
+        .fetch_all(&self.pool)
+        .await?;
+
         sqlx::query("DELETE FROM documents WHERE dir_path = ? OR dir_path LIKE ?")
             .bind(dir_path)
             .bind(&pattern)
             .execute(&self.pool)
             .await?;
+
+        // Delete chunks for all removed files
+        for file_path in files {
+            let _ = self.delete_file_chunks(&file_path).await;
+        }
 
         info!(dir = %dir_path, "Directory removed from index");
         Ok(())
@@ -507,37 +595,308 @@ impl WorkspaceIndex {
         Ok(row.0)
     }
 
-    /// Extract text from a PDF file using pdftext (Python).
-    async fn extract_pdf_text(&self, pdf_path: &str) -> Result<String> {
-        let python_bin = resolve_python_bin();
+    // ========== Docling Integration ==========
 
-        if !Path::new(&python_bin).exists() {
-            anyhow::bail!("Python venv not found. Run scripts/setup-python.sh first.");
+    /// Parse a PDF file using the Docling HTTP service.
+    ///
+    /// Returns the structured Markdown content.
+    async fn parse_with_docling(&self, pdf_path: &str, file_path: &str, _workspace_root: &str) -> Result<String> {
+        let service_url = std::env::var("DOCLING_SERVICE_URL")
+            .unwrap_or_else(|_| "http://localhost:50060".to_string());
+        
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(180))
+            .build()?;
+        
+        // Read the PDF file
+        let file_content = tokio::fs::read(pdf_path).await?;
+        
+        // Send to Docling service
+        let form = reqwest::multipart::Form::new()
+            .part("file", reqwest::multipart::Part::bytes(file_content)
+                .file_name(Path::new(pdf_path).file_name().unwrap_or_default().to_string_lossy().to_string())
+                .mime_str("application/pdf")?);
+        
+        let response = client
+            .post(format!("{}/convert", service_url))
+            .multipart(form)
+            .send()
+            .await?;
+        
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Docling service error ({}): {}", status, body);
         }
+        
+        // Parse response
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct ConvertResponse {
+            markdown: String,
+            tables: Vec<String>,
+            images: Vec<serde_json::Value>,
+            metadata: serde_json::Value,
+        }
+        
+        let result: ConvertResponse = response.json().await?;
+        
+        info!(
+            file = %file_path,
+            tables = result.tables.len(),
+            images = result.images.len(),
+            "PDF parsed with Docling"
+        );
+        
+        Ok(result.markdown)
+    }
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            Command::new(&python_bin)
-                .arg("-c")
-                .arg(PDF_EXTRACT_SCRIPT)
-                .arg(pdf_path)
-                .output(),
+    // ========== Vector Search (Chunk Storage) ==========
+
+    /// Store document chunks with embeddings for vector search.
+    async fn store_document_chunks(&self, file_path: &str, content: &str) -> Result<()> {
+        // Chunk the document
+        let chunks = chunk_markdown(content, file_path);
+        
+        if chunks.is_empty() {
+            return Ok(());
+        }
+        
+        // Get embedding client
+        let embedding_client = EmbeddingClient::from_env()?;
+        
+        // Check if service is available
+        if !embedding_client.health_check().await.unwrap_or(false) {
+            warn!("Embedding service not available, skipping vector indexing");
+            return Ok(());
+        }
+        
+        // Prepare texts for embedding
+        let texts: Vec<String> = chunks.iter().map(|c| {
+            format!("{}\n{}", c.heading, c.content)
+        }).collect();
+        let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+        
+        // Generate embeddings
+        let embeddings = embedding_client.embed_batch(&text_refs).await?;
+        
+        // Store chunks and embeddings
+        for (chunk, embedding) in chunks.into_iter().zip(embeddings.into_iter()) {
+            // Insert chunk
+            let chunk_id: i64 = sqlx::query_scalar(
+                r#"
+                INSERT INTO doc_chunks (file_path, chunk_type, content, heading, chunk_index, image_path)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                RETURNING id
+                "#
+            )
+            .bind(&chunk.file_path)
+            .bind(&chunk.chunk_type)
+            .bind(&chunk.content)
+            .bind(&chunk.heading)
+            .bind(chunk.chunk_index)
+            .bind(&chunk.image_path)
+            .fetch_one(&self.pool)
+            .await?;
+            
+            // Insert embedding
+            let embedding_bytes = embedding_to_bytes(&embedding);
+            sqlx::query(
+                "INSERT INTO chunk_embeddings (chunk_id, embedding) VALUES (?1, ?2)"
+            )
+            .bind(chunk_id)
+            .bind(&embedding_bytes)
+            .execute(&self.pool)
+            .await?;
+        }
+        
+        info!(file = %file_path, "Stored document chunks for vector search");
+        Ok(())
+    }
+
+    /// Delete all chunks for a file.
+    pub async fn delete_file_chunks(&self, file_path: &str) -> Result<()> {
+        // Get chunk IDs first (for cascade delete of embeddings)
+        let chunk_ids: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM doc_chunks WHERE file_path = ?1"
         )
-        .await;
-
-        let output = match result {
-            Ok(Ok(o)) => o,
-            Ok(Err(e)) => anyhow::bail!("Failed to spawn pdftext: {}", e),
-            Err(_) => anyhow::bail!("pdftext timed out after 120s for: {}", pdf_path),
-        };
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("pdftext failed for {}: {}", pdf_path, stderr);
+        .bind(file_path)
+        .fetch_all(&self.pool)
+        .await?;
+        
+        if chunk_ids.is_empty() {
+            return Ok(());
         }
+        
+        // Delete embeddings
+        for chunk_id in &chunk_ids {
+            sqlx::query("DELETE FROM chunk_embeddings WHERE chunk_id = ?1")
+                .bind(chunk_id)
+                .execute(&self.pool)
+                .await?;
+        }
+        
+        // Delete chunks
+        sqlx::query("DELETE FROM doc_chunks WHERE file_path = ?1")
+            .bind(file_path)
+            .execute(&self.pool)
+            .await?;
+        
+        Ok(())
+    }
 
-        let text = String::from_utf8_lossy(&output.stdout).into_owned();
-        Ok(text)
+    /// Get all chunks for a file.
+    pub async fn get_file_chunks(&self, file_path: &str) -> Result<Vec<DocChunk>> {
+        let chunks = sqlx::query_as::<_, DocChunkRow>(
+            r#"
+            SELECT id, file_path, chunk_type, content, heading, chunk_index, image_path, created_at
+            FROM doc_chunks
+            WHERE file_path = ?1
+            ORDER BY chunk_index
+            "#
+        )
+        .bind(file_path)
+        .fetch_all(&self.pool)
+        .await?;
+        
+        Ok(chunks.into_iter().map(|r| r.into()).collect())
+    }
+
+    /// Perform vector similarity search.
+    ///
+    /// Returns chunks ranked by cosine similarity to the query embedding.
+    pub async fn vector_search(
+        &self,
+        query_embedding: &[f32],
+        top_k: u32,
+        file_path_filter: Option<&str>,
+    ) -> Result<Vec<ScoredChunk>> {
+        // Load all embeddings (for small document collections this is fast)
+        let rows = if let Some(fp) = file_path_filter {
+            sqlx::query_as::<_, ChunkEmbeddingRow>(
+                r#"
+                SELECT c.id, c.file_path, c.chunk_type, c.content, c.heading, c.chunk_index, c.image_path, e.embedding
+                FROM chunk_embeddings e
+                JOIN doc_chunks c ON c.id = e.chunk_id
+                WHERE c.file_path = ?1
+                "#
+            )
+            .bind(fp)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, ChunkEmbeddingRow>(
+                r#"
+                SELECT c.id, c.file_path, c.chunk_type, c.content, c.heading, c.chunk_index, c.image_path, e.embedding
+                FROM chunk_embeddings e
+                JOIN doc_chunks c ON c.id = e.chunk_id
+                "#
+            )
+            .fetch_all(&self.pool)
+            .await?
+        };
+        
+        // Compute similarities
+        let mut scored: Vec<ScoredChunk> = rows
+            .into_iter()
+            .map(|row| {
+                let chunk_embedding = bytes_to_embedding(&row.embedding);
+                let score = cosine_similarity(query_embedding, &chunk_embedding);
+                ScoredChunk {
+                    id: row.id,
+                    file_path: row.file_path,
+                    chunk_type: row.chunk_type,
+                    content: row.content,
+                    heading: row.heading,
+                    chunk_index: row.chunk_index,
+                    image_path: row.image_path,
+                    score,
+                }
+            })
+            .collect();
+        
+        // Sort by score descending
+        scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        
+        // Take top_k
+        scored.truncate(top_k as usize);
+        
+        Ok(scored)
+    }
+
+    /// Perform hybrid search (FTS5 + vector).
+    ///
+    /// Combines keyword search with semantic search for best results.
+    pub async fn hybrid_search(
+        &self,
+        query: &str,
+        top_k: u32,
+        file_paths: Option<&[String]>,
+    ) -> Result<Vec<ScoredChunk>> {
+        tracing::info!("Creating embedding client");
+        let embedding_client = EmbeddingClient::from_env()?;
+        
+        tracing::info!("Checking embedding service health");
+        // Check if embedding service is available
+        let health = embedding_client.health_check().await.unwrap_or(false);
+        tracing::info!(health_ok = health, "Health check result");
+        
+        if health {
+            // Use vector search
+            tracing::info!("Generating query embedding");
+            let query_embedding = embedding_client.embed_query(query).await?;
+            tracing::info!(embedding_dim = query_embedding.len(), "Query embedding generated");
+            
+            if let Some(paths) = file_paths {
+                // Search within specific files
+                let mut all_results = Vec::new();
+                for path in paths {
+                    let results = self.vector_search(&query_embedding, top_k, Some(path)).await?;
+                    all_results.extend(results);
+                }
+                all_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+                all_results.truncate(top_k as usize);
+                Ok(all_results)
+            } else {
+                self.vector_search(&query_embedding, top_k, None).await
+            }
+        } else {
+            // Fall back to FTS5 search
+            warn!("Embedding service not available, falling back to FTS5 search");
+            self.fts_chunk_search(query, top_k).await
+        }
+    }
+
+    /// FTS5-based chunk search (fallback when embedding service is unavailable).
+    async fn fts_chunk_search(&self, query: &str, top_k: u32) -> Result<Vec<ScoredChunk>> {
+        let rows = sqlx::query_as::<_, DocChunkRow>(
+            r#"
+            SELECT c.id, c.file_path, c.chunk_type, c.content, c.heading, c.chunk_index, c.image_path, c.created_at
+            FROM doc_chunks_fts fts
+            JOIN doc_chunks c ON c.id = fts.rowid
+            WHERE doc_chunks_fts MATCH ?1
+            ORDER BY rank
+            LIMIT ?2
+            "#
+        )
+        .bind(query)
+        .bind(top_k as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        
+        Ok(rows.into_iter().map(|r| {
+            let chunk: DocChunk = r.into();
+            ScoredChunk {
+                id: chunk.chunk_index as i64, // Use chunk_index as pseudo-id
+                file_path: chunk.file_path,
+                chunk_type: chunk.chunk_type,
+                content: chunk.content,
+                heading: chunk.heading,
+                chunk_index: chunk.chunk_index,
+                image_path: chunk.image_path,
+                score: 1.0, // FTS results have equal score
+            }
+        }).collect())
     }
 }
 
@@ -565,6 +924,58 @@ struct IndexedDocumentRow {
     size: i64,
     indexed_at: String,
     snippet: String,
+}
+
+/// Row type for doc_chunks queries.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct DocChunkRow {
+    pub id: i64,
+    pub file_path: String,
+    pub chunk_type: String,
+    pub content: String,
+    pub heading: String,
+    pub chunk_index: i32,
+    pub image_path: Option<String>,
+    pub created_at: String,
+}
+
+impl From<DocChunkRow> for DocChunk {
+    fn from(row: DocChunkRow) -> Self {
+        DocChunk {
+            file_path: row.file_path,
+            chunk_type: row.chunk_type,
+            content: row.content,
+            heading: row.heading,
+            chunk_index: row.chunk_index,
+            image_path: row.image_path,
+        }
+    }
+}
+
+/// Row type for chunk + embedding queries.
+#[derive(Debug, sqlx::FromRow)]
+struct ChunkEmbeddingRow {
+    id: i64,
+    file_path: String,
+    chunk_type: String,
+    content: String,
+    heading: String,
+    chunk_index: i32,
+    image_path: Option<String>,
+    embedding: Vec<u8>,
+}
+
+/// A document chunk with a relevance score.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ScoredChunk {
+    pub id: i64,
+    pub file_path: String,
+    pub chunk_type: String,
+    pub content: String,
+    pub heading: String,
+    pub chunk_index: i32,
+    pub image_path: Option<String>,
+    pub score: f32,
 }
 
 #[cfg(test)]

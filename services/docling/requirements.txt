@@ -1,0 +1,14 @@
+# Docling Service Dependencies
+# Document parsing
+docling>=2.0.0
+
+# Embeddings
+sentence-transformers>=2.2.0
+
+# Web framework
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.6
+
+# Image processing (for docling image extraction)
+Pillow>=10.0.0

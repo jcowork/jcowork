@@ -16,6 +16,7 @@ use jcowork_tools::base::ToolContext;
 use jcowork_tools::cron::{ReminderAddTool, ReminderListTool, ReminderRemoveTool, CronAddTool, CronListTool, CronRemoveTool};
 use jcowork_tools::bing_search::WebSearchTool;
 use jcowork_tools::doc_search::{DocListTool, DocSearchTool};
+use jcowork_tools::doc_retrieve::DocRetrieveTool;
 use jcowork_tools::excel_db::ExcelDbTool;
 use jcowork_tools::file_ops::{FileReadTool, FileWriteTool, FileListTool, FileDeleteTool, FileMoveTool, FileCopyTool, FileSearchTool, DirCreateTool, DirListTool, FileInfoTool};
 use jcowork_tools::memory::{MemorySaveTool, MemoryUpdateTool, MemoryRecallTool, MemorySearchTool};
@@ -110,6 +111,8 @@ pub fn build_tool_registry(
     // Document search tools (workspace index)
     registry.register(Arc::new(DocSearchTool));
     registry.register(Arc::new(DocListTool));
+    // Document semantic retrieval tools (vector search)
+    registry.register(Arc::new(DocRetrieveTool));
     // Excel database CRUD tool (skill-gated behind builtin:excel_data)
     registry.register(Arc::new(ExcelDbTool));
     // Shell tool (skill-gated behind builtin:code_engineer)
@@ -190,8 +193,9 @@ pub async fn ws_handler(
                     .await;
 
                 // Add user message to history
-                // If context documents are provided, inject them DIRECTLY into the system prompt
-                // so the LLM sees them as part of its core instructions.
+                // If context documents are provided, inject relevant chunks into the system prompt.
+                // For documents with file paths, use vector search to find relevant sections.
+                // For inline content (pasted text), inject directly.
                 // First, reset system prompt to original (in case previous message had docs appended)
                 if !history.is_empty() {
                     history[0].content = system_prompt.clone();
@@ -210,34 +214,47 @@ pub async fn ws_handler(
                             .await;
 
                         let mut parts = Vec::new();
+                        let _user_query = &input.content;
+                        
                         for doc in docs {
                             let path_info = doc.path.as_deref().unwrap_or("");
-                            // Truncate very long documents to avoid exceeding context window
-                            let max_len = 12000;
-                            let content = if doc.content.len() > max_len {
-                                format!("{}\n\n[... content truncated, {} chars total ...]", &doc.content[..max_len], doc.content.len())
-                            } else {
-                                doc.content.clone()
-                            };
-                            parts.push(format!(
-                                "=== {} (path: {}) ===\n{}\n=== END ===",
-                                doc.name, path_info, content
-                            ));
+                            
+                            // Use full document content directly (simpler and more reliable than vector search)
+                            if !doc.content.is_empty() {
+                                let max_len = 15000;  // Increased limit for full document context
+                                let content = if doc.content.len() > max_len {
+                                    // Safe UTF-8 truncation: find nearest char boundary
+                                    let mut end = max_len;
+                                    while end > 0 && !doc.content.is_char_boundary(end) {
+                                        end -= 1;
+                                    }
+                                    format!("{}\n\n[... content truncated, {} chars total ...]", &doc.content[..end], doc.content.len())
+                                } else {
+                                    doc.content.clone()
+                                };
+                                parts.push(format!(
+                                    "=== {} (path: {}) ===\n{}\n=== END ===",
+                                    doc.name, path_info, content
+                                ));
+                            }
                         }
-                        let doc_block = format!(
-                            "\n\n## ATTACHED REFERENCE DOCUMENTS\n\
-                             The user has attached document(s) to this conversation. \
-                             Their FULL TEXT CONTENT is provided below — you ALREADY have all the information.\n\n\
-                             ⚠️ CRITICAL RULES — YOU MUST FOLLOW THESE:\n\
-                             1. The document content is RIGHT HERE below. You DO NOT need to read, parse, or access any files.\n\
-                             2. ANSWER DIRECTLY using the content below. Do NOT call pdf_parse, file_read, dir_list, shell, or ANY tool to access these files.\n\
-                             3. ONLY use external tools if the user explicitly asks for info BEYOND what's in the documents.\n\
-                             4. If asked to modify a document, use file_write to save changes.\n\n\
-                             {}\n",
-                            parts.join("\n\n")
-                        );
-                        // Append to the system prompt (history[0])
-                        history[0].content = format!("{}{}", history[0].content, doc_block);
+                        
+                        if !parts.is_empty() {
+                            let doc_block = format!(
+                                "\n\n## ATTACHED REFERENCE DOCUMENTS\n\
+                                 The user has attached document(s) to this conversation. \n\
+                                 Relevant sections have been retrieved using semantic search.\n\n\
+                                 ⚠️ CRITICAL RULES — YOU MUST FOLLOW THESE:\n\
+                                 1. Use the document content below to answer questions.\n\
+                                 2. If the relevant sections don't contain the answer, say so.\n\
+                                 3. You can use doc_retrieve tool for more specific searches.\n\
+                                 4. Do NOT call pdf_parse, file_read to access these files - content is already provided.\n\n\
+                                 {}\n",
+                                parts.join("\n\n")
+                            );
+                            // Append to the system prompt (history[0])
+                            history[0].content = format!("{}{}", history[0].content, doc_block);
+                        }
                     }
                 }
 

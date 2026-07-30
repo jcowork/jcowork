@@ -120,7 +120,7 @@ jcowork-server
 
 - **Rust** 1.85+ (edition 2024) — `rustup` will auto-install via `rust-toolchain.toml`
 - **Node.js** 18+ (for frontend)
-- **Python** 3.12+ (for web search & PDF parsing tools)
+- **Python** 3.12+ (for web search & document parsing tools)
 - **SQLite** 3.35+ (with FTS5 support, usually built-in)
 - An **LLM API key** for at least one provider (DeepSeek, Qwen, Moonshot, OpenRouter, etc.)
 
@@ -168,7 +168,7 @@ cp .env.example .env
 #   JCWORK_DEFAULT_MODEL=moonshot:kimi-k2.6
 ```
 
-### 3. Setup Python Environment (for web search & PDF parsing)
+### 3. Setup Python Environment (for web search & document parsing)
 
 **Linux / macOS:**
 ```bash
@@ -182,7 +182,8 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-python.ps1
 
 This creates a Python venv with:
 - **playwright** — headless browser for web search (Sogou WAP + Bing fallback)
-- **pdftext** — offline PDF text extraction for report parsing
+- **docling** — IBM's document understanding library for PDF to Markdown conversion
+- **sentence-transformers** — local embedding model for semantic document search
 
 ### 4. Build & Run (Development)
 
@@ -646,6 +647,74 @@ Jcowork supports Feishu as an input channel alongside the web UI. Each user can 
 ### Configuration via Web UI
 
 Feishu configuration is managed per-user through the web Settings page. No environment variables are needed.
+
+## Document Indexing & Semantic Search
+
+Jcowork supports automatic document indexing with semantic search capabilities. When you upload PDF or Markdown documents to the workspace, they are automatically parsed and indexed for intelligent retrieval.
+
+### How It Works
+
+1. **Document Upload** — Upload PDF or Markdown files to the Documents page
+2. **Automatic Parsing** — PDFs are parsed using [Docling](https://github.com/DS4SD/docling) (IBM's document understanding library) into structured Markdown with tables and images preserved
+3. **Vector Indexing** — Document chunks are embedded using a local sentence-transformers model and stored in SQLite for semantic search
+4. **Smart Retrieval** — When you ask questions about documents, the system retrieves relevant sections using vector similarity search
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   Document Pipeline                       │
+├─────────────────────────────────────────────────────────┤
+│  PDF Upload → Docling Service → Markdown + Tables       │
+│                                    ↓                     │
+│                    Document Chunker (by heading/table)   │
+│                                    ↓                     │
+│              Embedding Service (sentence-transformers)   │
+│                                    ↓                     │
+│              SQLite Vector Store (BLOB + cosine sim)     │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Components
+
+| Component | Description |
+|-----------|-------------|
+| **Docling Service** | Python FastAPI service running on port 50060, handles PDF→Markdown conversion |
+| **Embedding Service** | Part of Docling service, generates 384-dim vectors using `paraphrase-multilingual-MiniLM-L12-v2` |
+| **Document Chunker** | Rust module that splits Markdown into chunks by headings, tables, and images |
+| **Vector Store** | SQLite tables (`doc_chunks`, `chunk_embeddings`) with FTS5 fallback |
+| **Doc Retrieve Tool** | Agent tool for semantic search over document chunks |
+
+### Deployment
+
+The Docling service runs as a separate Docker container:
+
+```bash
+# Using docker-compose (recommended)
+docker-compose up -d docling
+
+# Or run manually
+cd services/docling
+docker build -t jcowork-docling .
+docker run -p 50060:50060 jcowork-docling
+```
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DOCLING_SERVICE_URL` | `http://localhost:50060` | Docling service endpoint |
+| `EMBEDDING_DIM` | `384` | Embedding vector dimension |
+| `EMBEDDING_MODEL` | `paraphrase-multilingual-MiniLM-L12-v2` | Sentence transformers model |
+
+### Usage
+
+When you attach a document to a chat message, the system automatically:
+1. Retrieves the document's full content (up to 15,000 characters)
+2. Injects it into the LLM context as reference material
+3. The LLM can answer questions directly based on the document content
+
+For larger documents or more precise retrieval, the LLM can also use the `doc_retrieve` tool to perform semantic search over document chunks.
 
 ## API Reference
 

@@ -170,6 +170,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/workspace/index/list", get(list_workspace_index))
         .route("/api/workspace/index/content", get(get_indexed_content))
         .route("/api/workspace/index/reindex", post(reindex_workspace_dir))
+        .route("/api/workspace/vector/search", get(vector_search_chunks))
+        .route("/api/workspace/doc/chunks", get(get_document_chunks))
         .route("/api/workspace/excel-db", get(get_excel_db_content))
         .route("/api/fetch-url", post(fetch_url))
         .route("/api/ws", get(ws_upgrade))
@@ -1780,6 +1782,102 @@ async fn get_indexed_content(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": format!("Failed to get content: {}", e) })),
+            ).into_response()
+        }
+    }
+}
+
+// --- Vector Search API ---
+
+#[derive(Debug, Deserialize)]
+struct VectorSearchQuery {
+    query: String,
+    #[serde(default = "default_top_k")]
+    top_k: u32,
+    file_path: Option<String>,
+}
+
+fn default_top_k() -> u32 {
+    5
+}
+
+/// Semantic search over document chunks using vector embeddings.
+/// Returns relevant sections ranked by similarity score.
+async fn vector_search_chunks(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Query(query): Query<VectorSearchQuery>,
+) -> impl IntoResponse {
+    let index = match WorkspaceIndex::new(&state.data_dir, &auth_user.user_id).await {
+        Ok(idx) => idx,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Failed to open index: {}", e) })),
+            ).into_response();
+        }
+    };
+
+    // Perform hybrid search (vector + FTS fallback)
+    let file_paths = query.file_path.as_ref().map(|p| vec![p.clone()]);
+    match index.hybrid_search(&query.query, query.top_k, file_paths.as_deref()).await {
+        Ok(chunks) => {
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "query": query.query,
+                    "results": chunks,
+                    "count": chunks.len(),
+                })),
+            ).into_response()
+        }
+        Err(e) => {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Search failed: {}", e) })),
+            ).into_response()
+        }
+    }
+}
+
+// --- Document Chunks API ---
+
+#[derive(Debug, Deserialize)]
+struct DocChunksQuery {
+    file_path: String,
+}
+
+/// Get all indexed chunks for a specific document file.
+async fn get_document_chunks(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Query(query): Query<DocChunksQuery>,
+) -> impl IntoResponse {
+    let index = match WorkspaceIndex::new(&state.data_dir, &auth_user.user_id).await {
+        Ok(idx) => idx,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Failed to open index: {}", e) })),
+            ).into_response();
+        }
+    };
+
+    match index.get_file_chunks(&query.file_path).await {
+        Ok(chunks) => {
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "file_path": query.file_path,
+                    "chunks": chunks,
+                    "count": chunks.len(),
+                })),
+            ).into_response()
+        }
+        Err(e) => {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Failed to get chunks: {}", e) })),
             ).into_response()
         }
     }

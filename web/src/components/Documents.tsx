@@ -34,6 +34,15 @@ interface ExcelPreview {
   tables: ExcelTablePreview[];
 }
 
+interface DocChunk {
+  file_path: string;
+  chunk_type: string;
+  content: string;
+  heading: string;
+  chunk_index: number;
+  image_path?: string;
+}
+
 const ALLOWED_EXTENSIONS = '.pdf,.md,.html,.htm,.xlsx,.xls,.docx,.doc';
 
 export default function Documents({ token }: DocumentsProps) {
@@ -45,6 +54,8 @@ export default function Documents({ token }: DocumentsProps) {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [excelData, setExcelData] = useState<ExcelPreview | null>(null);
   const [activeTable, setActiveTable] = useState(0);
+  const [docChunks, setDocChunks] = useState<DocChunk[] | null>(null);
+  const [previewMode, setPreviewMode] = useState<'content' | 'chunks'>('content');
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [creatingFolder, setCreatingFolder] = useState(false);
@@ -173,6 +184,8 @@ export default function Documents({ token }: DocumentsProps) {
     setPreviewLoading(true);
     setPreviewContent('');
     setExcelData(null);
+    setDocChunks(null);
+    setPreviewMode('content');
 
     const ext = filePath.split('.').pop()?.toLowerCase();
 
@@ -203,6 +216,17 @@ export default function Documents({ token }: DocumentsProps) {
         setPreviewContent(data.content || '[No indexed content found]');
       } else {
         setPreviewContent('[PDF not indexed. Please re-upload or re-index the directory.]');
+      }
+      
+      // Also load chunks for vector search preview
+      const chunksRes = await fetch(`/api/workspace/doc/chunks?file_path=${encodeURIComponent(filePath)}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (chunksRes.ok) {
+        const chunksData = await chunksRes.json();
+        if (chunksData.chunks && chunksData.chunks.length > 0) {
+          setDocChunks(chunksData.chunks);
+        }
       }
     } else {
       // Text files: fetch directly
@@ -237,6 +261,7 @@ export default function Documents({ token }: DocumentsProps) {
           setPreviewPath(null);
           setPreviewContent('');
           setExcelData(null);
+          setDocChunks(null);
         }
         await loadRoot();
       } else {
@@ -622,7 +647,7 @@ export default function Documents({ token }: DocumentsProps) {
                   {t('download')}
                 </button>
                 <button
-                  onClick={() => { setPreviewPath(null); setPreviewContent(''); setExcelData(null); }}
+                  onClick={() => { setPreviewPath(null); setPreviewContent(''); setExcelData(null); setDocChunks(null); }}
                   style={{
                     padding: '3px 10px',
                     borderRadius: 4,
@@ -637,11 +662,50 @@ export default function Documents({ token }: DocumentsProps) {
                 </button>
               </div>
             </div>
+            {/* Tab switcher for PDF files with chunks */}
+            {previewPath.endsWith('.pdf') && docChunks && docChunks.length > 0 && (
+              <div style={{ display: 'flex', gap: 4, padding: '8px 16px 0', borderBottom: '1px solid #333' }}>
+                <button
+                  onClick={() => setPreviewMode('content')}
+                  style={{
+                    padding: '6px 16px',
+                    borderRadius: '4px 4px 0 0',
+                    border: 'none',
+                    borderBottom: previewMode === 'content' ? '2px solid #1f6feb' : '2px solid transparent',
+                    background: 'transparent',
+                    color: previewMode === 'content' ? '#fff' : '#888',
+                    cursor: 'pointer',
+                    fontSize: 12,
+                    fontWeight: previewMode === 'content' ? 600 : 400,
+                  }}
+                >
+                  📄 Content
+                </button>
+                <button
+                  onClick={() => setPreviewMode('chunks')}
+                  style={{
+                    padding: '6px 16px',
+                    borderRadius: '4px 4px 0 0',
+                    border: 'none',
+                    borderBottom: previewMode === 'chunks' ? '2px solid #1f6feb' : '2px solid transparent',
+                    background: 'transparent',
+                    color: previewMode === 'chunks' ? '#fff' : '#888',
+                    cursor: 'pointer',
+                    fontSize: 12,
+                    fontWeight: previewMode === 'chunks' ? 600 : 400,
+                  }}
+                >
+                  🧩 Chunks ({docChunks.length})
+                </button>
+              </div>
+            )}
             <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
               {previewLoading ? (
                 <div style={{ color: '#666', textAlign: 'center', paddingTop: 40 }}>{t('loading')}</div>
               ) : excelData ? (
                 renderExcelPreview(excelData, activeTable, setActiveTable, t)
+              ) : previewMode === 'chunks' && docChunks ? (
+                renderChunksPreview(docChunks)
               ) : (
                 <pre style={{
                   margin: 0,
@@ -763,6 +827,67 @@ function renderExcelPreview(
             ))}
           </tbody>
         </table>
+      </div>
+    </div>
+  );
+}
+
+// Render document chunks for vector search preview.
+function renderChunksPreview(chunks: DocChunk[]): React.ReactNode {
+  if (chunks.length === 0) {
+    return <div style={{ color: '#888', textAlign: 'center', paddingTop: 40 }}>No indexed chunks found.</div>;
+  }
+  
+  return (
+    <div>
+      <div style={{ fontSize: 12, color: '#777', marginBottom: 12, fontFamily: 'monospace' }}>
+        Document indexed as {chunks.length} chunk(s) for semantic search
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {chunks.map((chunk, i) => {
+          const typeIcon = chunk.chunk_type === 'table' ? '📊' : chunk.chunk_type === 'image' ? '🖼️' : '📄';
+          const typeColor = chunk.chunk_type === 'table' ? '#1f6feb' : chunk.chunk_type === 'image' ? '#da3633' : '#3fb950';
+          return (
+            <div
+              key={i}
+              style={{
+                border: '1px solid #333',
+                borderRadius: 6,
+                padding: 12,
+                background: '#0d1117',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                <span style={{ fontSize: 16 }}>{typeIcon}</span>
+                <span style={{
+                  fontSize: 10, padding: '1px 6px', borderRadius: 3,
+                  background: typeColor, color: '#fff', fontWeight: 600,
+                }}>
+                  {chunk.chunk_type.toUpperCase()}
+                </span>
+                <span style={{ fontSize: 11, color: '#888' }}>#{chunk.chunk_index}</span>
+                {chunk.heading && (
+                  <span style={{ fontSize: 11, color: '#58a6ff', fontStyle: 'italic' }}>
+                    {chunk.heading}
+                  </span>
+                )}
+              </div>
+              <pre style={{
+                margin: 0,
+                fontSize: 12,
+                lineHeight: 1.5,
+                color: '#c9d1d9',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+                fontFamily: "'SF Mono', 'Fira Code', 'Consolas', monospace",
+                maxHeight: 200,
+                overflow: 'auto',
+              }}>
+                {chunk.content.length > 500 ? chunk.content.slice(0, 500) + '...' : chunk.content}
+              </pre>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
