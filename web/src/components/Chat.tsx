@@ -8,6 +8,7 @@ interface Message {
   content: string;
   timestamp: number;
   streaming?: boolean;
+  details?: string;
 }
 
 interface ContextDoc {
@@ -210,9 +211,15 @@ export default function Chat({ userId, token }: ChatProps) {
           { role: 'system', content: `Calling tool: ${data.name}`, timestamp: Date.now() },
         ]);
       } else if (data.type === 'tool_call_end') {
+        const result = typeof data.result === 'string' ? data.result : JSON.stringify(data.result ?? '', null, 2);
         setMessages((prev) => [
           ...prev,
-          { role: 'system', content: `Tool ${data.name} completed`, timestamp: Date.now() },
+          {
+            role: 'system',
+            content: `Tool ${data.name} completed`,
+            details: result,
+            timestamp: Date.now(),
+          },
         ]);
       } else if (data.type === 'reminder') {
         setMessages((prev) => [
@@ -560,7 +567,29 @@ export default function Chat({ userId, token }: ChatProps) {
             >
               <div style={{ userSelect: 'text', WebkitUserSelect: 'text' }}>
                 {isUser || isSystem ? (
-                  <span style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</span>
+                  <>
+                    <span style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</span>
+                    {msg.details && (
+                      <pre
+                        style={{
+                          marginTop: 8,
+                          marginBottom: 0,
+                          padding: '10px 12px',
+                          borderRadius: 6,
+                          background: '#1f1f1f',
+                          border: '1px solid #444',
+                          color: '#cfcfcf',
+                          whiteSpace: 'pre-wrap',
+                          wordBreak: 'break-word',
+                          overflowX: 'auto',
+                          fontSize: 12,
+                          lineHeight: 1.5,
+                        }}
+                      >
+                        {msg.details}
+                      </pre>
+                    )}
+                  </>
                 ) : (
                   <div className="markdown-body">
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>

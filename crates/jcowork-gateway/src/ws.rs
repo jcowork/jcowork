@@ -241,6 +241,12 @@ pub async fn ws_handler(
                     }
                 }
 
+                if let Some(extra_guidance) = build_excel_analysis_guidance(&input) {
+                   if !history.is_empty() {
+                        history[0].content.push_str(&extra_guidance);
+                    }
+                }
+
                 history.push(ChatMessage {
                     role: "user".to_string(),
                     content: input.content.clone(),
@@ -298,6 +304,9 @@ pub async fn ws_handler(
                 let active_reminders = cron_scheduler.list_reminders(&user_id).await;
                 let active_cron_jobs = cron_scheduler.list_cron_jobs(&user_id).await;
                 let reminder_ctx_msg = build_reminder_context_msg(&active_reminders, &active_cron_jobs);
+
+                let mut sent_done = false;
+                let mut last_tool_summaries: Vec<String> = Vec::new();
 
 
                 // Agent loop: keep calling LLM until it stops making tool calls
@@ -421,15 +430,19 @@ pub async fn ws_handler(
                             Ok(StreamChunk::ToolCallDelta(call_id, name, args_delta)) => {
                                 let entry = current_tool_args
                                     .entry(call_id.clone())
-                                    .or_insert_with(|| (call_id.clone(), name.clone(), String::new()));
+                                    .or_insert_with(|| (call_id.clone(), String::new(), String::new()));
+                                if !name.trim().is_empty() {
+                                    entry.1 = name.clone();
+                                }
+
                                 entry.2.push_str(&args_delta);
-                                // Only send tool_call_start once per call_id
-                                if tool_call_started.insert(call_id.clone()) {
+                                
+                                if !entry.1.trim().is_empty() && tool_call_started.insert(call_id.clone()) {
                                     let _ = ws_sender
                                         .send(Message::Text(
                                             serde_json::json!({
                                                 "type": "tool_call_start",
-                                                "name": name,
+                                                "name": entry.1.clone(),
                                                 "call_id": call_id
                                             })
                                                 .to_string()
@@ -479,6 +492,11 @@ pub async fn ws_handler(
                         })
                         .collect();
 
+                    last_tool_summaries = tool_calls
+                        .iter()
+                        .map(|tc| format!("{}({})", tc.function.name, tc.id))
+                        .collect();            
+
                     // Log LLM request/response
                     let llm_duration_ms = llm_start.elapsed().as_millis() as u64;
                     let tool_names: Vec<String> = tool_calls.iter().map(|tc| tc.function.name.clone()).collect();
@@ -525,11 +543,24 @@ pub async fn ws_handler(
                                     .into(),
                             ))
                             .await;
+                        sent_done = true;
                         break;
                     }
 
                     // Dispatch tool calls (skip empty-argument calls — some LLMs emit ghost tool calls)
                     for tc in &tool_calls {
+                        if tc.function.name.trim().is_empty() {
+                            tracing::warn!(call_id = %tc.id, arguments = %tc.function.arguments, "Skipping tool call with empty name");
+                            history.push(ChatMessage {
+                                role: "tool".to_string(),
+                                content: "Error: tool call had empty name, skipped".to_string(),
+                                tool_calls: None,
+                                tool_call_id: Some(tc.id.clone()),
+                                reasoning_content: None,
+                            });
+                            continue;
+                        }
+
                         if tc.function.arguments.trim().is_empty() {
                             tracing::debug!(tool = %tc.function.name, call_id = %tc.id, "Skipping tool call with empty arguments");
                             // Add error result to history so the LLM sees the feedback
@@ -584,6 +615,38 @@ pub async fn ws_handler(
                     }
 
                     // Loop continues — LLM will see tool results and respond
+                }
+
+                if !sent_done {
+                    let fallback_message = if !last_tool_summaries.is_empty() {
+                        format!(
+                            "我已完成多轮工具探查，但还没来得及生成最终结论。你可以基于当前结果继续追问，或让我直接根据最近一次工具调用结果做总结。最近一次涉及的工具调用：{}。",
+                            last_tool_summaries.join("，")
+                        )
+                    } else {
+                        "我已完成处理流程，但模型没有产出最终文本回答。请直接重试一次，或让我基于当前已获取的数据继续总结。".to_string()
+                    };
+                    let _ = ws_sender
+                        .send(Message::Text(
+                            serde_json::json!({"type": "text_delta", "content": fallback_message})
+                                .to_string()
+                                .into(),
+                        ))
+                        .await;
+                    let _ = ws_sender
+                        .send(Message::Text(
+                            serde_json::json!({
+                                "type": "done",
+                                "usage": {
+                                    "prompt_tokens": 0,
+                                    "completion_tokens": 0,
+                                    "total_tokens": 0,
+                                }
+                            })
+                                .to_string()
+                                .into(),
+                        ))
+                        .await;
                 }
                     }
                     Some(Ok(Message::Close(_))) => break,
@@ -712,15 +775,17 @@ pub async fn ws_handler(
                                         Ok(StreamChunk::ToolCallDelta(call_id, name, args_delta)) => {
                                             let entry = current_tool_args
                                                 .entry(call_id.clone())
-                                                .or_insert_with(|| (call_id.clone(), name.clone(), String::new()));
+                                                .or_insert_with(|| (call_id.clone(), String::new(), String::new()));
+                                            if !name.trim().is_empty() {
+                                                entry.1 = name.clone();
+                                            }
                                             entry.2.push_str(&args_delta);
-                                            // Only send tool_call_start once per call_id
-                                            if tool_call_started.insert(call_id.clone()) {
+                                            if !entry.1.trim().is_empty() && tool_call_started.insert(call_id.clone()) {
                                                 let _ = ws_sender
                                                     .send(Message::Text(
                                                         serde_json::json!({
                                                             "type": "tool_call_start",
-                                                            "name": name,
+                                                            "name": entry.1.clone(),
                                                             "call_id": call_id
                                                         })
                                                             .to_string()
@@ -799,6 +864,18 @@ pub async fn ws_handler(
 
                                 // Handle tool calls
                                 for tc in &tool_calls {
+                                    if tc.function.name.trim().is_empty() {
+                                        tracing::warn!(call_id = %tc.id, arguments = %tc.function.arguments, "Skipping tool call with empty name during reminder action");
+                                        history.push(ChatMessage {
+                                            role: "tool".to_string(),
+                                            content: "Error: tool call had empty name, skipped".to_string(),
+                                            tool_calls: None,
+                                            tool_call_id: Some(tc.id.clone()),
+                                            reasoning_content: None,
+                                        });
+                                        continue;
+                                    }
+
                                     if tc.function.arguments.trim().is_empty() {
                                         tracing::debug!(tool = %tc.function.name, call_id = %tc.id, "Skipping tool call with empty arguments");
                                         history.push(ChatMessage {
@@ -911,6 +988,40 @@ async fn load_agent_identity(memory_manager: &MemoryManager, user_id: &str) -> O
             .map(|e| e.content),
         Err(_) => None,
     }
+}
+
+fn build_excel_analysis_guidance(input: &WsInput) -> Option<String> {
+    let mentions_excel = input.content.contains("xlsx")
+        || input.content.contains("xls")
+        || input.content.contains("Excel")
+        || input.content.contains("表格")
+        || input.content.contains("工作表")
+        || input.content.contains("query");
+
+    let has_excel_context = input
+        .context_documents
+        .as_ref()
+        .map(|docs| {
+            docs.iter().any(|doc| {
+                doc.name.ends_with(".xlsx")
+                    || doc.name.ends_with(".xls")
+                    || doc
+                        .path
+                        .as_deref()
+                        .map(|p| p.ends_with(".xlsx") || p.ends_with(".xls"))
+                        .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+
+    if !mentions_excel && !has_excel_context {
+        return None;
+    }
+
+    Some(
+        "\n\nExcel analysis guidance:\n- If the user asks about an uploaded Excel file, prefer using excel_db first. Start with action=\"list\" to find the imported database, then inspect schema if needed, then run focused SELECT queries.\n- Do not call file_list, file_search, or doc_list unless excel_db clearly shows the workbook/database is missing or you need to locate the source file after excel_db fails.\n- Avoid repeated exploratory tool loops. Once you have enough rows or aggregates to answer, stop calling tools and provide a concise conclusion.\n- For questions like '大家都在问什么' or query analysis, summarize recurring intents/themes, representative examples, and notable frequencies/patterns from the data instead of only dumping raw rows."
+            .to_string(),
+    )
 }
 
 /// Build a system context message containing the user's active reminders and cron jobs.

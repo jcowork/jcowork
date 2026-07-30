@@ -254,8 +254,17 @@ impl LlmProvider for OpenAiProvider {
 fn parse_sse_stream(
     byte_stream: impl Stream<Item = Result<bytes::Bytes, reqwest::Error>>,
 ) -> impl Stream<Item = Result<StreamChunk>> {
+
+    #[derive(Default)]
+    struct ToolCallBuffer {
+        id: String,
+        name: String,
+        arguments: String,
+        emitted_len: usize,
+    }
+
     let mut buffer = String::new();
-    let mut tool_call_buffers: std::collections::HashMap<usize, (String, String, String)> =
+    let mut tool_call_buffers: std::collections::HashMap<usize, ToolCallBuffer> =
         std::collections::HashMap::new();
 
     byte_stream.flat_map(move |chunk_result| {
@@ -295,22 +304,32 @@ fn parse_sse_stream(
                                         if let Some(tool_calls) = choice.delta.tool_calls {
                                             for tc in tool_calls {
                                                 let idx = tc.index.unwrap_or(0) as usize;
-                                                let entry = tool_call_buffers
-                                                    .entry(idx)
-                                                    .or_insert_with(|| (String::new(), String::new(), String::new()));
+                                                let entry = tool_call_buffers.entry(idx).or_default();
 
                                                 if let Some(id) = tc.id {
-                                                    entry.0 = id;
+                                                    if !id.is_empty() {
+                                                        entry.id = id;
+                                                    }
                                                 }
                                                 if let Some(func) = tc.function {
                                                     if let Some(name) = func.name {
-                                                        entry.1 = name;
+                                                        if !name.is_empty() {
+                                                            entry.name.push_str(&name);
+                                                        }
                                                     }
                                                     if let Some(args) = func.arguments {
+                                                        entry.arguments.push_str(&args);
+                                                    }
+                                                }
+
+                                                if !entry.id.is_empty() && !entry.name.is_empty() {
+                                                    let new_args = &entry.arguments[entry.emitted_len..];
+                                                    if !new_args.is_empty() {
+                                                        entry.emitted_len = entry.arguments.len();
                                                         outputs.push(Ok(StreamChunk::ToolCallDelta(
-                                                            entry.0.clone(),
-                                                            entry.1.clone(),
-                                                            args,
+                                                            entry.id.clone(),
+                                                            entry.name.clone(),
+                                                            new_args.to_string(),
                                                         )));
                                                     }
                                                 }
