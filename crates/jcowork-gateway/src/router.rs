@@ -489,8 +489,8 @@ async fn list_all_skills(
 
     let mut entries: Vec<SkillEntry> = Vec::new();
 
-    // Built-in skills
-    for s in builtin_skills() {
+    // Built-in skills (hidden ones stay functional but are not shown in the UI)
+    for s in builtin_skills().iter().filter(|s| !s.hidden) {
         entries.push(SkillEntry {
             id: s.id.to_string(),
             name: s.name.to_string(),

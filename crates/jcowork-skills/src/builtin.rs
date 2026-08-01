@@ -14,6 +14,8 @@ pub struct BuiltinSkill {
     pub description: &'static str,
     /// Full skill instructions injected into the system prompt when enabled
     pub content: &'static str,
+    /// Hidden from the Skills Square UI (still functional when enabled)
+    pub hidden: bool,
 }
 
 /// Return the full list of built-in skills.
@@ -26,6 +28,7 @@ static BUILTIN_SKILLS: &[BuiltinSkill] = &[
         id: "builtin:write_ppt",
         name: "write_ppt",
         description: "Generate structured PowerPoint presentation outlines with slides, speaker notes, and visual layout suggestions.",
+        hidden: true,
         content: r#"## Skill: write_ppt — PowerPoint Presentation Generator
 
 When the user asks you to write a PPT, create a presentation, or make slides, follow this **two-phase workflow**:
@@ -121,6 +124,7 @@ The file must be complete and runnable — the user should be able to save it as
         id: "builtin:write_research_report",
         name: "write_research_report",
         description: "Analyze listed-company financial documents (PDFs) and generate professional research reports with financial analysis, valuation, and investment insights.",
+        hidden: true,
         content: r#"## Skill: write_research_report — Listed Company Research Report Generator
 
 When the user asks you to write a research report, analyze a stock, or evaluate a listed company, follow this **two-phase workflow**:
@@ -221,6 +225,7 @@ IMPORTANT: Do NOT generate HTML unless the user explicitly asks for it. The Mark
         id: "builtin:web_search",
         name: "网页搜索",
         description: "通过无头浏览器搜索网页，获取最新信息和实时内容，基于搜索结果回答问题。",
+        hidden: false,
         content: r#"## Skill: web_search — Web Search & Answer
 
 When a question requires up-to-date or real-world information that you don't know from training data, use the `web_search` tool to find answers on the internet.
@@ -281,6 +286,7 @@ Each search result contains:
         id: "builtin:seven_habits",
         name: "seven_habits",
         description: "目标管理 — 用 7 个生活角色来规划和追踪个人目标",
+        hidden: true,
         content: r#"## Skill: 目标管理 — 7 个生活角色的个人目标追踪
 
 你帮用户在 7 个生活角色上定义个人目标并持续反思。每个角色对应一个目标，目标由用户自己设定，没有固定答案。
@@ -344,6 +350,7 @@ IMPORTANT: 创建 7 条目标时，在单次 turn 内完成所有 memory_save �
         id: "builtin:code_engineer",
         name: "文档撰写",
         description: "撰写和编辑文档，默认生成 HTML 格式，也支持 Markdown、代码等项目文件。可在用户工作区创建、读取、修改文件。",
+        hidden: false,
         content: r##"## Skill: 文档撰写 — Document Authoring
 
 You have a sandboxed workspace where you can create files, write documents, and manage content.
@@ -424,6 +431,7 @@ When creating an HTML document, follow this structure:
         id: "builtin:excel_data",
         name: "Excel数据分析",
         description: "查询和分析已上传的 Excel 文件：上传后自动解析为带索引的 SQLite 数据库，对话中可直接对其增删改查。",
+        hidden: false,
         content: r#"## Skill: Excel数据分析 — Excel Data Query & Management
 
 用户上传的每个 Excel 文件（.xlsx/.xls）都会被自动解析成一个独立的 SQLite 数据库：每个工作表对应一张表（表名 = 工作表名），所有列均已建立索引。你通过 `excel_db` 工具对这些数据库做增删改查。
