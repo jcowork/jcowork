@@ -16,6 +16,7 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 shellexpand = { workspace = true }
 reqwest = { workspace = true }
+usearch = "2.26.0"
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -8,6 +8,7 @@ pub mod feishu_store;
 pub mod file_store;
 pub mod migration;
 pub mod user_store;
+pub mod vector_index;
 pub mod workspace_index;
 
 pub use database::Database;
@@ -16,4 +17,5 @@ pub use embedding_client::{EmbeddingClient, cosine_similarity, embedding_to_byte
 pub use feishu_store::FeishuConfigStore;
 pub use file_store::FileStore;
 pub use user_store::UserStore;
+pub use vector_index::VectorIndex;
 pub use workspace_index::{WorkspaceIndex, ScoredChunk, DocChunkRow};
