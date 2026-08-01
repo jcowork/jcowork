@@ -114,10 +114,42 @@ jcowork-server
 
 ## 快速开始
 
+### 一键安装（推荐）
+
+支持 **Windows 11+**、**Ubuntu 24.04+** 和 **macOS**。脚本会自动安装全部依赖
+（Rust、Python 3.12+、Node 20+、Python venv、Playwright Chromium），
+完成后端与前端构建，并生成默认 `.env` 配置：
+
+```bash
+# macOS / Ubuntu
+git clone <仓库地址> && cd jcowork
+bash scripts/install.sh          # 加 --start 可在安装后直接启动服务
+```
+
+```powershell
+# Windows 11（PowerShell）
+git clone <仓库地址>; cd jcowork
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1     # 加 -Start 可直接启动
+```
+
+然后在 `.env` 中填入至少一个 LLM API Key，启动服务：
+
+```bash
+bash scripts/start.sh      # macOS / Ubuntu（docling :50060 + 主服务 :3000）
+bash scripts/stop.sh
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start.ps1    # Windows
+powershell -ExecutionPolicy Bypass -File scripts\stop.ps1
+```
+
+浏览器打开 http://localhost:3000 即可。下面的手动步骤面向希望自己掌控过程的开发者。
+
 ### 前置要求
 
 - **Rust** 1.85+（edition 2024）— `rustup` 会通过 `rust-toolchain.toml` 自动安装
-- **Node.js** 18+（前端开发）
+- **Node.js** 20+（前端开发）
 - **Python** 3.12+（网页搜索和 PDF 解析工具）
 - **SQLite** 3.35+（需 FTS5 支持，通常已内置）
 - 至少一个 **LLM API Key**（DeepSeek、Qwen、Moonshot、OpenRouter 等）

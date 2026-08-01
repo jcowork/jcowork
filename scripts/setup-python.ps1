@@ -43,9 +43,9 @@ Write-Host "Upgrading pip..."
 $pip = Join-Path $VenvDir "Scripts\pip.exe"
 & $pip install --upgrade pip --quiet
 
-# Install packages
-Write-Host "Installing Python packages (playwright, pdftext)..."
-& $pip install --quiet playwright pdftext
+# Install packages (must match scripts/setup-python.sh)
+Write-Host "Installing Python packages (playwright, pdftext, docling, sentence-transformers)..."
+& $pip install --quiet playwright pdftext docling sentence-transformers fastapi uvicorn python-multipart Pillow
 
 # Install Playwright Chromium browser
 Write-Host "Installing Playwright Chromium browser..."

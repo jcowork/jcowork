@@ -116,10 +116,43 @@ jcowork-server
 
 ## Quick Start
 
+### One-click install (recommended)
+
+Works on **Windows 11+**, **Ubuntu 24.04+**, and **macOS**. The script installs all
+dependencies (Rust, Python 3.12+, Node 20+, Python venv, Playwright Chromium),
+builds the backend and frontend, and writes a default `.env`:
+
+```bash
+# macOS / Ubuntu
+git clone <repo-url> && cd jcowork
+bash scripts/install.sh          # add --start to launch services right away
+```
+
+```powershell
+# Windows 11 (PowerShell)
+git clone <repo-url>; cd jcowork
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1     # add -Start to launch right away
+```
+
+Then fill in at least one LLM API key in `.env` and start the services:
+
+```bash
+bash scripts/start.sh      # macOS / Ubuntu (docling on :50060 + server on :3000)
+bash scripts/stop.sh
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start.ps1    # Windows
+powershell -ExecutionPolicy Bypass -File scripts\stop.ps1
+```
+
+Open http://localhost:3000 in your browser. The manual steps below are for
+developers who prefer to run things themselves.
+
 ### Prerequisites
 
 - **Rust** 1.85+ (edition 2024) — `rustup` will auto-install via `rust-toolchain.toml`
-- **Node.js** 18+ (for frontend)
+- **Node.js** 20+ (for frontend)
 - **Python** 3.12+ (for web search & document parsing tools)
 - **SQLite** 3.35+ (with FTS5 support, usually built-in)
 - An **LLM API key** for at least one provider (DeepSeek, Qwen, Moonshot, OpenRouter, etc.)
