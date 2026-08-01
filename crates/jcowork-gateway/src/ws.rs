@@ -17,7 +17,7 @@ use jcowork_tools::base::ToolContext;
 use jcowork_tools::cron::{ReminderAddTool, ReminderListTool, ReminderRemoveTool, CronAddTool, CronListTool, CronRemoveTool};
 use jcowork_tools::bing_search::WebSearchTool;
 use jcowork_tools::doc_search::DocListTool;
-use jcowork_tools::doc_retrieve::DocRetrieveTool;
+use jcowork_tools::doc_retrieve::{DocContentTool, DocRetrieveTool};
 use jcowork_tools::excel_db::ExcelDbTool;
 use jcowork_tools::file_ops::{FileReadTool, FileWriteTool, FileListTool, FileDeleteTool, FileMoveTool, FileCopyTool, FileSearchTool, DirCreateTool, DirListTool, FileInfoTool};
 use jcowork_tools::memory::{MemorySaveTool, MemoryUpdateTool, MemoryRecallTool, MemorySearchTool};
@@ -116,6 +116,8 @@ pub fn build_tool_registry(
     registry.register(Arc::new(DocListTool));
     // Document semantic retrieval tools (vector search)
     registry.register(Arc::new(DocRetrieveTool));
+    // Full document content reader (paged)
+    registry.register(Arc::new(DocContentTool));
     // Excel database CRUD tool (skill-gated behind builtin:excel_data)
     registry.register(Arc::new(ExcelDbTool));
     // Shell tool (skill-gated behind builtin:code_engineer)
@@ -1192,6 +1194,8 @@ CRITICAL REMINDER RULES:
 Document search guidance:
 - **If the user attached documents to this conversation, the content is already provided above.** Read it directly — do NOT call doc_retrieve for attached documents.
 - Use **doc_retrieve** for all document searches. It automatically tries semantic search first, then falls back to keyword search. One tool call handles everything.
+- Keep the doc_retrieve `query` argument short and copied from the user's original words (e.g. 用户问“雨的四季全文” → query 就是“雨的四季”). NEVER add author names, synonyms, or filler words like 全文/内容/课文 — extra words dilute the embedding and hurt recall.
+- When fragments are not enough (e.g. the user asks for the full text 完整全文 or broader context): each doc_retrieve result carries its Offset in the document — call doc_content with that file_path and offset to read forward from the fragment's position. Read only until you have enough to answer, then stop; do NOT read the whole document unnecessarily, and do NOT piece together an answer from scattered fragments alone.
 - If doc_retrieve returns no results, use doc_list to see what documents are available, then inform the user.
 - Avoid repeated tool loops. After 1-2 search attempts, provide your best answer or tell the user what you found.
 

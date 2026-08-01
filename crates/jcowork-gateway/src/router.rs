@@ -1755,6 +1755,10 @@ async fn list_workspace_index(
 #[derive(Debug, Deserialize)]
 struct ContentIndexQuery {
     path: String,
+    /// 0-based character offset for paginated preview (requires `limit`).
+    offset: Option<i64>,
+    /// Max characters to return per page.
+    limit: Option<i64>,
 }
 
 async fn get_indexed_content(
@@ -1771,6 +1775,33 @@ async fn get_indexed_content(
             ).into_response();
         }
     };
+
+    // Paginated mode: return a character slice plus metadata for "load more".
+    if let Some(limit) = query.limit {
+        let offset = query.offset.unwrap_or(0).max(0);
+        let limit = limit.clamp(1, 200_000);
+        return match index.get_content_slice(&query.path, offset, limit).await {
+            Ok(Some((content, total_len))) => {
+                let next_offset = offset + content.chars().count() as i64;
+                (StatusCode::OK, Json(serde_json::json!({
+                    "path": query.path,
+                    "content": content,
+                    "total_len": total_len,
+                    "next_offset": next_offset,
+                    "has_more": next_offset < total_len,
+                }))).into_response()
+            }
+            Ok(None) => {
+                (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Document not indexed" }))).into_response()
+            }
+            Err(e) => {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": format!("Failed to get content: {}", e) })),
+                ).into_response()
+            }
+        };
+    }
 
     match index.get_content(&query.path).await {
         Ok(Some(content)) => {

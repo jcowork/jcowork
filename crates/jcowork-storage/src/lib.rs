@@ -18,4 +18,4 @@ pub use feishu_store::FeishuConfigStore;
 pub use file_store::FileStore;
 pub use user_store::UserStore;
 pub use vector_index::VectorIndex;
-pub use workspace_index::{WorkspaceIndex, ScoredChunk, DocChunkRow};
+pub use workspace_index::{WorkspaceIndex, ScoredChunk, DocChunkRow, locate_offset};

@@ -20,7 +20,9 @@ use crate::embedding_client::{EmbeddingClient, bytes_to_embedding, embedding_to_
 use crate::vector_index::VectorIndex;
 
 /// Maximum content size to index (characters). Larger content is truncated.
-const MAX_INDEX_CONTENT_LEN: usize = 50_000;
+/// Kept generous so PDF previews can page through effectively the whole
+/// document; it only guards against pathological inputs.
+const MAX_INDEX_CONTENT_LEN: usize = 2_000_000;
 
 /// Manages per-user workspace document index.
 ///
@@ -657,6 +659,47 @@ impl WorkspaceIndex {
         Ok(row.map(|r| r.0))
     }
 
+    /// Get a character-based slice of the indexed content, for paginated preview.
+    ///
+    /// `offset` is 0-based and counted in Unicode code points (SQLite
+    /// `substr`/`length` semantics on TEXT), so slices never split a
+    /// multi-byte UTF-8 character. Returns `(slice, total_chars)`, or None
+    /// if the file is not indexed.
+    pub async fn get_content_slice(
+        &self,
+        file_path: &str,
+        offset: i64,
+        limit: i64,
+    ) -> Result<Option<(String, i64)>> {
+        let row = sqlx::query_as::<_, (String, i64)>(
+            // substr is 1-indexed on characters for TEXT
+            "SELECT substr(content_text, ?2 + 1, ?3), length(content_text) FROM documents WHERE file_path = ?1"
+        )
+        .bind(file_path)
+        .bind(offset)
+        .bind(limit)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    /// Find the character offset where a chunk's content starts within the
+    /// document's indexed full text.
+    ///
+    /// Chunks are stored separately from `documents.content_text`, so this
+    /// locates the chunk by its opening characters (which are verbatim from
+    /// the source even for re-joined chunks). The returned offset uses the
+    /// same Unicode-code-point unit as [`WorkspaceIndex::get_content_slice`],
+    /// so it can be passed straight to `doc_content`. Returns None when the
+    /// position cannot be determined.
+    pub async fn find_chunk_offset(&self, file_path: &str, chunk_content: &str) -> Result<Option<i64>> {
+        let Some(full) = self.get_content(file_path).await? else {
+            return Ok(None);
+        };
+        Ok(locate_offset(&full, chunk_content))
+    }
+
     /// Get the Docling document hash for a file (used for image asset URLs).
     /// Returns None if the file is not indexed or has no doc_hash.
     pub async fn get_doc_hash(&self, file_path: &str) -> Result<Option<String>> {
@@ -1148,6 +1191,31 @@ impl WorkspaceIndex {
     }
 }
 
+/// Locate the start of `chunk_content` within `full` text.
+///
+/// Chunk interiors may be re-joined (paragraph/sentence splitting normalizes
+/// whitespace), but a chunk's opening characters are always verbatim from the
+/// source. Tries progressively shorter prefixes (most specific first) and
+/// returns the offset in Unicode code points.
+pub fn locate_offset(full: &str, chunk_content: &str) -> Option<i64> {
+    let trimmed = chunk_content.trim_start();
+    let total = trimmed.chars().count();
+    if total == 0 {
+        return None;
+    }
+
+    let mut candidates: Vec<usize> = [64, 32, 16, 8].iter().map(|t| (*t).min(total)).collect();
+    candidates.dedup();
+
+    for n in candidates {
+        let prefix: String = trimmed.chars().take(n).collect();
+        if let Some(byte_pos) = full.find(&prefix) {
+            return Some(full[..byte_pos].chars().count() as i64);
+        }
+    }
+    None
+}
+
 /// A document entry from the workspace index.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct IndexedDocument {
@@ -1267,6 +1335,23 @@ mod tests {
         assert_eq!(docs[0].content_type, "markdown");
     }
 
+    #[test]
+    fn test_locate_offset() {
+        let full = "# 雨的四季\n我喜欢雨，无论什么季节的雨，我都喜欢。\n\n春天，树叶开始闪出黄青。";
+
+        // Exact chunk content (as stored for single-section chunks, trimmed)
+        let offset = locate_offset(full, "我喜欢雨，无论什么季节的雨，我都喜欢。");
+        assert_eq!(offset, Some(7)); // "# 雨的四季\n" is 7 characters
+
+        // Leading whitespace in chunk content is ignored
+        let offset = locate_offset(full, "  春天，树叶开始闪出黄青。");
+        assert_eq!(offset, Some(28));
+
+        // Content not present returns None
+        assert_eq!(locate_offset(full, "冬天来了"), None);
+        assert_eq!(locate_offset(full, ""), None);
+    }
+
     #[tokio::test]
     async fn test_cached_index_shares_state() {
         let dir = tempdir().unwrap();
@@ -1289,6 +1374,45 @@ mod tests {
         let docs = idx2.list_all(None).await.unwrap();
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0].filename, "a.md");
+    }
+
+    #[tokio::test]
+    async fn test_get_content_slice_paginates_by_characters() {
+        let (index, dir) = setup_test_index().await;
+
+        let workspace = dir.path().join("test-workspace");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        // 12 Chinese characters = 36 bytes; byte-based slicing would split chars
+        tokio::fs::write(workspace.join("poem.md"), "# 诗\n陈太丘与友期行期日中")
+            .await
+            .unwrap();
+
+        let ws_str = workspace.to_string_lossy().to_string();
+        index.add_document("poem.md", &ws_str).await.unwrap();
+
+        let full = index.get_content("poem.md").await.unwrap().unwrap();
+        let total_chars = full.chars().count() as i64;
+
+        // Pages must concatenate back to the full content without splitting chars
+        let mut reassembled = String::new();
+        let mut offset = 0i64;
+        loop {
+            let (slice, total) = index
+                .get_content_slice("poem.md", offset, 5)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(total, total_chars);
+            offset += slice.chars().count() as i64;
+            reassembled.push_str(&slice);
+            if offset >= total {
+                break;
+            }
+        }
+        assert_eq!(reassembled, full);
+
+        // Unknown file returns None
+        assert!(index.get_content_slice("nope.md", 0, 10).await.unwrap().is_none());
     }
 
     #[tokio::test]

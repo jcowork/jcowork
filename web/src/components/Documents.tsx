@@ -94,6 +94,9 @@ interface DocChunk {
 
 const ALLOWED_EXTENSIONS = '.pdf,.md,.html,.htm,.xlsx,.xls,.docx,.doc';
 
+// Characters fetched per page when previewing long documents (PDFs)
+const PREVIEW_PAGE_SIZE = 30000;
+
 export default function Documents({ token }: DocumentsProps) {
   const t = useT();
   const [tree, setTree] = useState<TreeNode[]>([]);
@@ -105,6 +108,9 @@ export default function Documents({ token }: DocumentsProps) {
   const [activeTable, setActiveTable] = useState(0);
   const [docChunks, setDocChunks] = useState<DocChunk[] | null>(null);
   const [previewMode, setPreviewMode] = useState<'content' | 'chunks'>('content');
+  // Pagination state for long documents (PDF preview "load more on scroll")
+  const [previewPaging, setPreviewPaging] = useState<{ nextOffset: number } | null>(null);
+  const [previewLoadingMore, setPreviewLoadingMore] = useState(false);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [creatingFolder, setCreatingFolder] = useState(false);
@@ -235,6 +241,8 @@ export default function Documents({ token }: DocumentsProps) {
     setExcelData(null);
     setDocChunks(null);
     setPreviewMode('content');
+    setPreviewPaging(null);
+    setPreviewLoadingMore(false);
 
     const ext = filePath.split('.').pop()?.toLowerCase();
 
@@ -255,14 +263,18 @@ export default function Documents({ token }: DocumentsProps) {
       return;
     }
 
-    // PDF files: get extracted text from workspace index (parsed during upload)
+    // PDF files: get extracted text from workspace index (parsed during upload),
+    // first page only — more pages load automatically when scrolling down
     if (ext === 'pdf') {
-      const res = await fetch(`/api/workspace/index/content?path=${encodeURIComponent(filePath)}`, {
+      const res = await fetch(`/api/workspace/index/content?path=${encodeURIComponent(filePath)}&offset=0&limit=${PREVIEW_PAGE_SIZE}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
         const data = await res.json();
         setPreviewContent(data.content || '[No indexed content found]');
+        if (data.has_more) {
+          setPreviewPaging({ nextOffset: data.next_offset });
+        }
       } else {
         setPreviewContent('[PDF not indexed. Please re-upload or re-index the directory.]');
       }
@@ -290,6 +302,25 @@ export default function Documents({ token }: DocumentsProps) {
       }
     }
     setPreviewLoading(false);
+  };
+
+  // Fetch the next page of a long document and append it to the preview
+  const loadMorePreview = async () => {
+    if (!previewPath || !previewPaging || previewLoadingMore) return;
+    setPreviewLoadingMore(true);
+    try {
+      const res = await fetch(
+        `/api/workspace/index/content?path=${encodeURIComponent(previewPath)}&offset=${previewPaging.nextOffset}&limit=${PREVIEW_PAGE_SIZE}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setPreviewContent((prev) => prev + (data.content || ''));
+        setPreviewPaging(data.has_more ? { nextOffset: data.next_offset } : null);
+      }
+    } finally {
+      setPreviewLoadingMore(false);
+    }
   };
 
   const handleDelete = async (filePath: string, isDir: boolean) => {
@@ -696,7 +727,7 @@ export default function Documents({ token }: DocumentsProps) {
                   {t('download')}
                 </button>
                 <button
-                  onClick={() => { setPreviewPath(null); setPreviewContent(''); setExcelData(null); setDocChunks(null); }}
+                  onClick={() => { setPreviewPath(null); setPreviewContent(''); setExcelData(null); setDocChunks(null); setPreviewPaging(null); setPreviewLoadingMore(false); }}
                   style={{
                     padding: '3px 10px',
                     borderRadius: 4,
@@ -748,7 +779,15 @@ export default function Documents({ token }: DocumentsProps) {
                 </button>
               </div>
             )}
-            <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
+            <div
+              style={{ flex: 1, overflow: 'auto', padding: 16 }}
+              onScroll={(e) => {
+                const el = e.currentTarget;
+                if (previewPaging && el.scrollTop + el.clientHeight >= el.scrollHeight - 300) {
+                  loadMorePreview();
+                }
+              }}
+            >
               {previewLoading ? (
                 <div style={{ color: '#666', textAlign: 'center', paddingTop: 40 }}>{t('loading')}</div>
               ) : excelData ? (
@@ -830,6 +869,9 @@ export default function Documents({ token }: DocumentsProps) {
                   >
                     {previewContent}
                   </ReactMarkdown>
+                  {previewLoadingMore && (
+                    <div style={{ color: '#666', textAlign: 'center', padding: 12 }}>{t('loading')}</div>
+                  )}
                 </div>
               ) : (
                 <pre style={{
