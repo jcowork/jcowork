@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 
 /// Client for the embedding service.
 #[derive(Debug, Clone)]
@@ -68,6 +69,20 @@ impl EmbeddingClient {
             .context("Invalid EMBEDDING_DIM")?;
         
         Ok(Self::new(&service_url, dimension))
+    }
+
+    /// Process-wide shared client built from environment on first use.
+    ///
+    /// Reuses a single HTTP connection pool across all callers instead of
+    /// creating a fresh client (and TCP connections) per request.
+    pub fn shared() -> &'static EmbeddingClient {
+        static SHARED: OnceLock<EmbeddingClient> = OnceLock::new();
+        SHARED.get_or_init(|| {
+            Self::from_env().unwrap_or_else(|e| {
+                tracing::warn!(err = %e, "Invalid embedding config, falling back to defaults");
+                Self::new("http://localhost:50060", 384)
+            })
+        })
     }
 
     /// Check if the embedding service is available.

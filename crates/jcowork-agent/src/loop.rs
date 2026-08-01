@@ -259,7 +259,7 @@ impl AgentLoop {
 
             for tc in &tool_calls {
                 let result = self.tool_registry
-                    .dispatch(&tc.function.name, &tc.function.arguments, &tool_ctx)
+                    .dispatch_isolated(&tc.function.name, &tc.function.arguments, &tool_ctx)
                     .await;
 
                 let result_str = match result {

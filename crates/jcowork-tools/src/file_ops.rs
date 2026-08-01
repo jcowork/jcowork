@@ -105,7 +105,7 @@ impl Tool for FileDeleteTool {
 
         // Update workspace index
         if let Some(data_dir) = compute_data_dir(&ctx.workspace_root) {
-            if let Ok(index) = jcowork_storage::WorkspaceIndex::new(&data_dir, &ctx.user_id).await {
+            if let Ok(index) = jcowork_storage::WorkspaceIndex::cached(&data_dir, &ctx.user_id).await {
                 let _ = index.remove_file(path).await;
             }
         }
@@ -140,7 +140,7 @@ impl Tool for FileMoveTool {
 
         // Update workspace index
         if let Some(data_dir) = compute_data_dir(&ctx.workspace_root) {
-            if let Ok(index) = jcowork_storage::WorkspaceIndex::new(&data_dir, &ctx.user_id).await {
+            if let Ok(index) = jcowork_storage::WorkspaceIndex::cached(&data_dir, &ctx.user_id).await {
                 let _ = index.move_path(from, to).await;
             }
         }

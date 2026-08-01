@@ -11,7 +11,7 @@ use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 use std::sync::Arc;
 
-use crate::base::{Tool, ToolContext};
+use crate::base::{Tool, ToolContext, truncate_str};
 use jcowork_logs::{LogEntry, LogWriter};
 
 /// Resolve the Python binary path in the jcowork venv.
@@ -158,7 +158,7 @@ impl Tool for WebSearchTool {
                     "url": r["url"].as_str().unwrap_or(""),
                     "snippet": r["snippet"].as_str().unwrap_or(""),
                     "content": r["content"].as_str().map(|c| {
-                        if c.len() > 500 { format!("{}...(truncated)", &c[..500]) } else { c.to_string() }
+                        if c.len() > 500 { format!("{}...(truncated)", truncate_str(c, 500)) } else { c.to_string() }
                     }).unwrap_or_default(),
                 })
             })
@@ -196,7 +196,7 @@ impl Tool for WebSearchTool {
                 // Add detailed content if available (for top 3 results only)
                 if i < 3 && !content.is_empty() && content != "(No content extracted)" && !content.starts_with("(Failed") {
                     let content_preview = if content.len() > 500 {
-                        format!("{}... (truncated)", &content[..500])
+                        format!("{}... (truncated)", truncate_str(content, 500))
                     } else {
                         content.to_string()
                     };

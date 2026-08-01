@@ -301,7 +301,16 @@ impl FileStore {
         let rel = path.strip_prefix(base).unwrap_or(path).to_string_lossy().to_string();
         for (i, line) in content.lines().enumerate() {
             if line.contains(pattern) {
-                let preview = if line.len() > 200 { &line[..200] } else { line };
+                let preview = if line.len() > 200 {
+                    // Avoid splitting a multi-byte UTF-8 character (e.g. Chinese text)
+                    let mut end = 200;
+                    while end > 0 && !line.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    &line[..end]
+                } else {
+                    line
+                };
                 results.push(format!("{}:{}:{}", rel, i + 1, preview));
             }
         }

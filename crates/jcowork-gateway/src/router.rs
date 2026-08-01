@@ -1508,7 +1508,7 @@ async fn upload_file(
 
         // Index the uploaded file
         let mut index_error: Option<String> = None;
-        match WorkspaceIndex::new(&state.data_dir, &auth_user.user_id).await {
+        match WorkspaceIndex::cached(&state.data_dir, &auth_user.user_id).await {
             Ok(index) => {
                 if let Err(e) = index.add_document(&relative_path, &workspace_root).await {
                     let err_msg = format!("Failed to index {}: {}", relative_path, e);
@@ -1593,7 +1593,7 @@ async fn delete_workspace_file(
     }
 
     // Update index
-    if let Ok(index) = WorkspaceIndex::new(&state.data_dir, &auth_user.user_id).await {
+    if let Ok(index) = WorkspaceIndex::cached(&state.data_dir, &auth_user.user_id).await {
         if metadata.is_dir() {
             let _ = index.remove_directory(&body.path).await;
         } else {
@@ -1651,7 +1651,7 @@ async fn move_workspace_path(
     }
 
     // Update index
-    if let Ok(index) = WorkspaceIndex::new(&state.data_dir, &auth_user.user_id).await {
+    if let Ok(index) = WorkspaceIndex::cached(&state.data_dir, &auth_user.user_id).await {
         if let Err(e) = index.move_path(&body.from, &body.to).await {
             tracing::warn!(from = %body.from, to = %body.to, err = %e, "Failed to update index on move");
         }
@@ -1685,7 +1685,7 @@ async fn search_workspace_index(
     axum::Extension(auth_user): axum::Extension<AuthUser>,
     Query(query): Query<SearchIndexQuery>,
 ) -> impl IntoResponse {
-    let index = match WorkspaceIndex::new(&state.data_dir, &auth_user.user_id).await {
+    let index = match WorkspaceIndex::cached(&state.data_dir, &auth_user.user_id).await {
         Ok(idx) => idx,
         Err(e) => {
             return (
@@ -1721,7 +1721,7 @@ async fn list_workspace_index(
     axum::Extension(auth_user): axum::Extension<AuthUser>,
     Query(query): Query<ListIndexQuery>,
 ) -> impl IntoResponse {
-    let index = match WorkspaceIndex::new(&state.data_dir, &auth_user.user_id).await {
+    let index = match WorkspaceIndex::cached(&state.data_dir, &auth_user.user_id).await {
         Ok(idx) => idx,
         Err(e) => {
             return (
@@ -1762,7 +1762,7 @@ async fn get_indexed_content(
     axum::Extension(auth_user): axum::Extension<AuthUser>,
     Query(query): Query<ContentIndexQuery>,
 ) -> impl IntoResponse {
-    let index = match WorkspaceIndex::new(&state.data_dir, &auth_user.user_id).await {
+    let index = match WorkspaceIndex::cached(&state.data_dir, &auth_user.user_id).await {
         Ok(idx) => idx,
         Err(e) => {
             return (
@@ -1809,7 +1809,7 @@ async fn vector_search_chunks(
     axum::Extension(auth_user): axum::Extension<AuthUser>,
     Query(query): Query<VectorSearchQuery>,
 ) -> impl IntoResponse {
-    let index = match WorkspaceIndex::new(&state.data_dir, &auth_user.user_id).await {
+    let index = match WorkspaceIndex::cached(&state.data_dir, &auth_user.user_id).await {
         Ok(idx) => idx,
         Err(e) => {
             return (
@@ -1854,7 +1854,7 @@ async fn get_document_chunks(
     axum::Extension(auth_user): axum::Extension<AuthUser>,
     Query(query): Query<DocChunksQuery>,
 ) -> impl IntoResponse {
-    let index = match WorkspaceIndex::new(&state.data_dir, &auth_user.user_id).await {
+    let index = match WorkspaceIndex::cached(&state.data_dir, &auth_user.user_id).await {
         Ok(idx) => idx,
         Err(e) => {
             return (
@@ -1912,7 +1912,7 @@ async fn get_document_image(
     }
 
     // Look up doc_hash from workspace index
-    let index = match WorkspaceIndex::new(&state.data_dir, &auth_user.user_id).await {
+    let index = match WorkspaceIndex::cached(&state.data_dir, &auth_user.user_id).await {
         Ok(idx) => idx,
         Err(e) => {
             return (
@@ -2112,7 +2112,7 @@ async fn reindex_workspace_dir(
         }
     };
 
-    let index = match WorkspaceIndex::new(&state.data_dir, &auth_user.user_id).await {
+    let index = match WorkspaceIndex::cached(&state.data_dir, &auth_user.user_id).await {
         Ok(idx) => idx,
         Err(e) => {
             return (

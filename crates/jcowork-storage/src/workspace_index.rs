@@ -8,12 +8,16 @@
 use anyhow::Result;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteJournalMode};
 use sqlx::SqlitePool;
+use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::{Arc, LazyLock, Mutex};
+use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::doc_chunker::{DocChunk, chunk_markdown};
-use crate::embedding_client::{EmbeddingClient, bytes_to_embedding, embedding_to_bytes, cosine_similarity};
+use crate::embedding_client::{EmbeddingClient, bytes_to_embedding, embedding_to_bytes};
+use crate::vector_index::VectorIndex;
 
 /// Maximum content size to index (characters). Larger content is truncated.
 const MAX_INDEX_CONTENT_LEN: usize = 50_000;
@@ -27,7 +31,17 @@ pub struct WorkspaceIndex {
     pool: SqlitePool,
     data_dir: String,
     user_id: String,
+    /// HNSW vector index, lazily created on first embedding insert.
+    /// Shared across clones so cached instances stay in sync with writes.
+    vector_index: Arc<Mutex<Option<Arc<VectorIndex>>>>,
 }
+
+/// Process-wide cache of opened workspace indexes, keyed by `data_dir::user_id`.
+///
+/// Opening an index runs migrations and rebuilds the HNSW vector index from
+/// all stored embeddings — far too expensive to repeat on every tool call.
+static INDEX_CACHE: LazyLock<RwLock<HashMap<String, WorkspaceIndex>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
 
 impl WorkspaceIndex {
     /// Create or open the workspace index database for a user.
@@ -48,12 +62,47 @@ impl WorkspaceIndex {
             .await?;
 
         Self::run_migrations(&pool).await?;
+
+        // Build HNSW vector index from existing embeddings
+        let vector_index = Self::build_vector_index(&pool).await;
+        if let Some(ref vi) = vector_index {
+            info!(user_id = user_id, count = vi.count(), "HNSW vector index loaded");
+        } else {
+            info!(user_id = user_id, "No embeddings found, HNSW index not created");
+        }
+
         info!(user_id = user_id, "Workspace index initialized");
         Ok(Self {
             pool,
             data_dir: data_dir.to_string(),
             user_id: user_id.to_string(),
+            vector_index: Arc::new(Mutex::new(vector_index)),
         })
+    }
+
+    /// Get the shared workspace index for a user, opening it on first access.
+    ///
+    /// Subsequent calls return a cheap clone of the cached instance — the
+    /// SQLite pool, migrations, and HNSW index build happen only once per
+    /// process. Writes through any clone are visible to all of them (the
+    /// pool and vector index are shared), so all callers must use this
+    /// accessor instead of [`WorkspaceIndex::new`].
+    pub async fn cached(data_dir: &str, user_id: &str) -> Result<Self> {
+        let key = format!("{}::{}", data_dir, user_id);
+
+        if let Some(index) = INDEX_CACHE.read().await.get(&key) {
+            return Ok(index.clone());
+        }
+
+        let mut cache = INDEX_CACHE.write().await;
+        // Double-check: another task may have opened it while we waited.
+        if let Some(index) = cache.get(&key) {
+            return Ok(index.clone());
+        }
+
+        let index = Self::new(data_dir, user_id).await?;
+        cache.insert(key, index.clone());
+        Ok(index)
     }
 
     /// Run database migrations to create required tables.
@@ -216,6 +265,58 @@ impl WorkspaceIndex {
             .await?;
 
         Ok(())
+    }
+
+    /// Build HNSW vector index from existing embeddings in the database.
+    /// Returns None if no embeddings exist or dimension cannot be determined.
+    async fn build_vector_index(pool: &SqlitePool) -> Option<Arc<VectorIndex>> {
+        // Check if there are any embeddings
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM chunk_embeddings")
+            .fetch_one(pool)
+            .await
+            .ok()?;
+
+        if count.0 == 0 {
+            return None;
+        }
+
+        // Determine embedding dimension from first embedding
+        let dim_row: (Vec<u8>,) = sqlx::query_as("SELECT embedding FROM chunk_embeddings LIMIT 1")
+            .fetch_one(pool)
+            .await
+            .ok()?;
+
+        let dimension = dim_row.0.len() / 4; // f32 = 4 bytes
+        if dimension == 0 {
+            return None;
+        }
+
+        let vi = Arc::new(VectorIndex::new(dimension, count.0 as usize).ok()?);
+
+        // Load all embeddings into the HNSW index
+        let rows: Vec<(i64, Vec<u8>)> = sqlx::query_as(
+            "SELECT chunk_id, embedding FROM chunk_embeddings"
+        )
+        .fetch_all(pool)
+        .await
+        .ok()?;
+
+        let mut loaded = 0usize;
+        for (chunk_id, embedding_bytes) in &rows {
+            let embedding = bytes_to_embedding(embedding_bytes);
+            if vi.add(*chunk_id, &embedding).is_ok() {
+                loaded += 1;
+            }
+        }
+
+        tracing::info!(
+            total = rows.len(),
+            loaded = loaded,
+            dimension = dimension,
+            "Built HNSW vector index from database"
+        );
+
+        Some(vi)
     }
 
     /// Add or update a document in the index.
@@ -695,14 +796,8 @@ impl WorkspaceIndex {
             return Ok(());
         }
         
-        // Get embedding client
-        let embedding_client = EmbeddingClient::from_env()?;
-        
-        // Check if service is available
-        if !embedding_client.health_check().await.unwrap_or(false) {
-            warn!("Embedding service not available, skipping vector indexing");
-            return Ok(());
-        }
+        // Get the shared embedding client (reuses one HTTP connection pool)
+        let embedding_client = EmbeddingClient::shared();
         
         // Prepare texts for embedding
         let texts: Vec<String> = chunks.iter().map(|c| {
@@ -710,8 +805,32 @@ impl WorkspaceIndex {
         }).collect();
         let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
         
-        // Generate embeddings
-        let embeddings = embedding_client.embed_batch(&text_refs).await?;
+        // Generate embeddings (skip health check, fail gracefully)
+        let embeddings = match embedding_client.embed_batch(&text_refs).await {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(err = %e, "Embedding service unavailable, skipping vector indexing");
+                return Ok(());
+            }
+        };
+        
+        // Lazily create the HNSW index on first insert. The cached index may
+        // have been opened when the database had no embeddings yet.
+        let vector_index = {
+            let mut guard = self.vector_index.lock().unwrap();
+            if guard.is_none()
+                && let Some(dim) = embeddings.first().map(|e| e.len())
+            {
+                match VectorIndex::new(dim, embeddings.len()) {
+                    Ok(vi) => {
+                        info!(dimension = dim, "Created HNSW vector index on first embedding insert");
+                        *guard = Some(Arc::new(vi));
+                    }
+                    Err(e) => warn!(err = %e, "Failed to create HNSW vector index"),
+                }
+            }
+            guard.clone()
+        };
         
         // Store chunks and embeddings
         for (chunk, embedding) in chunks.into_iter().zip(embeddings.into_iter()) {
@@ -732,7 +851,7 @@ impl WorkspaceIndex {
             .fetch_one(&self.pool)
             .await?;
             
-            // Insert embedding
+            // Insert embedding into DB
             let embedding_bytes = embedding_to_bytes(&embedding);
             sqlx::query(
                 "INSERT INTO chunk_embeddings (chunk_id, embedding) VALUES (?1, ?2)"
@@ -741,6 +860,11 @@ impl WorkspaceIndex {
             .bind(&embedding_bytes)
             .execute(&self.pool)
             .await?;
+            
+            // Add to HNSW index
+            if let Some(ref vi) = vector_index {
+                let _ = vi.add(chunk_id, &embedding);
+            }
         }
         
         info!(file = %file_path, "Stored document chunks for vector search");
@@ -759,6 +883,14 @@ impl WorkspaceIndex {
         
         if chunk_ids.is_empty() {
             return Ok(());
+        }
+        
+        // Remove from HNSW index first
+        let vector_index = self.vector_index.lock().unwrap().clone();
+        if let Some(ref vi) = vector_index {
+            for chunk_id in &chunk_ids {
+                let _ = vi.remove(*chunk_id);
+            }
         }
         
         // Delete embeddings
@@ -795,16 +927,98 @@ impl WorkspaceIndex {
         Ok(chunks.into_iter().map(|r| r.into()).collect())
     }
 
-    /// Perform vector similarity search.
+    /// Perform vector similarity search using HNSW index.
     ///
     /// Returns chunks ranked by cosine similarity to the query embedding.
+    /// Falls back to brute-force if HNSW index is not available.
     pub async fn vector_search(
         &self,
         query_embedding: &[f32],
         top_k: u32,
         file_path_filter: Option<&str>,
     ) -> Result<Vec<ScoredChunk>> {
-        // Load all embeddings (for small document collections this is fast)
+        // Try HNSW index first
+        let vector_index = self.vector_index.lock().unwrap().clone();
+        if let Some(ref vi) = vector_index {
+            let search_start = std::time::Instant::now();
+            
+            // Search with larger k if filtering, then post-filter
+            let search_k = if file_path_filter.is_some() {
+                (top_k * 10).max(50) // Search more candidates when filtering
+            } else {
+                top_k
+            };
+            
+            let results = vi.search(query_embedding, search_k)?;
+            
+            // Collect chunk IDs from HNSW results
+            let chunk_ids: Vec<i64> = results.iter().map(|r| r.chunk_id).collect();
+            
+            if chunk_ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            
+            // Fetch full chunk details from DB
+            let placeholders: Vec<String> = chunk_ids.iter().map(|_| "?".to_string()).collect();
+            let query = format!(
+                "SELECT c.id, c.file_path, c.chunk_type, c.content, c.heading, c.chunk_index, c.image_path, c.created_at \
+                 FROM doc_chunks c WHERE c.id IN ({})",
+                placeholders.join(",")
+            );
+            
+            let mut sql_query = sqlx::query_as::<_, DocChunkRow>(&query);
+            for id in &chunk_ids {
+                sql_query = sql_query.bind(id);
+            }
+            
+            let rows: Vec<DocChunkRow> = sql_query.fetch_all(&self.pool).await?;
+            
+            // Build score map from HNSW results
+            let score_map: std::collections::HashMap<i64, f32> = results
+                .into_iter()
+                .map(|r| (r.chunk_id, r.score))
+                .collect();
+            
+            // Convert to ScoredChunk and optionally filter by file_path
+            let mut scored: Vec<ScoredChunk> = rows
+                .into_iter()
+                .filter_map(|row| {
+                    // Apply file_path filter if specified
+                    if let Some(fp) = file_path_filter {
+                        if row.file_path != fp {
+                            return None;
+                        }
+                    }
+                    let score = score_map.get(&row.id).copied().unwrap_or(0.0);
+                    let chunk: DocChunk = row.into();
+                    Some(ScoredChunk {
+                        id: chunk.chunk_index as i64,
+                        file_path: chunk.file_path,
+                        chunk_type: chunk.chunk_type,
+                        content: chunk.content,
+                        heading: chunk.heading,
+                        chunk_index: chunk.chunk_index,
+                        image_path: chunk.image_path,
+                        score,
+                    })
+                })
+                .collect();
+            
+            // Sort by score descending
+            scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+            scored.truncate(top_k as usize);
+            
+            tracing::info!(
+                elapsed_ms = search_start.elapsed().as_millis() as u64,
+                results = scored.len(),
+                "HNSW vector search completed"
+            );
+            
+            return Ok(scored);
+        }
+        
+        // Fallback: brute-force search (no HNSW index)
+        tracing::warn!("No HNSW index available, using brute-force vector search");
         let rows = if let Some(fp) = file_path_filter {
             sqlx::query_as::<_, ChunkEmbeddingRow>(
                 r#"
@@ -829,12 +1043,11 @@ impl WorkspaceIndex {
             .await?
         };
         
-        // Compute similarities
         let mut scored: Vec<ScoredChunk> = rows
             .into_iter()
             .map(|row| {
                 let chunk_embedding = bytes_to_embedding(&row.embedding);
-                let score = cosine_similarity(query_embedding, &chunk_embedding);
+                let score = crate::embedding_client::cosine_similarity(query_embedding, &chunk_embedding);
                 ScoredChunk {
                     id: row.id,
                     file_path: row.file_path,
@@ -848,10 +1061,7 @@ impl WorkspaceIndex {
             })
             .collect();
         
-        // Sort by score descending
         scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-        
-        // Take top_k
         scored.truncate(top_k as usize);
         
         Ok(scored)
@@ -866,42 +1076,47 @@ impl WorkspaceIndex {
         top_k: u32,
         file_paths: Option<&[String]>,
     ) -> Result<Vec<ScoredChunk>> {
-        tracing::info!("Creating embedding client");
-        let embedding_client = EmbeddingClient::from_env()?;
+        let search_start = std::time::Instant::now();
         
-        tracing::info!("Checking embedding service health");
-        // Check if embedding service is available
-        let health = embedding_client.health_check().await.unwrap_or(false);
-        tracing::info!(health_ok = health, "Health check result");
+        let embedding_client = EmbeddingClient::shared();
         
-        if health {
-            // Use vector search
-            tracing::info!("Generating query embedding");
-            let query_embedding = embedding_client.embed_query(query).await?;
-            tracing::info!(embedding_dim = query_embedding.len(), "Query embedding generated");
-            
-            if let Some(paths) = file_paths {
-                // Search within specific files
-                let mut all_results = Vec::new();
-                for path in paths {
-                    let results = self.vector_search(&query_embedding, top_k, Some(path)).await?;
-                    all_results.extend(results);
-                }
-                all_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-                all_results.truncate(top_k as usize);
-                Ok(all_results)
-            } else {
-                self.vector_search(&query_embedding, top_k, None).await
+        // Try semantic search directly (skip separate health check to save ~3s)
+        tracing::info!("Generating query embedding");
+        let embed_start = std::time::Instant::now();
+        match embedding_client.embed_query(query).await {
+            Ok(query_embedding) => {
+                tracing::info!(embedding_dim = query_embedding.len(), elapsed_ms = embed_start.elapsed().as_millis(), "Query embedding generated");
+                
+                let vs_start = std::time::Instant::now();
+                let result = if let Some(paths) = file_paths {
+                    let mut all_results = Vec::new();
+                    for path in paths {
+                        let results = self.vector_search(&query_embedding, top_k, Some(path)).await?;
+                        all_results.extend(results);
+                    }
+                    all_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+                    all_results.truncate(top_k as usize);
+                    Ok(all_results)
+                } else {
+                    self.vector_search(&query_embedding, top_k, None).await
+                };
+                tracing::info!(elapsed_ms = vs_start.elapsed().as_millis(), "Vector search completed");
+                tracing::info!(total_elapsed_ms = search_start.elapsed().as_millis(), "Hybrid search completed");
+                result
             }
-        } else {
-            // Fall back to FTS5 search
-            warn!("Embedding service not available, falling back to FTS5 search");
-            self.fts_chunk_search(query, top_k).await
+            Err(e) => {
+                tracing::info!(err = %e, elapsed_ms = embed_start.elapsed().as_millis(), "Embedding failed, falling back to FTS5");
+                let fts_start = std::time::Instant::now();
+                let result = self.fts_chunk_search(query, top_k).await;
+                tracing::info!(elapsed_ms = fts_start.elapsed().as_millis(), "FTS5 fallback search completed");
+                tracing::info!(total_elapsed_ms = search_start.elapsed().as_millis(), "Hybrid search completed");
+                result
+            }
         }
     }
 
-    /// FTS5-based chunk search (fallback when embedding service is unavailable).
-    async fn fts_chunk_search(&self, query: &str, top_k: u32) -> Result<Vec<ScoredChunk>> {
+    /// FTS5-based chunk search (fallback when embedding service is unavailable or semantic search returns no results).
+    pub async fn fts_chunk_search(&self, query: &str, top_k: u32) -> Result<Vec<ScoredChunk>> {
         let rows = sqlx::query_as::<_, DocChunkRow>(
             r#"
             SELECT c.id, c.file_path, c.chunk_type, c.content, c.heading, c.chunk_index, c.image_path, c.created_at
@@ -1050,6 +1265,30 @@ mod tests {
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0].filename, "test.md");
         assert_eq!(docs[0].content_type, "markdown");
+    }
+
+    #[tokio::test]
+    async fn test_cached_index_shares_state() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().to_str().unwrap();
+
+        // Two calls for the same user must return handles sharing the same
+        // underlying pool — writes through one are visible through the other.
+        let idx1 = WorkspaceIndex::cached(data_dir, "cache-test-user").await.unwrap();
+        let idx2 = WorkspaceIndex::cached(data_dir, "cache-test-user").await.unwrap();
+
+        let workspace = dir.path().join("test-workspace");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        tokio::fs::write(workspace.join("a.md"), "# Alpha\nCached index test document.")
+            .await
+            .unwrap();
+
+        let ws_str = workspace.to_string_lossy().to_string();
+        idx1.add_document("a.md", &ws_str).await.unwrap();
+
+        let docs = idx2.list_all(None).await.unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].filename, "a.md");
     }
 
     #[tokio::test]

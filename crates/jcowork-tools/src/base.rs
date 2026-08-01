@@ -27,6 +27,19 @@ pub struct ToolContext {
     pub workspace_root: String,
 }
 
+/// Truncate a string to at most `max_bytes` bytes without splitting a
+/// multi-byte UTF-8 character (plain `&s[..max_bytes]` panics on e.g. Chinese text).
+pub fn truncate_str(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Trait that all tools must implement.
 ///
 /// Each tool provides:
@@ -46,4 +59,24 @@ pub trait Tool: Send + Sync {
 
     /// Execute the tool with the given arguments and context.
     async fn execute(&self, args: &str, ctx: &ToolContext) -> Result<String>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_str;
+
+    #[test]
+    fn test_truncate_str_respects_char_boundary() {
+        // '再' is 3 bytes (498..501 in the original panic); byte index 500 is mid-char
+        let s = "陈太丘与友期行，期日中。过中不至，太丘舍去，去后乃至。";
+        let truncated = truncate_str(s, 10);
+        assert!(truncated.len() <= 10);
+        assert!(s.starts_with(truncated));
+
+        // ASCII is unaffected
+        assert_eq!(truncate_str("hello world", 5), "hello");
+
+        // Short strings pass through unchanged
+        assert_eq!(truncate_str("短", 500), "短");
+    }
 }

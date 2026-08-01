@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use anyhow;
 use jcowork_cron::{CronScheduler, CronJob, Reminder};
 use jcowork_llm::provider::{ChatMessage, StreamChunk, ToolCall};
 use jcowork_llm::LlmRouter;
@@ -15,7 +16,7 @@ use jcowork_skills::{builtin_skills, SkillManager};
 use jcowork_tools::base::ToolContext;
 use jcowork_tools::cron::{ReminderAddTool, ReminderListTool, ReminderRemoveTool, CronAddTool, CronListTool, CronRemoveTool};
 use jcowork_tools::bing_search::WebSearchTool;
-use jcowork_tools::doc_search::{DocListTool, DocSearchTool};
+use jcowork_tools::doc_search::DocListTool;
 use jcowork_tools::doc_retrieve::DocRetrieveTool;
 use jcowork_tools::excel_db::ExcelDbTool;
 use jcowork_tools::file_ops::{FileReadTool, FileWriteTool, FileListTool, FileDeleteTool, FileMoveTool, FileCopyTool, FileSearchTool, DirCreateTool, DirListTool, FileInfoTool};
@@ -31,7 +32,10 @@ use crate::session::SessionManager;
 #[derive(Debug, Deserialize)]
 pub struct WsInput {
     pub session_id: Option<String>,
-    pub content: String,
+    /// Message type: "stop" to abort generation, or absent for normal chat.
+    #[serde(rename = "type")]
+    pub msg_type: Option<String>,
+    pub content: Option<String>,
     /// Model string in "provider:model" format. Defaults to server default if not provided.
     pub model: Option<String>,
     /// Optional context documents (workspace files or uploaded PDFs) to include as reference.
@@ -109,7 +113,6 @@ pub fn build_tool_registry(
     registry.register(Arc::new(DirListTool));
     registry.register(Arc::new(FileInfoTool));
     // Document search tools (workspace index)
-    registry.register(Arc::new(DocSearchTool));
     registry.register(Arc::new(DocListTool));
     // Document semantic retrieval tools (vector search)
     registry.register(Arc::new(DocRetrieveTool));
@@ -183,6 +186,21 @@ pub async fn ws_handler(
                     }
                 };
 
+                // Handle stop signal
+                if input.msg_type.as_deref() == Some("stop") {
+                    tracing::info!(user_id = %user_id, "Received stop signal");
+                    let _ = ws_sender
+                        .send(Message::Text(
+                            serde_json::json!({"type": "stopped"})
+                                .to_string()
+                                .into(),
+                        ))
+                        .await;
+                    continue;
+                }
+
+                let user_content = input.content.clone().unwrap_or_default();
+
                 // Send status: message received
                 let _ = ws_sender
                     .send(Message::Text(
@@ -214,7 +232,7 @@ pub async fn ws_handler(
                             .await;
 
                         let mut parts = Vec::new();
-                        let _user_query = &input.content;
+                        let _user_query = &user_content;
                         
                         for doc in docs {
                             let path_info = doc.path.as_deref().unwrap_or("");
@@ -266,7 +284,7 @@ pub async fn ws_handler(
 
                 history.push(ChatMessage {
                     role: "user".to_string(),
-                    content: input.content.clone(),
+                    content: user_content.clone(),
                     tool_calls: None,
                     tool_call_id: None,
                     reasoning_content: None,
@@ -454,18 +472,8 @@ pub async fn ws_handler(
 
                                 entry.2.push_str(&args_delta);
                                 
-                                if !entry.1.trim().is_empty() && tool_call_started.insert(call_id.clone()) {
-                                    let _ = ws_sender
-                                        .send(Message::Text(
-                                            serde_json::json!({
-                                                "type": "tool_call_start",
-                                                "name": entry.1.clone(),
-                                                "call_id": call_id
-                                            })
-                                                .to_string()
-                                                .into(),
-                                        ))
-                                        .await;
+                                if !entry.1.trim().is_empty() {
+                                    tool_call_started.insert(call_id.clone());
                                 }
                             }
                             Ok(StreamChunk::Done(usage)) => {
@@ -508,6 +516,22 @@ pub async fn ws_handler(
                             },
                         })
                         .collect();
+
+                    // Send tool_call_start with complete arguments (after stream ends)
+                    for tc in &tool_calls {
+                        let _ = ws_sender
+                            .send(Message::Text(
+                                serde_json::json!({
+                                    "type": "tool_call_start",
+                                    "name": tc.function.name,
+                                    "call_id": tc.id,
+                                    "arguments": tc.function.arguments
+                                })
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await;
+                    }
 
                     last_tool_summaries = tool_calls
                         .iter()
@@ -565,6 +589,16 @@ pub async fn ws_handler(
                     }
 
                     // Dispatch tool calls (skip empty-argument calls — some LLMs emit ghost tool calls)
+                    // Update status to show tool execution
+                    let tool_names: Vec<String> = tool_calls.iter().map(|tc| tc.function.name.clone()).collect();
+                    let _ = ws_sender
+                        .send(Message::Text(
+                            serde_json::json!({"type": "status", "message": format!("🔧 正在执行工具: {}", tool_names.join(", "))})
+                                .to_string()
+                                .into(),
+                        ))
+                        .await;
+
                     for tc in &tool_calls {
                         if tc.function.name.trim().is_empty() {
                             tracing::warn!(call_id = %tc.id, arguments = %tc.function.arguments, "Skipping tool call with empty name");
@@ -592,9 +626,18 @@ pub async fn ws_handler(
                         }
 
                         let tool_start = std::time::Instant::now();
-                        let result = tool_registry
-                            .dispatch(&tc.function.name, &tc.function.arguments, &tool_ctx)
-                            .await;
+                        // Wrap tool dispatch in timeout to prevent hanging (30s per tool)
+                        let dispatch_result = tokio::time::timeout(
+                            std::time::Duration::from_secs(30),
+                            tool_registry.dispatch_isolated(&tc.function.name, &tc.function.arguments, &tool_ctx)
+                        ).await;
+                        let result = match dispatch_result {
+                            Ok(r) => r,
+                            Err(_) => {
+                                tracing::warn!(tool = %tc.function.name, "Tool call timed out after 30s");
+                                Err(anyhow::anyhow!("Tool call timed out"))
+                            }
+                        };
 
                         let result_str = match result {
                             Ok(r) => r,
@@ -906,9 +949,17 @@ pub async fn ws_handler(
                                     }
 
                                     let tool_start = std::time::Instant::now();
-                                    let result = tool_registry
-                                        .dispatch(&tc.function.name, &tc.function.arguments, &tool_ctx)
-                                        .await;
+                                    let dispatch_result = tokio::time::timeout(
+                                        std::time::Duration::from_secs(30),
+                                        tool_registry.dispatch_isolated(&tc.function.name, &tc.function.arguments, &tool_ctx)
+                                    ).await;
+                                    let result = match dispatch_result {
+                                        Ok(r) => r,
+                                        Err(_) => {
+                                            tracing::warn!(tool = %tc.function.name, "Tool call timed out after 30s during reminder action");
+                                            Err(anyhow::anyhow!("Tool call timed out"))
+                                        }
+                                    };
 
                                     let result_str = match result {
                                         Ok(r) => r,
@@ -1008,12 +1059,13 @@ async fn load_agent_identity(memory_manager: &MemoryManager, user_id: &str) -> O
 }
 
 fn build_excel_analysis_guidance(input: &WsInput) -> Option<String> {
-    let mentions_excel = input.content.contains("xlsx")
-        || input.content.contains("xls")
-        || input.content.contains("Excel")
-        || input.content.contains("表格")
-        || input.content.contains("工作表")
-        || input.content.contains("query");
+    let content = input.content.as_deref().unwrap_or("");
+    let mentions_excel = content.contains("xlsx")
+        || content.contains("xls")
+        || content.contains("Excel")
+        || content.contains("表格")
+        || content.contains("工作表")
+        || content.contains("query");
 
     let has_excel_context = input
         .context_documents
@@ -1136,6 +1188,12 @@ CRITICAL REMINDER RULES:
 - Do NOT describe reminders in text and pretend they are set. Text descriptions are NOT reminders.
 - When setting multiple reminders, call reminder_add for EACH one separately (one tool call per reminder).
 - After all reminder_add calls return success, briefly confirm the total count to the user.
+
+Document search guidance:
+- **If the user attached documents to this conversation, the content is already provided above.** Read it directly — do NOT call doc_retrieve for attached documents.
+- Use **doc_retrieve** for all document searches. It automatically tries semantic search first, then falls back to keyword search. One tool call handles everything.
+- If doc_retrieve returns no results, use doc_list to see what documents are available, then inform the user.
+- Avoid repeated tool loops. After 1-2 search attempts, provide your best answer or tell the user what you found.
 
 今天是 {current_time}
 

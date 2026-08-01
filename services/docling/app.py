@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -157,8 +158,9 @@ async def convert_document(file: UploadFile = File(...)):
         tmp_path = tmp.name
     
     try:
-        # Convert document
-        result: ConversionResult = doc_converter.convert(tmp_path)
+        # Convert document (blocking CPU work — run in threadpool so the
+        # event loop stays responsive for /embed and /health requests)
+        result: ConversionResult = await run_in_threadpool(doc_converter.convert, tmp_path)
         
         # Generate a unique hash for this document (for image storage)
         doc_hash = hashlib.md5(content).hexdigest()[:12]
@@ -286,8 +288,10 @@ async def embed_texts(request: EmbedRequest):
     if len(request.texts) > 100:
         raise HTTPException(status_code=400, detail="Batch size limited to 100 texts")
     
-    # Generate embeddings
-    embeddings = embedding_model.encode(
+    # Generate embeddings (blocking CPU work — run in threadpool so a
+    # concurrent /convert does not starve embedding requests)
+    embeddings = await run_in_threadpool(
+        embedding_model.encode,
         request.texts,
         normalize_embeddings=True,  # L2 normalize for cosine similarity
         show_progress_bar=False,

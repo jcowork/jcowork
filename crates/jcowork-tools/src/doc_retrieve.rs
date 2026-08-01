@@ -8,7 +8,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use crate::base::{Tool, ToolContext};
+use crate::base::{Tool, ToolContext, truncate_str};
 
 /// Document semantic retrieval tool.
 pub struct DocRetrieveTool;
@@ -33,7 +33,7 @@ impl Tool for DocRetrieveTool {
     }
 
     fn description(&self) -> &str {
-        "Semantically search uploaded documents by meaning. Returns relevant document sections (text, tables, images) ranked by relevance. Use this when the user asks about content in their documents or when you need to find specific information in uploaded files."
+        "Semantically search uploaded documents by meaning using vector embeddings. This is the PRIMARY search tool — prefer this over doc_search for most queries, especially Chinese text. Returns relevant document sections ranked by semantic similarity. Use this when the user asks about content in their documents. If no results, try doc_list to see available documents. Do not call more than twice with different queries."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -73,20 +73,45 @@ impl Tool for DocRetrieveTool {
         
         tracing::info!(data_dir = %data_dir, user_id = %ctx.user_id, "Opening workspace index");
 
-        let index = jcowork_storage::WorkspaceIndex::new(&data_dir, &ctx.user_id).await?;
+        let index = jcowork_storage::WorkspaceIndex::cached(&data_dir, &ctx.user_id).await?;
         
-        tracing::info!("Starting hybrid search");
+        tracing::info!("Starting hybrid search (semantic + keyword fallback)");
 
-        // Perform hybrid search (vector + FTS fallback)
+        // Step 1: Try semantic search (vector embeddings)
         let file_paths = parsed.file_path.as_ref().map(|p| vec![p.clone()]);
-        let results = index
+        let mut results = index
             .hybrid_search(&parsed.query, parsed.top_k, file_paths.as_deref())
             .await?;
         
-        tracing::info!(result_count = results.len(), "Hybrid search completed");
+        tracing::info!(result_count = results.len(), "Semantic search completed");
+
+        // Step 2: If semantic search returns no results, fallback to FTS5 keyword search
+        if results.is_empty() {
+            tracing::info!("Semantic search returned no results, trying FTS5 keyword search");
+            results = index
+                .fts_chunk_search(&parsed.query, parsed.top_k)
+                .await
+                .unwrap_or_default();
+            tracing::info!(result_count = results.len(), "FTS5 keyword search completed");
+        }
 
         if results.is_empty() {
-            return Ok("No relevant document sections found. The documents may not be indexed yet, or the query doesn't match any content.".to_string());
+            // Both semantic and keyword search failed — list available documents
+            let all_docs = index.list_all(None).await.unwrap_or_default();
+            let mut output = String::new();
+            
+            if !all_docs.is_empty() {
+                output.push_str(&format!("No relevant content found for \"{}\" (tried both semantic and keyword search).\n\n", parsed.query));
+                output.push_str(&format!("{} document(s) are indexed:\n", all_docs.len()));
+                for doc in &all_docs {
+                    output.push_str(&format!("- {} ({})\n", doc.filename, doc.content_type));
+                }
+                output.push_str("\nTry rephrasing your query with different terms.");
+            } else {
+                output = "No documents are indexed yet. Upload documents through the Documents page.".to_string();
+            }
+            
+            return Ok(output);
         }
 
         let mut output = format!("Found {} relevant section(s):\n\n", results.len());
@@ -112,9 +137,9 @@ impl Tool for DocRetrieveTool {
             
             output.push_str(&format!("   Type: {}\n", chunk.chunk_type));
             
-            // Show content (truncated if too long)
+            // Show content (truncated if too long, at a UTF-8 char boundary)
             let content_preview = if chunk.content.len() > 500 {
-                format!("{}...", &chunk.content[..500])
+                format!("{}...", truncate_str(&chunk.content, 500))
             } else {
                 chunk.content.clone()
             };
@@ -172,7 +197,7 @@ impl Tool for DocChunksTool {
             .map(|p| p.to_string_lossy().to_string())
             .ok_or_else(|| anyhow::anyhow!("Cannot determine data_dir from workspace_root"))?;
 
-        let index = jcowork_storage::WorkspaceIndex::new(&data_dir, &ctx.user_id).await?;
+        let index = jcowork_storage::WorkspaceIndex::cached(&data_dir, &ctx.user_id).await?;
         let chunks = index.get_file_chunks(&parsed.file_path).await?;
 
         if chunks.is_empty() {
@@ -201,7 +226,7 @@ impl Tool for DocChunksTool {
             }
             
             let content_preview = if chunk.content.len() > 200 {
-                format!("{}...", &chunk.content[..200])
+                format!("{}...", truncate_str(&chunk.content, 200))
             } else {
                 chunk.content.clone()
             };
@@ -236,7 +261,7 @@ mod tests {
             .execute(r#"{"query":"test"}"#, &ctx)
             .await
             .unwrap();
-        assert!(result.contains("No relevant") || result.contains("not be indexed"));
+        assert!(result.contains("No relevant content") || result.contains("No documents are indexed"));
     }
 
     #[tokio::test]

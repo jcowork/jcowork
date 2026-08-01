@@ -31,7 +31,7 @@ impl Tool for DocSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search uploaded documents in the workspace by keyword. Returns matching documents with file paths and content snippets. Documents are automatically indexed when uploaded (PDFs are parsed, text files are read directly)."
+        "Search uploaded documents by exact keyword using full-text search. Returns matching documents with file paths and snippets. NOTE: This uses keyword matching which may not work well for Chinese text. For semantic/meaning-based search, use doc_retrieve instead. Do not call this tool more than once — if no results, try doc_retrieve or doc_list."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -65,12 +65,29 @@ impl Tool for DocSearchTool {
             .map(|p| p.to_string_lossy().to_string())
             .ok_or_else(|| anyhow::anyhow!("Cannot determine data_dir from workspace_root"))?;
 
-        let index = jcowork_storage::WorkspaceIndex::new(&data_dir, &ctx.user_id).await?;
+        let index = jcowork_storage::WorkspaceIndex::cached(&data_dir, &ctx.user_id).await?;
 
         let results = index.search(&parsed.query, parsed.limit).await?;
 
         if results.is_empty() {
-            return Ok("No matching documents found.".to_string());
+            // When keyword search fails, list available documents and suggest alternatives
+            let all_docs = index.list_all(None).await.unwrap_or_default();
+            let mut output = format!("No documents matched the keyword \"{}\".\n\n", parsed.query);
+            
+            if !all_docs.is_empty() {
+                output.push_str(&format!("However, {} document(s) are indexed:\n", all_docs.len()));
+                for doc in &all_docs {
+                    output.push_str(&format!("- {} ({})\n", doc.filename, doc.content_type));
+                }
+                output.push_str("\nSuggestions:\n");
+                output.push_str("1. Use doc_retrieve with a semantic query (e.g., \"秋雨相关的文章\") for meaning-based search.\n");
+                output.push_str("2. Use doc_list to see all available documents.\n");
+                output.push_str("3. Try different keywords or broader terms.\n");
+            } else {
+                output.push_str("No documents are indexed yet. Upload documents through the Documents page.");
+            }
+            
+            return Ok(output);
         }
 
         let mut output = format!("Found {} document(s):\n\n", results.len());
@@ -139,7 +156,7 @@ impl Tool for DocListTool {
             .map(|p| p.to_string_lossy().to_string())
             .ok_or_else(|| anyhow::anyhow!("Cannot determine data_dir from workspace_root"))?;
 
-        let index = jcowork_storage::WorkspaceIndex::new(&data_dir, &ctx.user_id).await?;
+        let index = jcowork_storage::WorkspaceIndex::cached(&data_dir, &ctx.user_id).await?;
 
         let results = if let Some(ref dir) = parsed.as_ref().and_then(|p| p.dir.as_ref()) {
             index.list_by_directory(dir).await?
@@ -189,7 +206,7 @@ mod tests {
             .execute(r#"{"query":"test"}"#, &ctx)
             .await
             .unwrap();
-        assert!(result.contains("No matching documents"));
+        assert!(result.contains("No documents matched") || result.contains("No indexed documents"));
     }
 
     #[tokio::test]
