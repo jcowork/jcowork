@@ -40,6 +40,8 @@ const translations = {
     thinking: '思考中...',
     callingTool: '调用工具',
     toolCompleted: '工具完成',
+    stop: '停止',
+    generationStopped: '已停止生成',
 
     // Documents
     newFolder: '新建文件夹',
@@ -197,6 +199,8 @@ const translations = {
     thinking: 'Thinking...',
     callingTool: 'Calling tool',
     toolCompleted: 'Tool completed',
+    stop: 'Stop',
+    generationStopped: 'Generation stopped',
 
     // Documents
     newFolder: 'New Folder',

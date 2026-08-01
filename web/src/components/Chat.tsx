@@ -206,9 +206,18 @@ export default function Chat({ userId, token }: ChatProps) {
           return prev;
         });
       } else if (data.type === 'tool_call_start') {
+        let argsDisplay = '';
+        if (data.arguments) {
+          try {
+            const parsed = typeof data.arguments === 'string' ? JSON.parse(data.arguments) : data.arguments;
+            argsDisplay = '\nArguments: ' + JSON.stringify(parsed, null, 2);
+          } catch {
+            argsDisplay = '\nArguments: ' + String(data.arguments);
+          }
+        }
         setMessages((prev) => [
           ...prev,
-          { role: 'system', content: `Calling tool: ${data.name}`, timestamp: Date.now() },
+          { role: 'system', content: `Calling tool: ${data.name}${argsDisplay}`, timestamp: Date.now() },
         ]);
       } else if (data.type === 'tool_call_end') {
         const result = typeof data.result === 'string' ? data.result : JSON.stringify(data.result ?? '', null, 2);
@@ -227,6 +236,18 @@ export default function Chat({ userId, token }: ChatProps) {
           { role: 'system', content: `🔔 Reminder: ${data.message}`, timestamp: Date.now() },
         ]);
         playAlarm();
+      } else if (data.type === 'stopped') {
+        setStreaming(false);
+        setStatusMsg(t('generationStopped'));
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (last?.role === 'assistant' && last.streaming) {
+            return [...prev.slice(0, -1), { ...last, streaming: false }];
+          }
+          return prev;
+        });
+        // Clear status after 2s
+        setTimeout(() => setStatusMsg(''), 2000);
       } else if (data.type === 'error') {
         setStreaming(false);
         setStatusMsg('');
@@ -350,6 +371,11 @@ export default function Chat({ userId, token }: ChatProps) {
       alarmRef.current.ctx = null;
     }
     setAlarmActive(false);
+  };
+
+  const stopGeneration = () => {
+    if (!streaming) return;
+    wsRef.current?.send(JSON.stringify({ type: 'stop' }));
   };
 
   const sendMessage = () => {
@@ -932,20 +958,37 @@ export default function Chat({ userId, token }: ChatProps) {
               outline: 'none',
             }}
           />
-          <button
-            onClick={sendMessage}
-            disabled={!connected || streaming || !input.trim()}
-            style={{
-              padding: '8px 20px',
-              borderRadius: 8,
-              border: 'none',
-              background: connected ? '#1a73e8' : '#555',
-              color: '#fff',
-              cursor: connected ? 'pointer' : 'not-allowed',
-            }}
-          >
-            {t('send')}
-          </button>
+          {streaming ? (
+            <button
+              onClick={stopGeneration}
+              style={{
+                padding: '8px 20px',
+                borderRadius: 8,
+                border: 'none',
+                background: '#e53935',
+                color: '#fff',
+                cursor: 'pointer',
+                fontWeight: 600,
+              }}
+            >
+              ⬛ {t('stop')}
+            </button>
+          ) : (
+            <button
+              onClick={sendMessage}
+              disabled={!connected || !input.trim()}
+              style={{
+                padding: '8px 20px',
+                borderRadius: 8,
+                border: 'none',
+                background: connected && input.trim() ? '#1a73e8' : '#555',
+                color: '#fff',
+                cursor: connected && input.trim() ? 'pointer' : 'not-allowed',
+              }}
+            >
+              {t('send')}
+            </button>
+          )}
         </div>
       </div>
     </div>
