@@ -185,6 +185,70 @@ This creates a Python venv with:
 - **docling** — IBM's document understanding library for PDF to Markdown conversion
 - **sentence-transformers** — local embedding model for semantic document search
 
+### 3.5. Start Docling Service (for document parsing & vector search)
+
+The Docling service is required for PDF document parsing and semantic search. You can run it using Docker (recommended) or directly with Python.
+
+#### Option A: Using Docker (Recommended)
+
+```bash
+# Start only the Docling service
+docker-compose up -d docling
+
+# Or start both jcowork and docling together
+docker-compose up -d
+
+# Check service status
+docker-compose ps
+
+# View logs
+docker-compose logs -f docling
+```
+
+The Docling service will be available at `http://localhost:50060`.
+
+#### Option B: Run Directly with Python (Development)
+
+```bash
+# Activate the Python venv (created by make setup-python)
+source ~/.jcowork/venv/bin/activate  # Linux/macOS
+# or
+.\.jcowork\venv\Scripts\activate     # Windows
+
+# Start the Docling service
+cd services/docling
+python app.py
+```
+
+The service will start at `http://localhost:50060`. You should see:
+```
+Loading Docling converter...
+Docling converter loaded.
+Loading embedding model: paraphrase-multilingual-MiniLM-L12-v2
+Embedding model loaded. Dimension: 384
+INFO:     Uvicorn running on http://0.0.0.0:50060
+```
+
+#### Verify Docling Service
+
+```bash
+# Health check
+curl http://localhost:50060/health
+
+# Expected response:
+# {"status":"ok","docling_loaded":true,"embedding_loaded":true,"embedding_model":"paraphrase-multilingual-MiniLM-L12-v2","embedding_dim":384}
+```
+
+#### Configuration
+
+| Environment Variable | Default | Description |
+|---------------------|---------|-------------|
+| `DOCLING_SERVICE_URL` | `http://localhost:50060` | Docling service endpoint |
+| `EMBEDDING_DIM` | `384` | Embedding vector dimension |
+| `EMBEDDING_MODEL` | `paraphrase-multilingual-MiniLM-L12-v2` | Sentence transformers model |
+
+> **Note:** The Docling service downloads the embedding model on first run (~80MB). Subsequent starts are faster as the model is cached.
+
 ### 4. Build & Run (Development)
 
 ```bash

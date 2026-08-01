@@ -1,5 +1,54 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useT } from '../i18n';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+
+/** Image component that loads images via fetch with Bearer token auth.
+ *  Browser <img> tags don't send Authorization headers, so we fetch
+ *  the image manually and convert it to a blob URL. */
+function AuthImage({ src, token, alt, ...props }: { src: string; token: string; alt?: string } & React.ImgHTMLAttributes<HTMLImageElement>) {
+  const [blobUrl, setBlobUrl] = useState<string>('');
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    if (!src) return;
+    let cancelled = false;
+    fetch(src, { headers: { Authorization: `Bearer ${token}` } })
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.blob();
+      })
+      .then(blob => {
+        if (cancelled) return;
+        const url = URL.createObjectURL(blob);
+        setBlobUrl(url);
+        setError(false);
+      })
+      .catch(() => {
+        if (!cancelled) setError(true);
+      });
+    return () => { cancelled = true; };
+  }, [src, token]);
+
+  if (error) {
+    return <span style={{ color: '#666', fontSize: 12 }}>[Image load failed]</span>;
+  }
+
+  return (
+    <img
+      src={blobUrl || undefined}
+      alt={alt || 'Document image'}
+      style={{
+        maxWidth: '100%',
+        height: 'auto',
+        borderRadius: 6,
+        border: '1px solid #333',
+        margin: '12px 0',
+      }}
+      {...props}
+    />
+  );
+}
 
 interface FileEntry {
   name: string;
@@ -706,6 +755,82 @@ export default function Documents({ token }: DocumentsProps) {
                 renderExcelPreview(excelData, activeTable, setActiveTable, t)
               ) : previewMode === 'chunks' && docChunks ? (
                 renderChunksPreview(docChunks)
+              ) : previewPath.endsWith('.pdf') ? (
+                // PDF content: render as Markdown with image support
+                <div className="pdf-markdown-preview" style={{
+                  fontSize: 14,
+                  lineHeight: 1.7,
+                  color: '#c9d1d9',
+                }}>
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      img: ({ node, src, alt, ...props }) => {
+                        // Use AuthImage component to load images with Bearer token
+                        const filename = src ? src.split('/').pop() : '';
+                        const proxyUrl = `/api/workspace/doc/image?file_path=${encodeURIComponent(previewPath || '')}&filename=${encodeURIComponent(filename || '')}`;
+                        return <AuthImage src={proxyUrl} token={token} alt={alt || 'Document image'} {...props} />;
+                      },
+                      table: ({ children, ...props }) => (
+                        <div style={{ overflow: 'auto', border: '1px solid #333', borderRadius: 6, margin: '12px 0' }}>
+                          <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 13 }} {...props}>
+                            {children}
+                          </table>
+                        </div>
+                      ),
+                      th: ({ children, ...props }) => (
+                        <th style={{
+                          padding: '6px 12px', borderBottom: '1px solid #333',
+                          background: '#161b22', textAlign: 'left', color: '#c9d1d9', fontWeight: 600,
+                        }} {...props}>
+                          {children}
+                        </th>
+                      ),
+                      td: ({ children, ...props }) => (
+                        <td style={{ padding: '4px 12px', borderTop: '1px solid #21262d', color: '#c9d1d9' }} {...props}>
+                          {children}
+                        </td>
+                      ),
+                      h1: ({ children, ...props }) => (
+                        <h1 style={{ fontSize: 24, fontWeight: 700, color: '#e6edf3', borderBottom: '1px solid #333', paddingBottom: 8, marginTop: 24 }} {...props}>
+                          {children}
+                        </h1>
+                      ),
+                      h2: ({ children, ...props }) => (
+                        <h2 style={{ fontSize: 20, fontWeight: 600, color: '#e6edf3', borderBottom: '1px solid #333', paddingBottom: 6, marginTop: 20 }} {...props}>
+                          {children}
+                        </h2>
+                      ),
+                      h3: ({ children, ...props }) => (
+                        <h3 style={{ fontSize: 16, fontWeight: 600, color: '#e6edf3', marginTop: 16 }} {...props}>
+                          {children}
+                        </h3>
+                      ),
+                      code: ({ children, ...props }) => (
+                        <code style={{ background: '#161b22', padding: '2px 6px', borderRadius: 4, fontSize: '0.9em', color: '#f0883e' }} {...props}>
+                          {children}
+                        </code>
+                      ),
+                      pre: ({ children, ...props }) => (
+                        <pre style={{ background: '#161b22', padding: 12, borderRadius: 6, overflow: 'auto', fontSize: 13 }} {...props}>
+                          {children}
+                        </pre>
+                      ),
+                      blockquote: ({ children, ...props }) => (
+                        <blockquote style={{ borderLeft: '3px solid #1f6feb', paddingLeft: 16, margin: '12px 0', color: '#8b949e' }} {...props}>
+                          {children}
+                        </blockquote>
+                      ),
+                      a: ({ children, ...props }) => (
+                        <a style={{ color: '#58a6ff', textDecoration: 'none' }} {...props}>
+                          {children}
+                        </a>
+                      ),
+                    }}
+                  >
+                    {previewContent}
+                  </ReactMarkdown>
+                </div>
               ) : (
                 <pre style={{
                   margin: 0,

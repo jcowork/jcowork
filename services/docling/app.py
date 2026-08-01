@@ -13,6 +13,7 @@ Usage:
 
 import io
 import os
+import re
 import base64
 import hashlib
 import tempfile
@@ -66,8 +67,13 @@ async def lifespan(app: FastAPI):
     
     # Configure Docling pipeline
     pipeline_options = PdfPipelineOptions()
-    pipeline_options.do_ocr = False  # Disable OCR for now (faster)
+    pipeline_options.do_ocr = True  # Enable OCR to handle embedded fonts correctly
     pipeline_options.do_table_structure = True
+    pipeline_options.generate_picture_images = True  # Extract embedded images from PDF
+    pipeline_options.images_scale = 2.0  # Higher resolution images
+    # Configure OCR for Chinese text
+    from docling.datamodel.pipeline_options import OcrOptions, EasyOcrOptions
+    pipeline_options.ocr_options = EasyOcrOptions(lang=['ch_sim', 'en'])
     
     # Use proper FormatOption objects instead of plain dicts
     # Only configure PDF for now; other formats use defaults
@@ -168,30 +174,79 @@ async def convert_document(file: UploadFile = File(...)):
             table_md = table.export_to_markdown(doc=result.document)
             tables.append(table_md)
         
-        # Extract images
+        # Extract images and save to assets directory
         images = []
         for img_idx, img in enumerate(result.document.pictures):
-            # Get image data
-            img_data = img.image
+            # Get image data - img.image is an ImageRef object
+            # Access the actual PIL image via .pil_image attribute
+            img_ref = img.image
             
-            if img_data is not None:
+            if img_ref is not None:
+                # ImageRef has pil_image attribute containing the actual PIL Image
+                pil_img = getattr(img_ref, 'pil_image', None)
+                if pil_img is None:
+                    continue
+                
                 # Generate filename
                 img_filename = f"image_{img_idx:03d}.png"
                 img_path = doc_assets_dir / img_filename
                 
                 # Save image
-                img_data.save(img_path)
+                pil_img.save(img_path)
                 
-                # Get annotation (bounding box)
-                annotations = img.annotations
-                page_no = img.prov.page_no if hasattr(img, 'prov') else 0
+                # Get page number from prov (it's a list of ProvenanceItem)
+                page_no = 0
+                if hasattr(img, 'prov') and img.prov:
+                    page_no = img.prov[0].page_no if len(img.prov) > 0 else 0
                 
                 images.append({
                     "path": str(img_path),
                     "filename": img_filename,
                     "page": page_no,
-                    "alt_text": img.alt_text if hasattr(img, 'alt_text') else f"Image {img_idx + 1}",
+                    "alt_text": f"Image {img_idx + 1}",
+                    "index": img_idx,
                 })
+        
+        # Post-process markdown: replace <!-- image --> placeholders with actual image references
+        # Docling outputs "<!-- image -->" for each picture in order
+        if images:
+            img_counter = 0
+            def replace_image_placeholder(match):
+                nonlocal img_counter
+                if img_counter < len(images):
+                    img_info = images[img_counter]
+                    img_counter += 1
+                    return f"![{img_info['alt_text']}]({img_info['filename']})"
+                return match.group(0)
+            
+            markdown = re.sub(r'<!--\s*image\s*-->', replace_image_placeholder, markdown, flags=re.IGNORECASE)
+        
+        # Post-process: remove page numbers that Docling inserts into the markdown.
+        # These appear as standalone lines (e.g., "4") or embedded in text (e.g., "像 4 火").
+        # Strategy:
+        #   1. Remove lines that contain ONLY a number (standalone page numbers)
+        #   2. Remove numbers embedded between Chinese characters where they break up text
+        #      Pattern: Chinese_char + space(s) + digit(s) + space(s) + Chinese_char
+        #      This catches cases like "像 4 火" -> "像火", "变成 4 4 了" -> "变成了"
+        #      But preserves legitimate uses like "第4课", "17 猫", "(1)" etc.
+        
+        # Step 1: Remove standalone number lines
+        markdown = re.sub(r'^\s*\d+\s*$', '', markdown, flags=re.MULTILINE)
+        
+        # Step 2: Remove numbers embedded between Chinese characters
+        # Match: CJK char + whitespace + one or more (digits + whitespace) + (CJK char or CJK punctuation)
+        # This handles single page numbers ("像 4 火") and consecutive ones ("变成 4 4 了", "盼望着 4 4 4 ，")
+        # But preserves legitimate uses like "第4课", "17 猫", "(1)" etc.
+        markdown = re.sub(
+            r'([\u4e00-\u9fff])\s+((?:\d+\s+)+)([\u4e00-\u9fff\u3001\u3002\uff0c\uff1b\uff1a\uff01\uff1f\u201c\u201d\u2018\u2019\u300a\u300b\uff08\uff09])',
+            r'\1\3',
+            markdown
+        )
+        
+        # Clean up any resulting double/triple spaces from the removal
+        markdown = re.sub(r' {2,}', ' ', markdown)
+        
+        print(f"Extracted {len(images)} images from document, doc_hash={doc_hash}")
         
         # Build metadata
         metadata = {

@@ -131,6 +131,13 @@ impl WorkspaceIndex {
             .execute(pool)
             .await?;
 
+        // Add doc_hash column if it doesn't exist (for Docling image assets)
+        // SQLite doesn't support IF NOT EXISTS for ADD COLUMN, so we use a try-insert approach
+        sqlx::query("ALTER TABLE documents ADD COLUMN doc_hash TEXT DEFAULT ''")
+            .execute(pool)
+            .await
+            .ok(); // Ignore error if column already exists
+
         // --- Vector search tables ---
         
         // Document chunks table (for semantic search)
@@ -258,10 +265,14 @@ impl WorkspaceIndex {
         let size = metadata.len() as i64;
 
         // Extract text content based on file type
+        let mut doc_hash = String::new();
         let content_text = if ext == "pdf" {
             // Parse PDF using Docling service
             match self.parse_with_docling(&full_path.to_string_lossy(), file_path, workspace_root).await {
-                Ok(markdown) => markdown,
+                Ok((markdown, hash)) => {
+                    doc_hash = hash;
+                    markdown
+                }
                 Err(e) => {
                     warn!(file = %file_path, err = %e, "Failed to parse PDF with Docling");
                     format!("[PDF parse error: {}]", e)
@@ -310,15 +321,16 @@ impl WorkspaceIndex {
 
         sqlx::query(
             r#"
-            INSERT INTO documents (file_path, dir_path, filename, content_type, size, content_text, indexed_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            INSERT INTO documents (file_path, dir_path, filename, content_type, size, content_text, doc_hash, indexed_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             ON CONFLICT(file_path) DO UPDATE SET
                 dir_path = ?2,
                 filename = ?3,
                 content_type = ?4,
                 size = ?5,
                 content_text = ?6,
-                indexed_at = ?7
+                doc_hash = ?7,
+                indexed_at = ?8
             "#,
         )
         .bind(file_path)
@@ -327,6 +339,7 @@ impl WorkspaceIndex {
         .bind(content_type)
         .bind(size)
         .bind(&content_text)
+        .bind(&doc_hash)
         .bind(&now)
         .execute(&self.pool)
         .await?;
@@ -543,6 +556,19 @@ impl WorkspaceIndex {
         Ok(row.map(|r| r.0))
     }
 
+    /// Get the Docling document hash for a file (used for image asset URLs).
+    /// Returns None if the file is not indexed or has no doc_hash.
+    pub async fn get_doc_hash(&self, file_path: &str) -> Result<Option<String>> {
+        let row = sqlx::query_as::<_, (String,)>(
+            "SELECT doc_hash FROM documents WHERE file_path = ?1"
+        )
+        .bind(file_path)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.and_then(|r| if r.0.is_empty() { None } else { Some(r.0) }))
+    }
+
     /// List all indexed documents (optionally filtered by directory prefix).
     pub async fn list_all(&self, dir_prefix: Option<&str>) -> Result<Vec<IndexedDocument>> {
         let docs = if let Some(prefix) = dir_prefix {
@@ -599,8 +625,8 @@ impl WorkspaceIndex {
 
     /// Parse a PDF file using the Docling HTTP service.
     ///
-    /// Returns the structured Markdown content.
-    async fn parse_with_docling(&self, pdf_path: &str, file_path: &str, _workspace_root: &str) -> Result<String> {
+    /// Returns the structured Markdown content and the document hash (for image assets).
+    async fn parse_with_docling(&self, pdf_path: &str, file_path: &str, _workspace_root: &str) -> Result<(String, String)> {
         let service_url = std::env::var("DOCLING_SERVICE_URL")
             .unwrap_or_else(|_| "http://localhost:50060".to_string());
         
@@ -641,14 +667,21 @@ impl WorkspaceIndex {
         
         let result: ConvertResponse = response.json().await?;
         
+        // Extract doc_hash from metadata (used for image asset URLs)
+        let doc_hash = result.metadata.get("doc_hash")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        
         info!(
             file = %file_path,
             tables = result.tables.len(),
             images = result.images.len(),
+            doc_hash = %doc_hash,
             "PDF parsed with Docling"
         );
         
-        Ok(result.markdown)
+        Ok((result.markdown, doc_hash))
     }
 
     // ========== Vector Search (Chunk Storage) ==========

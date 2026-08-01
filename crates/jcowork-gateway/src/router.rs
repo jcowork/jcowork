@@ -172,6 +172,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/workspace/index/reindex", post(reindex_workspace_dir))
         .route("/api/workspace/vector/search", get(vector_search_chunks))
         .route("/api/workspace/doc/chunks", get(get_document_chunks))
+        .route("/api/workspace/doc/image", get(get_document_image))
         .route("/api/workspace/excel-db", get(get_excel_db_content))
         .route("/api/fetch-url", post(fetch_url))
         .route("/api/ws", get(ws_upgrade))
@@ -1880,6 +1881,122 @@ async fn get_document_chunks(
                 Json(serde_json::json!({ "error": format!("Failed to get chunks: {}", e) })),
             ).into_response()
         }
+    }
+}
+
+// --- Document Image Proxy API ---
+
+#[derive(Debug, Deserialize)]
+struct DocImageQuery {
+    file_path: String,
+    filename: String,
+}
+
+/// Proxy image assets from the Docling service.
+///
+/// Looks up the document's `doc_hash` from the workspace index, then proxies
+/// the image from the Docling service's `/assets/{doc_hash}/{filename}` endpoint.
+/// This allows the frontend to display PDF images without direct access to the Docling service.
+async fn get_document_image(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Query(query): Query<DocImageQuery>,
+) -> impl IntoResponse {
+    // Validate filename to prevent path traversal
+    if query.filename.contains("..") || query.filename.contains('/') || query.filename.contains('\\') {
+        return (
+            StatusCode::BAD_REQUEST,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            serde_json::to_vec(&serde_json::json!({ "error": "Invalid filename" })).unwrap_or_default(),
+        ).into_response();
+    }
+
+    // Look up doc_hash from workspace index
+    let index = match WorkspaceIndex::new(&state.data_dir, &auth_user.user_id).await {
+        Ok(idx) => idx,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                serde_json::to_vec(&serde_json::json!({ "error": format!("Failed to open index: {}", e) })).unwrap_or_default(),
+            ).into_response();
+        }
+    };
+
+    let doc_hash = match index.get_doc_hash(&query.file_path).await {
+        Ok(Some(hash)) => hash,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                serde_json::to_vec(&serde_json::json!({ "error": "Document not indexed or no images" })).unwrap_or_default(),
+            ).into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                serde_json::to_vec(&serde_json::json!({ "error": format!("Failed to get doc hash: {}", e) })).unwrap_or_default(),
+            ).into_response();
+        }
+    };
+
+    // Proxy to Docling service
+    let service_url = std::env::var("DOCLING_SERVICE_URL")
+        .unwrap_or_else(|_| "http://localhost:50060".to_string());
+    let image_url = format!("{}/assets/{}/{}", service_url, doc_hash, query.filename);
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                serde_json::to_vec(&serde_json::json!({ "error": format!("Failed to create HTTP client: {}", e) })).unwrap_or_default(),
+            ).into_response();
+        }
+    };
+
+    match client.get(&image_url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            // Get content type from Docling response
+            let content_type = resp.headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("image/png")
+                .to_string();
+
+            match resp.bytes().await {
+                Ok(bytes) => (
+                    StatusCode::OK,
+                    [
+                        (axum::http::header::CONTENT_TYPE, content_type),
+                        (axum::http::header::CACHE_CONTROL, "public, max-age=86400".to_string()),
+                    ],
+                    bytes.to_vec(),
+                ).into_response(),
+                Err(e) => (
+                    StatusCode::BAD_GATEWAY,
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    serde_json::to_vec(&serde_json::json!({ "error": format!("Failed to read image: {}", e) })).unwrap_or_default(),
+                ).into_response(),
+            }
+        }
+        Ok(resp) => {
+            (
+                StatusCode::NOT_FOUND,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                serde_json::to_vec(&serde_json::json!({ "error": format!("Image not found in Docling service (HTTP {})", resp.status()) })).unwrap_or_default(),
+            ).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            serde_json::to_vec(&serde_json::json!({ "error": format!("Failed to fetch image from Docling: {}", e) })).unwrap_or_default(),
+        ).into_response(),
     }
 }
 
