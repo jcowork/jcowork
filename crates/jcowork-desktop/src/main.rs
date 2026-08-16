@@ -92,13 +92,77 @@ fn set_web_dir_from_resources() {
     }
 }
 
+/// Extract bundled binaries from Resources to the MacOS directory.
+/// Tauri bundles resources in Contents/Resources/, but sidecar binaries
+/// need to be in Contents/MacOS/ to be executable.
+fn extract_sidecar_binaries() {
+    let Some(res_dir) = resolve_resource_dir() else { return };
+    let Some(exe_path) = std::env::current_exe().ok() else { return };
+    let Some(macos_dir) = exe_path.parent() else { return };
+
+    // Tauri encodes ".." as "_up_" in resource paths
+    let sidecar_candidates = [
+        res_dir.join("jcowork-report-search"),
+        res_dir.join("_up_").join("_up_").join("jcowork-report-search"),
+    ];
+
+    for src in &sidecar_candidates {
+        if src.exists() {
+            let dst = macos_dir.join("jcowork-report-search");
+            if !dst.exists() {
+                if let Err(e) = std::fs::copy(src, &dst) {
+                    warn!(error = %e, "Failed to copy sidecar binary to MacOS dir");
+                } else {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o755));
+                    }
+                    info!(path = %dst.display(), "Extracted sidecar binary to MacOS directory");
+                }
+            }
+            return;
+        }
+    }
+}
+
+/// Set JCWORK_SCRIPTS_DIR to the bundled scripts directory.
+fn set_scripts_dir_from_resources() {
+    if std::env::var("JCWORK_SCRIPTS_DIR").is_ok() {
+        return;
+    }
+    if let Some(res_dir) = resolve_resource_dir() {
+        // Check for web_search.py in resources
+        let candidates = [
+            res_dir.join("web_search.py"),
+            res_dir.join("_up_").join("_up_").join("web_search.py"),
+        ];
+        for script in &candidates {
+            if script.exists() {
+                // Set the parent directory as scripts dir
+                if let Some(parent) = script.parent() {
+                    unsafe { std::env::set_var("JCWORK_SCRIPTS_DIR", parent.to_str().unwrap_or("")); }
+                    info!(path = %parent.display(), "Set JCWORK_SCRIPTS_DIR from app resources");
+                }
+                return;
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     // ── 1. Load .env ──
     load_env_from_resources();
 
-    // ── 2. Set web dir from bundle resources ──
+    // ── 2. Extract sidecar binaries from Resources to MacOS directory ──
+    extract_sidecar_binaries();
+
+    // ── 3. Set web dir from bundle resources ──
     set_web_dir_from_resources();
+
+    // ── 4. Set scripts dir from bundle resources ──
+    set_scripts_dir_from_resources();
 
     // ── 2. Initialize tracing ──
     tracing_subscriber::fmt()

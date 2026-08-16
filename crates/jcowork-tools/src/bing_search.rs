@@ -96,18 +96,38 @@ impl Tool for WebSearchTool {
 
         let python_bin = resolve_python_bin();
 
-        // Resolve script path: try absolute first, then relative to workspace root
+        // Resolve script path: try JCWORK_SCRIPTS_DIR env var first (for bundled app),
+        // then absolute path, then relative to workspace root, then next to binary
         let script_path = {
-            let abs = std::path::Path::new(&self.workspace_root).join(SEARCH_SCRIPT);
-            if abs.exists() {
-                abs.to_string_lossy().to_string()
+            // Check JCWORK_SCRIPTS_DIR (set by desktop app from bundle resources)
+            if let Ok(scripts_dir) = std::env::var("JCWORK_SCRIPTS_DIR") {
+                let p = std::path::Path::new(&scripts_dir).join("web_search.py");
+                if p.exists() {
+                    p.to_string_lossy().to_string()
+                } else {
+                    // Fallback to other locations
+                    let abs = std::path::Path::new(&self.workspace_root).join(SEARCH_SCRIPT);
+                    if abs.exists() {
+                        abs.to_string_lossy().to_string()
+                    } else {
+                        let exe_dir = std::env::current_exe()
+                            .ok()
+                            .and_then(|p| p.parent().map(|d| d.to_string_lossy().to_string()))
+                            .unwrap_or_default();
+                        std::path::Path::new(&exe_dir).join(SEARCH_SCRIPT).to_string_lossy().to_string()
+                    }
+                }
             } else {
-                // Fallback: try next to the binary
-                let exe_dir = std::env::current_exe()
-                    .ok()
-                    .and_then(|p| p.parent().map(|d| d.to_string_lossy().to_string()))
-                    .unwrap_or_default();
-                std::path::Path::new(&exe_dir).join(SEARCH_SCRIPT).to_string_lossy().to_string()
+                let abs = std::path::Path::new(&self.workspace_root).join(SEARCH_SCRIPT);
+                if abs.exists() {
+                    abs.to_string_lossy().to_string()
+                } else {
+                    let exe_dir = std::env::current_exe()
+                        .ok()
+                        .and_then(|p| p.parent().map(|d| d.to_string_lossy().to_string()))
+                        .unwrap_or_default();
+                    std::path::Path::new(&exe_dir).join(SEARCH_SCRIPT).to_string_lossy().to_string()
+                }
             }
         };
 

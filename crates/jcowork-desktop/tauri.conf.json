@@ -40,6 +40,8 @@
     },
     "resources": [
       "providers.json",
+      "jcowork-report-search",
+      "web_search.py",
       "../../web/dist/**/*"
     ]
   }

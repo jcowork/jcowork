@@ -2,6 +2,10 @@
 target/
 **/*.rs.bk
 
+# Tauri desktop app sidecar binaries (platform-specific, built before packaging)
+crates/jcowork-desktop/jcowork-report-search
+crates/jcowork-desktop/*.exe
+
 # Node
 web/node_modules/
 web/dist/
