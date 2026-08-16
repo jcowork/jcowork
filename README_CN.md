@@ -163,6 +163,12 @@ powershell -ExecutionPolicy Bypass -File scripts\stop.ps1
 3. 从「应用程序」或 Spotlight 启动 Jcowork
 4. 应用会自动启动后端服务并打开对话窗口
 
+> **注意：** 如果 macOS 提示“Jcowork 已损坏，无法打开”，在终端运行以下命令移除隔离标记：
+> ```bash
+> xattr -cr /Applications/Jcowork.app
+> ```
+> 这是因为应用尚未经过 Apple 公证。运行命令后即可正常打开。
+
 **Windows 安装：**
 1. 下载 `.msi` 或 `.exe` 安装程序
 2. 运行安装程序并按提示完成安装

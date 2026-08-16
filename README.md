@@ -166,6 +166,12 @@ A native desktop application is available for macOS and Windows, powered by [Tau
 3. Launch Jcowork from Applications (or Spotlight)
 4. The app starts the backend automatically and opens the chat window
 
+> **Note:** If macOS shows "Jcowork is damaged and can't be opened", run this command in Terminal to remove the quarantine flag:
+> ```bash
+> xattr -cr /Applications/Jcowork.app
+> ```
+> This happens because the app is not yet notarized by Apple. After running the command, the app will open normally.
+
 **Windows installation:**
 1. Download the `.msi` or `.exe` installer
 2. Run the installer and follow the prompts

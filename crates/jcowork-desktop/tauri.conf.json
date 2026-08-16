@@ -1,6 +1,6 @@
 {
   "productName": "Jcowork",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "com.jcowork.desktop",
   "build": {
     "devUrl": "http://localhost:3000"
@@ -30,6 +30,13 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "entitlements": null,
+      "exceptionDomain": "",
+      "frameworks": [],
+      "providerShortName": null,
+      "signingIdentity": null
+    }
   }
 }
