@@ -69,10 +69,36 @@ fn find_providers_json() -> Option<String> {
     None
 }
 
+/// Set JCWORK_WEB_DIR to the bundled frontend resources so the Axum server
+/// can find the static files when running from the app bundle.
+fn set_web_dir_from_resources() {
+    if std::env::var("JCWORK_WEB_DIR").is_ok() {
+        return; // Already set externally
+    }
+    if let Some(res_dir) = resolve_resource_dir() {
+        // Tauri encodes ".." as "_up_" in resource paths
+        let candidates = [
+            res_dir.join("web").join("dist"),
+            res_dir.join("_up_").join("_up_").join("web").join("dist"),
+        ];
+        for web_dist in &candidates {
+            if web_dist.exists() {
+                // SAFETY: We set this env var once at startup before any threads are spawned.
+                unsafe { std::env::set_var("JCWORK_WEB_DIR", web_dist.to_str().unwrap_or("")); }
+                info!(path = %web_dist.display(), "Set JCWORK_WEB_DIR from app resources");
+                return;
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     // ── 1. Load .env ──
     load_env_from_resources();
+
+    // ── 2. Set web dir from bundle resources ──
+    set_web_dir_from_resources();
 
     // ── 2. Initialize tracing ──
     tracing_subscriber::fmt()

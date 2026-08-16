@@ -39,7 +39,8 @@
       "signingIdentity": null
     },
     "resources": [
-      "providers.json"
+      "providers.json",
+      "../../web/dist/**/*"
     ]
   }
 }
