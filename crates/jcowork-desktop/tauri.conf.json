@@ -37,6 +37,9 @@
       "frameworks": [],
       "providerShortName": null,
       "signingIdentity": null
-    }
+    },
+    "resources": [
+      "providers.json"
+    ]
   }
 }

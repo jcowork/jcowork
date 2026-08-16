@@ -78,10 +78,20 @@ impl LlmRouter {
     ///
     /// Also reads optional base URL overrides: `DEEPSEEK_BASE_URL`, `QWEN_BASE_URL`, etc.
     pub fn from_env() -> Result<Self> {
+        Self::from_env_with_config_path(None)
+    }
+
+    /// Like `from_env` but allows specifying a custom path to providers.json.
+    /// Used by the desktop app to load from the Tauri resource bundle.
+    pub fn from_env_with_config_path(config_path: Option<&str>) -> Result<Self> {
         let mut router = Self::new();
 
         // Load provider configs from JSON file
-        let configs = Self::load_provider_configs()?;
+        let configs = if let Some(path) = config_path {
+            Self::load_provider_configs_from_path(path)?
+        } else {
+            Self::load_provider_configs()?
+        };
         router.provider_configs = configs.clone();
 
         for config in &configs {
@@ -114,7 +124,7 @@ impl LlmRouter {
     }
 
     /// Load provider configs from providers.json.
-    /// Returns an error if no providers.json file is found.
+    /// Returns an empty list if no file is found.
     fn load_provider_configs() -> Result<Vec<ProviderConfig>> {
         // Try multiple paths
         let paths = [
@@ -137,10 +147,19 @@ impl LlmRouter {
             }
         }
 
-        Err(anyhow::anyhow!(
-            "providers.json not found. Searched: {}",
-            paths.join(", ")
-        ))
+        // No providers.json found — return empty list instead of error.
+        // The desktop app bundles providers.json as a resource; the caller
+        // should also try the Tauri resource path.
+        tracing::warn!("providers.json not found, using empty provider list");
+        Ok(vec![])
+    }
+
+    /// Load provider configs from a specific file path.
+    fn load_provider_configs_from_path(path: &str) -> Result<Vec<ProviderConfig>> {
+        let content = std::fs::read_to_string(path)?;
+        let configs: Vec<ProviderConfig> = serde_json::from_str(&content)?;
+        tracing::info!(path = %path, "Loaded provider configs from specified path");
+        Ok(configs)
     }
 
     /// Get a provider by model string (format: "provider:model" or just "model").

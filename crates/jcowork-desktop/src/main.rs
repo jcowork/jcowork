@@ -1,15 +1,14 @@
 //! Jcowork Desktop — Tauri v2 桌面应用
 //!
 //! 启动流程:
-//! 1. 初始化 tracing + 加载 .env
+//! 1. 初始化 tracing + 加载 .env（优先从 app bundle 资源目录）
 //! 2. 复用 jcowork-server 的初始化逻辑创建 AppState + Axum app
 //! 3. 在后台 tokio task 中启动 Axum 服务器 (localhost:3000)
 //! 4. 等待服务器就绪后，通过 Tauri 打开窗口加载 http://localhost:3000
 
-use anyhow::Result;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use jcowork_gateway::{
     auth::AuthConfig,
@@ -22,12 +21,60 @@ use jcowork_server::config::ServerConfig;
 use jcowork_skills::SkillManager;
 use jcowork_storage::FeishuConfigStore;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Load .env file
-    let _ = dotenvy::dotenv();
+/// Resolve the Tauri resource directory relative to the current executable.
+///
+/// macOS bundle layout:
+///   Jcowork.app/Contents/MacOS/jcowork-desktop   ← current_exe
+///   Jcowork.app/Contents/Resources/               ← resource_dir
+fn resolve_resource_dir() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    // Go up from MacOS/ to Contents/, then into Resources/
+    exe.parent()?
+        .parent()?
+        .join("Resources")
+        .into()
+}
 
-    // Initialize tracing
+/// Try to load .env from the app bundle resource directory.
+fn load_env_from_resources() {
+    if let Some(res_dir) = resolve_resource_dir() {
+        let env_path = res_dir.join(".env");
+        if env_path.exists() {
+            if let Err(e) = dotenvy::from_path(&env_path) {
+                warn!(path = %env_path.display(), error = %e, "Failed to load .env from resources");
+            } else {
+                info!(path = %env_path.display(), "Loaded .env from app resources");
+            }
+            return;
+        }
+    }
+    // Fallback: try default locations
+    let _ = dotenvy::dotenv();
+}
+
+/// Find providers.json — first in resource dir, then standard paths.
+fn find_providers_json() -> Option<String> {
+    if let Some(res_dir) = resolve_resource_dir() {
+        let path = res_dir.join("providers.json");
+        if path.exists() {
+            return path.to_str().map(|s| s.to_string());
+        }
+    }
+    // Fallback: check standard paths
+    for p in &["providers.json", "config/providers.json"] {
+        if std::path::Path::new(p).exists() {
+            return Some(p.to_string());
+        }
+    }
+    None
+}
+
+#[tokio::main]
+async fn main() {
+    // ── 1. Load .env ──
+    load_env_from_resources();
+
+    // ── 2. Initialize tracing ──
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -35,69 +82,119 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    // Load configuration
+    info!("Starting Jcowork Desktop");
+
+    // ── 3. Load configuration ──
     let config = ServerConfig::from_env();
     info!(
         ?config.host,
         ?config.port,
         ?config.data_dir,
         ?config.default_model,
-        "Starting Jcowork Desktop"
+        "Server configuration loaded"
     );
 
-    // Create data directory
+    // ── 4. Create data directory ──
     let data_dir = shellexpand::tilde(&config.data_dir).to_string();
-    tokio::fs::create_dir_all(&data_dir).await?;
+    if let Err(e) = tokio::fs::create_dir_all(&data_dir).await {
+        error!(error = %e, "Failed to create data directory");
+        show_error_and_exit(&format!("无法创建数据目录: {}\n\n{}", data_dir, e));
+        return;
+    }
 
-    // Initialize LLM router from environment
-    let llm_router = jcowork_llm::LlmRouter::from_env()?;
+    // ── 5. Initialize LLM router ──
+    let llm_router = match find_providers_json() {
+        Some(path) => {
+            info!(path = %path, "Loading providers.json from resource path");
+            match jcowork_llm::LlmRouter::from_env_with_config_path(Some(&path)) {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(error = %e, "Failed to load providers from {}, using empty router", path);
+                    jcowork_llm::LlmRouter::new()
+                }
+            }
+        }
+        None => {
+            warn!("providers.json not found, using empty LLM router");
+            jcowork_llm::LlmRouter::new()
+        }
+    };
     info!(
         providers = ?llm_router.available_providers(),
         "LLM providers registered"
     );
 
-    // Initialize memory provider (SQLite)
+    // ── 6. Initialize memory provider (SQLite) ──
     let db_path = format!("{}/jcowork.db", data_dir);
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+    let pool = match sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(10)
         .connect(&format!("sqlite:{}?mode=rwc", db_path))
-        .await?;
-    jcowork_storage::migration::run_migrations(&pool).await?;
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            error!(error = %e, "Failed to connect to SQLite");
+            show_error_and_exit(&format!("无法连接数据库: {}\n\n{}", db_path, e));
+            return;
+        }
+    };
+
+    if let Err(e) = jcowork_storage::migration::run_migrations(&pool).await {
+        error!(error = %e, "Failed to run database migrations");
+        show_error_and_exit(&format!("数据库迁移失败:\n\n{}", e));
+        return;
+    }
+
     let memory_provider = BuiltinMemoryProvider::new(pool.clone());
-    memory_provider.init().await?;
+    if let Err(e) = memory_provider.init().await {
+        warn!(error = %e, "Memory provider init failed, continuing without memory");
+    }
     info!(db = %db_path, "Memory database initialized");
 
     let mut memory_manager = MemoryManager::new();
     memory_manager.add_provider(Arc::new(memory_provider));
     let memory_manager = Arc::new(memory_manager);
 
-    // Initialize skill manager
+    // ── 7. Initialize skill manager ──
     let skill_manager = Arc::new(SkillManager::new(pool.clone()));
     info!("Skill manager initialized");
 
-    // Initialize cron scheduler
+    // ── 8. Initialize cron scheduler ──
     let cron_scheduler = Arc::new(jcowork_cron::CronScheduler::new());
 
-    // Initialize user store
-    let user_store = Arc::new(jcowork_storage::UserStore::new(&data_dir).await?);
+    // ── 9. Initialize user store ──
+    let user_store = match jcowork_storage::UserStore::new(&data_dir).await {
+        Ok(s) => Arc::new(s),
+        Err(e) => {
+            error!(error = %e, "Failed to initialize user store");
+            show_error_and_exit(&format!("用户存储初始化失败:\n\n{}", e));
+            return;
+        }
+    };
     info!("User store initialized");
 
-    // Initialize log writer
+    // ── 10. Initialize log writer ──
     let log_dir = format!("{}/logs", data_dir);
-    let log_writer = Arc::new(LogWriter::new(log_dir.into()).await?);
+    let log_writer = match LogWriter::new(log_dir.into()).await {
+        Ok(w) => Arc::new(w),
+        Err(e) => {
+            warn!(error = %e, "Log writer init failed, continuing without logging");
+            Arc::new(LogWriter::new_disabled())
+        }
+    };
     info!("Log writer initialized");
 
-    // Initialize tool registry
+    // ── 11. Initialize tool registry ──
     let tool_registry = jcowork_gateway::ws::build_tool_registry(
         cron_scheduler.clone(),
         memory_manager.clone(),
         log_writer.clone(),
     );
 
-    // Initialize session manager
+    // ── 12. Initialize session manager ──
     let session_manager = Arc::new(SessionManager::new());
 
-    // Build app state
+    // ── 13. Build app state ──
     let auth_config = AuthConfig {
         jwt_secret: config.jwt_secret.clone(),
         token_duration_hours: config.token_duration_hours,
@@ -119,15 +216,22 @@ async fn main() -> Result<()> {
         data_dir: data_dir.clone(),
     };
 
-    // Build router
+    // ── 14. Build router ──
     let app = router::build_router(state).layer(CorsLayer::permissive());
 
-    // Spawn the report-search sidecar service
+    // ── 15. Spawn the report-search sidecar service ──
     spawn_report_search_sidecar(&data_dir);
 
-    // Start Axum server on localhost:3000 in background
+    // ── 16. Start Axum server on localhost:3000 in background ──
     let addr = "127.0.0.1:3000";
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            error!(error = %e, addr = %addr, "Failed to bind server port");
+            show_error_and_exit(&format!("无法启动服务器 (端口 {} 可能被占用):\n\n{}", addr, e));
+            return;
+        }
+    };
     info!(%addr, "Jcowork Desktop server listening");
 
     tokio::spawn(async move {
@@ -136,17 +240,33 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Wait for server to be ready
+    // ── 17. Wait for server to be ready ──
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     info!("Server ready, launching Tauri window");
 
-    // Launch Tauri desktop app
-    tauri::Builder::default()
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+    // ── 18. Launch Tauri desktop app ─
+    if let Err(e) = tauri::Builder::default().run(tauri::generate_context!()) {
+        error!(error = %e, "Tauri application error");
+        eprintln!("Tauri error: {}", e);
+    }
 
     info!("Jcowork Desktop stopped");
-    Ok(())
+}
+
+/// Show a native error dialog and exit.
+fn show_error_and_exit(msg: &str) {
+    eprintln!("\n{}", msg);
+    // Try to show a native dialog via osascript (macOS)
+    let _ = std::process::Command::new("osascript")
+        .args([
+            "-e",
+            &format!(
+                "display dialog \"{}\" buttons {{\"OK\"}} default button \"OK\" with icon stop with title \"Jcowork 启动失败\"",
+                msg.replace('"', "\\\"").replace('\n', "\\n")
+            ),
+        ])
+        .output();
+    std::process::exit(1);
 }
 
 /// Spawn the jcowork-report-search binary as a background sidecar.

@@ -49,6 +49,20 @@ impl LogWriter {
         })
     }
 
+    /// Create a no-op LogWriter that silently discards all entries.
+    /// Used as fallback when the real log directory cannot be created.
+    pub fn new_disabled() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(LogWriterInner {
+                log_dir: PathBuf::from("/dev/null"),
+                current_file: None,
+                current_date: String::new(),
+                current_suffix: 0,
+                current_size: 0,
+            })),
+        }
+    }
+
     /// Write a log entry. Thread-safe via internal mutex.
     pub async fn write(&self, entry: &LogEntry) {
         let mut inner = self.inner.lock().await;
