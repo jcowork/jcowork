@@ -29,6 +29,16 @@ impl FileStore {
 
     /// Validate that a path is within the workspace root.
     fn validate_path(&self, path: &str) -> Result<PathBuf> {
+        // Reject absolute paths early — all tool paths must be relative to workspace.
+        if path.starts_with('/') || path.starts_with('\\')
+            || (path.len() >= 2 && path.as_bytes()[0].is_ascii_alphabetic() && path.as_bytes()[1] == b':')
+        {
+            anyhow::bail!(
+                "Absolute paths are not allowed: '{}'. Use a path relative to the workspace root (e.g. just the filename like '江家现金流.xlsx').",
+                path
+            );
+        }
+
         let resolved = self.workspace_root.join(path);
 
         // Check for .. components first (prevents traversal attacks)

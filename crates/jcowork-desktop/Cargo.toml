@@ -1,0 +1,33 @@
+[package]
+name = "jcowork-desktop"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "jcowork-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { workspace = true }
+
+[dependencies]
+jcowork-server = { workspace = true }
+jcowork-gateway = { workspace = true }
+jcowork-memory = { workspace = true }
+jcowork-skills = { workspace = true }
+jcowork-tools = { workspace = true }
+jcowork-storage = { workspace = true }
+jcowork-llm = { workspace = true }
+jcowork-cron = { workspace = true }
+jcowork-logs = { workspace = true }
+tauri = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+sqlx = { workspace = true }
+dotenvy = { workspace = true }
+shellexpand = { workspace = true }
+dashmap = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }

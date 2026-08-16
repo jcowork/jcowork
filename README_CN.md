@@ -72,6 +72,7 @@ jcowork/
 │   ├── jcowork-llm/                     # LlmProvider trait、JSON 驱动配置、SSE 流式
 │   ├── jcowork-storage/                 # 数据库、迁移、文件存储
 │   ├── jcowork-cron/                    # 定时任务调度器
+│   ├── jcowork-desktop/                 # Tauri v2 桌面应用（Mac/Windows）
 │   ├── jcowork-feishu/                  # 飞书/LocalizedMessage机器人集成
 │   └── jcowork-logs/                    # JSONL 日志写入器
 ├── web/                               # React + Vite 前端
@@ -145,6 +146,49 @@ powershell -ExecutionPolicy Bypass -File scripts\stop.ps1
 ```
 
 浏览器打开 http://localhost:3000 即可。下面的手动步骤面向希望自己掌控过程的开发者。
+
+### 桌面应用（macOS / Windows）
+
+基于 [Tauri v2](https://tauri.app/) 构建的原生桌面应用，将完整的后端 + 前端打包为单一可安装程序 — 无需 Docker、Python 或 Node.js。
+
+**下载安装包：**
+
+| 平台 | 格式 | 文件 |
+|------|------|------|
+| macOS (Apple Silicon) | `.dmg` | `Jcowork_0.1.0_aarch64.dmg` |
+| macOS (Intel) | `.dmg` | `Jcowork_0.1.0_x64.dmg` |
+| Windows (64位) | `.msi` / `.exe` | `Jcowork_0.1.0_x64.msi` / `Jcowork_0.1.0_x64-setup.exe` |
+
+**macOS 安装：**
+1. 下载并打开 `.dmg` 文件
+2. 将 `Jcowork.app` 拖入「应用程序」文件夹
+3. 从「应用程序」或 Spotlight 启动 Jcowork
+4. 应用会自动启动后端服务并打开对话窗口
+
+**Windows 安装：**
+1. 下载 `.msi` 或 `.exe` 安装程序
+2. 运行安装程序并按提示完成安装
+3. 从开始菜单启动 Jcowork
+
+**从源码构建：**
+
+```bash
+# 前置要求：Rust 1.85+、Node.js 20+
+cargo install tauri-cli --version "^2"
+
+# 构建前端
+cd web && npm install && npm run build && cd ..
+
+# 构建桌面应用
+cd crates/jcowork-desktop
+cargo tauri build
+
+# 输出：
+#   target/release/bundle/dmg/Jcowork_0.1.0_aarch64.dmg   (macOS)
+#   target/release/bundle/msi/Jcowork_0.1.0_x64.msi        (Windows)
+```
+
+> **注意：** 桌面应用需要在 `.env` 中配置至少一个 LLM API Key。Docling PDF 解析服务为可选，如可用会自动连接。
 
 ### 前置要求
 
@@ -786,6 +830,7 @@ Agent: ✅ 定时任务已创建！计划：0 9 * * * — 每天早上9:00提醒
 | LLM 客户端 | reqwest + SSE 流式（5 个提供者） |
 | 并发 | DashMap, mpsc channels |
 | 前端 | React + Vite + TypeScript |
+| 桌面应用 | Tauri v2（原生 macOS/Windows） |
 
 ## 许可证
 

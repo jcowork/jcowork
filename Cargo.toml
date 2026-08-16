@@ -13,6 +13,7 @@ members = [
     "crates/jcowork-logs",
     "crates/jcowork-feishu",
     "crates/jcowork-report-search",
+    "crates/jcowork-desktop",
 ]
 
 [workspace.package]
@@ -107,3 +108,7 @@ hex = "0.4"
 
 # Test utilities
 tempfile = "3"
+
+# Desktop app
+tauri = { version = "2", features = [] }
+tauri-build = { version = "2", features = [] }

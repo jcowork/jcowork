@@ -2068,16 +2068,28 @@ async fn get_excel_db_content(
     }
 
     let db_path = jcowork_storage::excel_db::db_path_for(&state.data_dir, &auth_user.user_id, &query.path);
+    let src = std::path::Path::new(&workspace_root).join(&query.path);
+    if !src.exists() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "File not found in workspace" })),
+        ).into_response();
+    }
 
-    // Build the database on demand when missing (older uploads)
-    if !db_path.exists() {
-        let src = std::path::Path::new(&workspace_root).join(&query.path);
-        if !src.exists() {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": "File not found in workspace" })),
-            ).into_response();
+    // Rebuild the database when missing OR when the source Excel file is newer
+    let needs_import = if !db_path.exists() {
+        true
+    } else {
+        // Compare modification times: rebuild if source is newer than db
+        let src_modified = std::fs::metadata(&src).and_then(|m| m.modified()).ok();
+        let db_modified = std::fs::metadata(&db_path).and_then(|m| m.modified()).ok();
+        match (src_modified, db_modified) {
+            (Some(s), Some(d)) => s > d,
+            _ => true, // If we can't determine times, rebuild to be safe
         }
+    };
+
+    if needs_import {
         if let Err(e) = jcowork_storage::excel_db::import_excel(
             &state.data_dir,
             &auth_user.user_id,

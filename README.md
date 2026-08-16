@@ -72,6 +72,7 @@ jcowork/
 │   ├── jcowork-llm/                     # LlmProvider trait, JSON-driven provider config, SSE streaming
 │   ├── jcowork-storage/                 # Database, Migrations, FileStore
 │   ├── jcowork-cron/                    # Cron scheduler
+│   ├── jcowork-desktop/                 # Tauri v2 desktop app (Mac/Windows)
 │   ├── jcowork-feishu/                  # Feishu/Lark bot integration
 │   └── jcowork-logs/                    # JSONL log writer
 ├── web/                               # React + Vite frontend
@@ -148,6 +149,49 @@ powershell -ExecutionPolicy Bypass -File scripts\stop.ps1
 
 Open http://localhost:3000 in your browser. The manual steps below are for
 developers who prefer to run things themselves.
+
+### Desktop App (macOS / Windows)
+
+A native desktop application is available for macOS and Windows, powered by [Tauri v2](https://tauri.app/). The desktop app bundles the entire backend + frontend into a single installable package — no Docker, Python, or Node.js required.
+
+**Download pre-built installers:**
+
+| Platform | Format | File |
+|----------|--------|------|
+| macOS (Apple Silicon) | `.dmg` | `Jcowork_0.1.0_aarch64.dmg` |
+| macOS (Intel) | `.dmg` | `Jcowork_0.1.0_x64.dmg` |
+| Windows (64-bit) | `.msi` / `.exe` | `Jcowork_0.1.0_x64.msi` / `Jcowork_0.1.0_x64-setup.exe` |
+
+**macOS installation:**
+1. Download and open the `.dmg` file
+2. Drag `Jcowork.app` to your Applications folder
+3. Launch Jcowork from Applications (or Spotlight)
+4. The app starts the backend automatically and opens the chat window
+
+**Windows installation:**
+1. Download the `.msi` or `.exe` installer
+2. Run the installer and follow the prompts
+3. Launch Jcowork from the Start Menu
+
+**Build from source:**
+
+```bash
+# Prerequisites: Rust 1.85+, Node.js 20+
+cargo install tauri-cli --version "^2"
+
+# Build frontend
+cd web && npm install && npm run build && cd ..
+
+# Build desktop app
+cd crates/jcowork-desktop
+cargo tauri build
+
+# Output:
+#   target/release/bundle/dmg/Jcowork_0.1.0_aarch64.dmg   (macOS)
+#   target/release/bundle/msi/Jcowork_0.1.0_x64.msi        (Windows)
+```
+
+> **Note:** The desktop app requires at least one LLM API key configured in `.env`. The Docling PDF parsing service is optional and runs separately if available.
 
 ### Prerequisites
 
@@ -923,6 +967,7 @@ Agent: ✅ Cron job created! Schedule: 0 9 * * * — 每天早上9:00提醒你�
 | LLM client | reqwest + SSE streaming (5 providers) |
 | Concurrency | DashMap, mpsc channels |
 | Frontend | React + Vite + TypeScript |
+| Desktop | Tauri v2 (native macOS/Windows) |
 
 ## License
 
