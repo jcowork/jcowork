@@ -108,6 +108,7 @@ export default function Documents({ token }: DocumentsProps) {
   const [activeTable, setActiveTable] = useState(0);
   const [docChunks, setDocChunks] = useState<DocChunk[] | null>(null);
   const [previewMode, setPreviewMode] = useState<'content' | 'chunks'>('content');
+  const [htmlViewMode, setHtmlViewMode] = useState<'preview' | 'source'>('preview');
   // Pagination state for long documents (PDF preview "load more on scroll")
   const [previewPaging, setPreviewPaging] = useState<{ nextOffset: number } | null>(null);
   const [previewLoadingMore, setPreviewLoadingMore] = useState(false);
@@ -241,6 +242,7 @@ export default function Documents({ token }: DocumentsProps) {
     setExcelData(null);
     setDocChunks(null);
     setPreviewMode('content');
+    setHtmlViewMode('preview');
     setPreviewPaging(null);
     setPreviewLoadingMore(false);
 
@@ -697,20 +699,53 @@ export default function Documents({ token }: DocumentsProps) {
               </span>
               <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
                 {previewPath.endsWith('.html') && (
-                  <button
-                    onClick={() => openInNewTab(previewPath)}
-                    style={{
-                      padding: '3px 10px',
-                      borderRadius: 4,
-                      border: '1px solid #1f6feb',
-                      background: 'transparent',
-                      color: '#58a6ff',
-                      cursor: 'pointer',
-                      fontSize: 12,
-                    }}
-                  >
-                    {t('openInBrowser')}
-                  </button>
+                  <>
+                    <div style={{ display: 'flex', borderRadius: 4, border: '1px solid #555', overflow: 'hidden' }}>
+                      <button
+                        onClick={() => setHtmlViewMode('preview')}
+                        style={{
+                          padding: '3px 10px',
+                          border: 'none',
+                          borderRight: '1px solid #555',
+                          background: htmlViewMode === 'preview' ? '#1f6feb' : 'transparent',
+                          color: htmlViewMode === 'preview' ? '#fff' : '#aaa',
+                          cursor: 'pointer',
+                          fontSize: 12,
+                          fontWeight: htmlViewMode === 'preview' ? 600 : 400,
+                        }}
+                      >
+                        {t('preview')}
+                      </button>
+                      <button
+                        onClick={() => setHtmlViewMode('source')}
+                        style={{
+                          padding: '3px 10px',
+                          border: 'none',
+                          background: htmlViewMode === 'source' ? '#1f6feb' : 'transparent',
+                          color: htmlViewMode === 'source' ? '#fff' : '#aaa',
+                          cursor: 'pointer',
+                          fontSize: 12,
+                          fontWeight: htmlViewMode === 'source' ? 600 : 400,
+                        }}
+                      >
+                        {t('source')}
+                      </button>
+                    </div>
+                    <button
+                      onClick={() => openInNewTab(previewPath)}
+                      style={{
+                        padding: '3px 10px',
+                        borderRadius: 4,
+                        border: '1px solid #1f6feb',
+                        background: 'transparent',
+                        color: '#58a6ff',
+                        cursor: 'pointer',
+                        fontSize: 12,
+                      }}
+                    >
+                      {t('openInBrowser')}
+                    </button>
+                  </>
                 )}
                 <button
                   onClick={() => downloadFile(previewPath)}
@@ -873,6 +908,19 @@ export default function Documents({ token }: DocumentsProps) {
                     <div style={{ color: '#666', textAlign: 'center', padding: 12 }}>{t('loading')}</div>
                   )}
                 </div>
+              ) : previewPath.endsWith('.html') && htmlViewMode === 'preview' ? (
+                <iframe
+                  srcDoc={previewContent}
+                  style={{
+                    width: '100%',
+                    height: '100%',
+                    border: 'none',
+                    borderRadius: 8,
+                    background: '#fff',
+                  }}
+                  title="HTML Preview"
+                  sandbox="allow-scripts allow-same-origin"
+                />
               ) : (
                 <pre style={{
                   margin: 0,
