@@ -29,6 +29,20 @@ pub struct ProviderConfig {
     pub models: Vec<ModelInfo>,
 }
 
+/// A provider entry persisted to disk (includes the actual API key).
+/// This is the on-disk format stored in ~/.jcowork/data/providers.json.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderEntry {
+    pub id: String,
+    pub name: String,
+    /// The actual API key (stored on disk, never exposed via API responses).
+    pub api_key: String,
+    pub base_url: String,
+    pub default_model: String,
+    pub context_length: usize,
+    pub models: Vec<ModelInfo>,
+}
+
 /// Provider info for the /api/providers response.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProviderInfo {
@@ -155,11 +169,74 @@ impl LlmRouter {
     }
 
     /// Load provider configs from a specific file path.
-    fn load_provider_configs_from_path(path: &str) -> Result<Vec<ProviderConfig>> {
+    pub fn load_provider_configs_from_path(path: &str) -> Result<Vec<ProviderConfig>> {
         let content = std::fs::read_to_string(path)?;
         let configs: Vec<ProviderConfig> = serde_json::from_str(&content)?;
         tracing::info!(path = %path, "Loaded provider configs from specified path");
         Ok(configs)
+    }
+
+    // ─ File-based provider management (for UI add/edit) ──
+
+    /// Default path for persisted provider entries: ~/.jcowork/data/providers.json
+    pub fn providers_file_path(data_dir: &str) -> String {
+        format!("{}/providers.json", data_dir)
+    }
+
+    /// Load provider entries from the persisted file.
+    pub fn load_entries_from_file(path: &str) -> Result<Vec<ProviderEntry>> {
+        let content = std::fs::read_to_string(path)?;
+        let entries: Vec<ProviderEntry> = serde_json::from_str(&content)?;
+        tracing::info!(path = %path, count = entries.len(), "Loaded provider entries from file");
+        Ok(entries)
+    }
+
+    /// Save provider entries to the persisted file.
+    pub fn save_entries_to_file(path: &str, entries: &[ProviderEntry]) -> Result<()> {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let content = serde_json::to_string_pretty(entries)?;
+        std::fs::write(path, content)?;
+        tracing::info!(path = %path, count = entries.len(), "Saved provider entries to file");
+        Ok(())
+    }
+
+    /// Rebuild the router from a list of persisted provider entries.
+    /// Each entry's API key is used directly (no env var lookup).
+    pub fn rebuild_from_entries(entries: &[ProviderEntry]) -> Self {
+        let mut router = Self::new();
+        // Store ProviderConfig versions for providers_info()
+        router.provider_configs = entries.iter().map(|e| ProviderConfig {
+            id: e.id.clone(),
+            name: e.name.clone(),
+            env_key: String::new(), // not used for file-based entries
+            base_url: e.base_url.clone(),
+            default_model: e.default_model.clone(),
+            context_length: e.context_length,
+            models: e.models.clone(),
+        }).collect();
+
+        for entry in entries {
+            // Skip entries without an API key (unless it's a local provider)
+            if entry.api_key.is_empty() && entry.id != "llamacpp" && entry.id != "local" {
+                tracing::warn!(id = %entry.id, "Skipping provider with empty API key");
+                continue;
+            }
+
+            let openai_config = crate::openai::OpenAiConfig {
+                provider_name: entry.id.clone(),
+                api_key: if entry.api_key.is_empty() { "unused".to_string() } else { entry.api_key.clone() },
+                base_url: entry.base_url.clone(),
+                model: entry.default_model.clone(),
+                context_length: entry.context_length,
+            };
+
+            router.register_openai_compatible(&entry.id, openai_config);
+        }
+
+        tracing::info!(providers = ?router.available_providers(), "Router rebuilt from file entries");
+        router
     }
 
     /// Get a provider by model string (format: "provider:model" or just "model").

@@ -142,7 +142,7 @@ async fn handle_feishu_message(
 
     // Resolve model
     let model_str = &state.default_model;
-    let provider = state.llm_router.get_provider(model_str)?;
+    let provider = state.llm_router.read().unwrap().get_provider(model_str)?;
 
     // Get tool schemas — filter skill-gated tools
     let tools: Vec<_> = state.tool_registry.all_schemas()

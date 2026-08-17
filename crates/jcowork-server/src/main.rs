@@ -6,6 +6,7 @@
 
 use anyhow::Result;
 use std::sync::Arc;
+use std::sync::RwLock;
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 
@@ -44,6 +45,74 @@ async fn main() -> Result<()> {
     // Initialize LLM router from environment
     let llm_router = jcowork_llm::LlmRouter::from_env()?;
     info!(providers = ?llm_router.available_providers(), "LLM providers registered");
+
+    // Migrate providers to persistent file on first run.
+    // This loads from env vars + bundled providers.json and saves to ~/.jcowork/data/providers.json
+    // so the UI can manage them. On subsequent runs, the router loads from this file.
+    let providers_file = jcowork_llm::LlmRouter::providers_file_path(&data_dir);
+    if !std::path::Path::new(&providers_file).exists() {
+        // Load bundled providers.json (from project root or Tauri resources)
+        let bundled_configs = jcowork_llm::LlmRouter::load_provider_configs_from_path("providers.json")
+            .or_else(|_| {
+                // Try Tauri resource path
+                let exe = std::env::current_exe().ok();
+                let res_dir = exe.as_ref().and_then(|p| p.parent()).and_then(|p| p.parent()).map(|p| p.join("Resources"));
+                if let Some(ref dir) = res_dir {
+                    let candidate = dir.join("providers.json");
+                    if candidate.exists() {
+                        return jcowork_llm::LlmRouter::load_provider_configs_from_path(candidate.to_str().unwrap_or(""));
+                    }
+                }
+                Err(anyhow::anyhow!("No bundled providers.json found"))
+            })
+            .unwrap_or_default();
+
+        // Convert ProviderConfig to ProviderEntry using env vars for API keys
+        let entries: Vec<jcowork_llm::ProviderEntry> = bundled_configs.into_iter().map(|c| {
+            let api_key = if c.env_key.is_empty() {
+                String::new()
+            } else {
+                std::env::var(&c.env_key).unwrap_or_default()
+            };
+            // Check for base URL override from env
+            let base_url_env = format!("{}_BASE_URL", c.id.to_uppercase());
+            let base_url = std::env::var(&base_url_env).unwrap_or_else(|_| c.base_url.clone());
+            jcowork_llm::ProviderEntry {
+                id: c.id,
+                name: c.name,
+                api_key,
+                base_url,
+                default_model: c.default_model,
+                context_length: c.context_length,
+                models: c.models,
+            }
+        }).collect();
+
+        if !entries.is_empty() {
+            if let Err(e) = jcowork_llm::LlmRouter::save_entries_to_file(&providers_file, &entries) {
+                tracing::warn!(err = %e, "Failed to save initial providers to file");
+            } else {
+                info!(path = %providers_file, count = entries.len(), "Migrated providers to persistent file");
+            }
+        }
+    }
+
+    // Load router from persistent file (if it exists), otherwise use env-based router
+    let llm_router = if std::path::Path::new(&providers_file).exists() {
+        match jcowork_llm::LlmRouter::load_entries_from_file(&providers_file) {
+            Ok(entries) => {
+                let router = jcowork_llm::LlmRouter::rebuild_from_entries(&entries);
+                info!(providers = ?router.available_providers(), "LLM router loaded from persistent file");
+                router
+            }
+            Err(e) => {
+                tracing::warn!(err = %e, "Failed to load from providers file, using env-based router");
+                llm_router
+            }
+        }
+    } else {
+        llm_router
+    };
 
     // Initialize memory provider (SQLite)
     let db_path = format!("{}/jcowork.db", data_dir);
@@ -92,7 +161,7 @@ async fn main() -> Result<()> {
     let state = AppState {
         session_manager,
         auth_config,
-        llm_router: Arc::new(llm_router),
+        llm_router: Arc::new(RwLock::new(llm_router)),
         default_model: config.default_model.clone(),
         cron_scheduler,
         memory_manager,

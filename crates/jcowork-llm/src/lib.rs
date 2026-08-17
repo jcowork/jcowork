@@ -6,4 +6,4 @@ pub mod router;
 
 pub use openai::OpenAiConfig;
 pub use provider::LlmProvider;
-pub use router::{LlmRouter, ProviderConfig, ProviderInfo, ModelInfo};
+pub use router::{LlmRouter, ProviderConfig, ProviderEntry, ProviderInfo, ModelInfo};

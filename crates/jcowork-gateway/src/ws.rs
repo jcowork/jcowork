@@ -5,6 +5,7 @@ use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::RwLock;
 
 use anyhow;
 use jcowork_cron::{CronScheduler, CronJob, Reminder};
@@ -130,7 +131,7 @@ pub async fn ws_handler(
     ws: WebSocket,
     user_id: String,
     session_manager: Arc<SessionManager>,
-    llm_router: Arc<LlmRouter>,
+    llm_router: Arc<RwLock<LlmRouter>>,
     default_model: String,
     tool_registry: Arc<ToolRegistry>,
     cron_scheduler: Arc<CronScheduler>,
@@ -295,8 +296,12 @@ pub async fn ws_handler(
                 // Resolve model string
                 let model_str = input.model.as_deref().unwrap_or(&default_model);
 
-                // Get provider
-                let provider = match llm_router.get_provider(model_str) {
+                // Get provider (extract Arc from lock, then drop guard before .await)
+                let provider = {
+                    let router = llm_router.read().unwrap();
+                    router.get_provider(model_str)
+                };
+                let provider = match provider {
                     Ok(p) => p,
                     Err(e) => {
                         let _ = ws_sender
@@ -751,7 +756,11 @@ pub async fn ws_handler(
                             });
 
                             // Get provider and tools for executing the action
-                            let provider = match llm_router.get_provider(&default_model) {
+                            let provider = {
+                                let router = llm_router.read().unwrap();
+                                router.get_provider(&default_model)
+                            };
+                            let provider = match provider {
                                 Ok(p) => p,
                                 Err(e) => {
                                     tracing::error!(err = %e, "Failed to get provider for reminder action");

@@ -14,6 +14,7 @@ use axum::extract::{ws::WebSocketUpgrade, Multipart, Path, Query};
 use axum::http::header;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::sync::RwLock;
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::auth;
@@ -22,7 +23,7 @@ use crate::ws;
 use dashmap::DashMap;
 use jcowork_cron::CronScheduler;
 use jcowork_feishu::client::FeishuClient;
-use jcowork_llm::LlmRouter;
+use jcowork_llm::{LlmRouter, ProviderEntry};
 use jcowork_logs::LogWriter;
 use jcowork_memory::MemoryManager;
 use jcowork_skills::{builtin_skills, SkillManager};
@@ -34,7 +35,7 @@ use jcowork_tools::registry::ToolRegistry;
 pub struct AppState {
     pub session_manager: Arc<SessionManager>,
     pub auth_config: auth::AuthConfig,
-    pub llm_router: Arc<LlmRouter>,
+    pub llm_router: Arc<RwLock<LlmRouter>>,
     pub default_model: String,
     pub cron_scheduler: Arc<CronScheduler>,
     pub memory_manager: Arc<MemoryManager>,
@@ -152,6 +153,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/cron-jobs", get(list_cron_jobs))
         .route("/api/cron-jobs/{id}", delete(remove_cron_job))
         .route("/api/providers", get(list_providers))
+        .route("/api/providers/entries", get(list_provider_entries))
+        .route("/api/providers", post(save_providers))
         .route("/api/agent-identity", get(get_agent_identity))
         .route("/api/agent-identity", put(set_agent_identity))
         .route("/api/feishu/config", get(get_feishu_config))
@@ -672,12 +675,67 @@ async fn list_providers(
     State(state): State<AppState>,
     _auth: axum::Extension<AuthUser>,
 ) -> impl IntoResponse {
-    let providers = state.llm_router.providers_info();
+    let router = state.llm_router.read().unwrap();
+    let providers = router.providers_info();
     let default_model = &state.default_model;
     (StatusCode::OK, Json(serde_json::json!({
         "providers": providers,
         "default_model": default_model,
     })))
+}
+
+/// GET /api/providers/entries — returns full provider entries (with api_key masked).
+async fn list_provider_entries(
+    State(state): State<AppState>,
+    _auth: axum::Extension<AuthUser>,
+) -> impl IntoResponse {
+    let providers_file = LlmRouter::providers_file_path(&state.data_dir);
+    let entries = LlmRouter::load_entries_from_file(&providers_file)
+        .unwrap_or_default();
+    // Mask API keys in the response
+    let masked: Vec<serde_json::Value> = entries.iter().map(|e| {
+        serde_json::json!({
+            "id": e.id,
+            "name": e.name,
+            "api_key": mask_secret(&e.api_key),
+            "api_key_set": !e.api_key.is_empty(),
+            "base_url": e.base_url,
+            "default_model": e.default_model,
+            "context_length": e.context_length,
+            "models": e.models,
+        })
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!({ "entries": masked })))
+}
+
+#[derive(Debug, Deserialize)]
+struct SaveProvidersRequest {
+    pub entries: Vec<ProviderEntry>,
+}
+
+/// POST /api/providers — save all provider entries and rebuild the router.
+async fn save_providers(
+    State(state): State<AppState>,
+    _auth: axum::Extension<AuthUser>,
+    Json(req): Json<SaveProvidersRequest>,
+) -> impl IntoResponse {
+    let providers_file = LlmRouter::providers_file_path(&state.data_dir);
+
+    // Save to disk
+    if let Err(e) = LlmRouter::save_entries_to_file(&providers_file, &req.entries) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("Failed to save providers: {}", e) })),
+        );
+    }
+
+    // Rebuild the router
+    let new_router = LlmRouter::rebuild_from_entries(&req.entries);
+    let mut router = state.llm_router.write().unwrap();
+    *router = new_router;
+
+    tracing::info!(count = req.entries.len(), "Providers saved and router rebuilt");
+    (StatusCode::OK, Json(serde_json::json!({ "status": "saved", "count": req.entries.len() })))
 }
 
 async fn get_agent_identity(
@@ -739,8 +797,9 @@ async fn ws_upgrade(
     let memory_manager = state.memory_manager.clone();
     let skill_manager = state.skill_manager.clone();
     let data_dir = state.data_dir.clone();
+    let llm_router = state.llm_router.clone();
     ws.on_upgrade(move |socket| {
-        ws::ws_handler(socket, user_id, state.session_manager, state.llm_router, default_model, tool_registry, cron_scheduler, log_writer, memory_manager, skill_manager, data_dir)
+        ws::ws_handler(socket, user_id, state.session_manager, llm_router, default_model, tool_registry, cron_scheduler, log_writer, memory_manager, skill_manager, data_dir)
     })
 }
 

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useT } from '../i18n';
+import ProviderManager from './ProviderManager';
 
 interface ModelInfo {
   id: string;
@@ -29,6 +30,7 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
   const [identityLoading, setIdentityLoading] = useState(true);
   const [identitySaving, setIdentitySaving] = useState(false);
   const [identityStatus, setIdentityStatus] = useState<'idle' | 'saved' | 'error'>('idle');
+  const [showProviderManager, setShowProviderManager] = useState(false);
 
   // Feishu config state
   const [feishuAppId, setFeishuAppId] = useState('');
@@ -299,21 +301,40 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
           </div>
         ) : (
           <>
-            {/* Provider Select */}
-            <div style={{ marginBottom: 20 }}>
-              <label style={labelStyle}>{t('provider')}</label>
-              <select
-                value={selectedProvider}
-                onChange={e => handleProviderChange(e.target.value)}
-                style={selectStyle}
-              >
-                {providers.map(p => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
-                ))}
-              </select>
-              <div style={{ color: '#666', fontSize: 12, marginTop: 4 }}>
-                {providers.length} provider{providers.length !== 1 ? 's' : ''} available
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+              <div style={{ flex: 1 }}>
+                <label style={labelStyle}>{t('provider')}</label>
+                <select
+                  value={selectedProvider}
+                  onChange={e => handleProviderChange(e.target.value)}
+                  style={selectStyle}
+                >
+                  {providers.map(p => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+                </select>
+                <div style={{ color: '#666', fontSize: 12, marginTop: 4 }}>
+                  {providers.length} provider{providers.length !== 1 ? 's' : ''} available
+                </div>
               </div>
+              <button
+                onClick={() => setShowProviderManager(true)}
+                style={{
+                  padding: '8px 14px',
+                  borderRadius: 8,
+                  border: '1px solid #1f6feb',
+                  background: 'transparent',
+                  color: '#58a6ff',
+                  cursor: 'pointer',
+                  fontSize: 13,
+                  fontWeight: 500,
+                  marginLeft: 12,
+                  whiteSpace: 'nowrap',
+                  alignSelf: 'flex-end',
+                }}
+              >
+                ⚙ {t('manageProviders')}
+              </button>
             </div>
 
             {/* Model Select */}
@@ -363,6 +384,25 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
           </>
         )}
       </div>
+
+      {/* Provider Manager Modal */}
+      {showProviderManager && (
+        <ProviderManager
+          token={token}
+          onClose={() => setShowProviderManager(false)}
+          onSaved={() => {
+            // Refresh providers list
+            fetch('/api/providers', {
+              headers: { 'Authorization': `Bearer ${token}` },
+            })
+              .then(r => r.json())
+              .then((data: { providers: ProviderInfo[]; default_model: string }) => {
+                setProviders(data.providers || []);
+              })
+              .catch(() => {});
+          }}
+        />
+      )}
 
       {/* Agent Identity Section */}
       <div style={{ ...cardStyle, marginTop: 16 }}>
