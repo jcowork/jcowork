@@ -155,7 +155,7 @@ powershell -ExecutionPolicy Bypass -File scripts\stop.ps1
 
 | 平台 | 格式 | 下载 |
 |------|------|------|
-| macOS (Apple Silicon) | `.dmg` | [Jcowork_0.2.0_aarch64.dmg](https://github.com/jcowork/jcowork/releases/download/v0.2.1/Jcowork_0.2.0_aarch64.dmg) |
+| macOS (Apple Silicon) | `.dmg` | [Jcowork_0.2.2_aarch64.dmg](https://github.com/jcowork/jcowork/releases/download/v0.2.2/Jcowork_0.2.2_aarch64.dmg) |
 
 **macOS 安装：**
 1. 下载并打开 `.dmg` 文件
