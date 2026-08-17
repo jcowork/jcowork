@@ -1,4 +1,4 @@
-.PHONY: build build-web run run-search test clean check clippy setup setup-python
+.PHONY: build build-web run test clean check clippy setup setup-python
 
 build:
 	cargo build --workspace
@@ -12,14 +12,6 @@ build-all: build build-web
 
 run: build
 	cargo run --bin jcowork
-
-# Run the report-search service standalone (for development/testing)
-run-search: build
-	cargo run --bin jcowork-report-search
-
-# Run both services (main + report-search) in parallel
-run-all: build
-	cargo run --bin jcowork-report-search & cargo run --bin jcowork
 
 test:
 	cargo test --workspace

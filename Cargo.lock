@@ -2430,28 +2430,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "jcowork-report-search"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "chrono",
- "dotenvy",
- "hex",
- "serde",
- "serde_json",
- "sha2",
- "shellexpand",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "jcowork-server"
 version = "0.1.0"
 dependencies = [

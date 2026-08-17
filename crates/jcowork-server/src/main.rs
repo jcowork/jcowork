@@ -2,13 +2,12 @@
 //!
 //! Starts the axum HTTP server with WebSocket support,
 //! initializes the session manager, tool registry, and LLM router.
-//! Also spawns the jcowork-report-search sidecar service (port 3001).
 
 use anyhow::Result;
 use std::sync::Arc;
 use std::sync::RwLock;
 use tower_http::cors::CorsLayer;
-use tracing::{info, warn};
+use tracing::info;
 
 use jcowork_gateway::{
     auth::AuthConfig,
@@ -178,9 +177,6 @@ async fn main() -> Result<()> {
     let app = router::build_router(state)
         .layer(CorsLayer::permissive());
 
-    // Spawn the report-search sidecar service
-    spawn_report_search_sidecar(&data_dir);
-
     // Bind and serve
     let addr = format!("{}:{}", config.host, config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -199,43 +195,4 @@ async fn shutdown_signal() {
         .await
         .expect("Failed to install Ctrl+C handler");
     info!("Shutdown signal received");
-}
-
-/// Spawn the jcowork-report-search binary as a background sidecar.
-/// It listens on port 3001 and indexes PDFs in the data_dir/reports directory.
-fn spawn_report_search_sidecar(data_dir: &str) {
-    // Locate the binary next to the current executable
-    let current_exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("Could not determine current exe path: {}", e);
-            return;
-        }
-    };
-    let sidecar = current_exe
-        .parent()
-        .map(|dir| dir.join("jcowork-report-search"))
-        .unwrap_or_else(|| std::path::PathBuf::from("jcowork-report-search"));
-
-    if !sidecar.exists() {
-        warn!(
-            sidecar = %sidecar.display(),
-            "jcowork-report-search binary not found — report search disabled. \
-             Build it with: cargo build --bin jcowork-report-search"
-        );
-        return;
-    }
-
-    let data_dir = data_dir.to_string();
-    tokio::spawn(async move {
-        info!(bin = %sidecar.display(), "Starting jcowork-report-search sidecar");
-        let status = tokio::process::Command::new(&sidecar)
-            .env("JCWORK_DATA_DIR", &data_dir)
-            .status()
-            .await;
-        match status {
-            Ok(s) => warn!("jcowork-report-search exited with: {}", s),
-            Err(e) => warn!("jcowork-report-search failed to start: {}", e),
-        }
-    });
 }

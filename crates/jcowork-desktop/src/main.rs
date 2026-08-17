@@ -93,40 +93,6 @@ fn set_web_dir_from_resources() {
     }
 }
 
-/// Extract bundled binaries from Resources to the MacOS directory.
-/// Tauri bundles resources in Contents/Resources/, but sidecar binaries
-/// need to be in Contents/MacOS/ to be executable.
-fn extract_sidecar_binaries() {
-    let Some(res_dir) = resolve_resource_dir() else { return };
-    let Some(exe_path) = std::env::current_exe().ok() else { return };
-    let Some(macos_dir) = exe_path.parent() else { return };
-
-    // Tauri encodes ".." as "_up_" in resource paths
-    let sidecar_candidates = [
-        res_dir.join("jcowork-report-search"),
-        res_dir.join("_up_").join("_up_").join("jcowork-report-search"),
-    ];
-
-    for src in &sidecar_candidates {
-        if src.exists() {
-            let dst = macos_dir.join("jcowork-report-search");
-            if !dst.exists() {
-                if let Err(e) = std::fs::copy(src, &dst) {
-                    warn!(error = %e, "Failed to copy sidecar binary to MacOS dir");
-                } else {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        let _ = std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o755));
-                    }
-                    info!(path = %dst.display(), "Extracted sidecar binary to MacOS directory");
-                }
-            }
-            return;
-        }
-    }
-}
-
 /// Set JCWORK_SCRIPTS_DIR to the bundled scripts directory.
 fn set_scripts_dir_from_resources() {
     if std::env::var("JCWORK_SCRIPTS_DIR").is_ok() {
@@ -156,10 +122,7 @@ async fn main() {
     // ── 1. Load .env ──
     load_env_from_resources();
 
-    // ── 2. Extract sidecar binaries from Resources to MacOS directory ──
-    extract_sidecar_binaries();
-
-    // ── 3. Set web dir from bundle resources ──
+    // ── 2. Set web dir from bundle resources ──
     set_web_dir_from_resources();
 
     // ── 4. Set scripts dir from bundle resources ──
@@ -363,10 +326,7 @@ async fn main() {
     // ── 14. Build router ──
     let app = router::build_router(state).layer(CorsLayer::permissive());
 
-    // ── 15. Spawn the report-search sidecar service ──
-    spawn_report_search_sidecar(&data_dir);
-
-    // ── 16. Start Axum server on localhost:3000 in background ──
+    // ── 15. Start Axum server on localhost:3000 in background ──
     let addr = "127.0.0.1:3000";
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -384,11 +344,11 @@ async fn main() {
         }
     });
 
-    // ── 17. Wait for server to be ready ──
+    // ── 16. Wait for server to be ready ──
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     info!("Server ready, launching Tauri window");
 
-    // ── 18. Launch Tauri desktop app ─
+    // ── 17. Launch Tauri desktop app ─
     if let Err(e) = tauri::Builder::default().run(tauri::generate_context!()) {
         error!(error = %e, "Tauri application error");
         eprintln!("Tauri error: {}", e);
@@ -411,40 +371,4 @@ fn show_error_and_exit(msg: &str) {
         ])
         .output();
     std::process::exit(1);
-}
-
-/// Spawn the jcowork-report-search binary as a background sidecar.
-fn spawn_report_search_sidecar(data_dir: &str) {
-    let current_exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("Could not determine current exe path: {}", e);
-            return;
-        }
-    };
-    let sidecar = current_exe
-        .parent()
-        .map(|dir| dir.join("jcowork-report-search"))
-        .unwrap_or_else(|| std::path::PathBuf::from("jcowork-report-search"));
-
-    if !sidecar.exists() {
-        warn!(
-            sidecar = %sidecar.display(),
-            "jcowork-report-search binary not found — report search disabled"
-        );
-        return;
-    }
-
-    let data_dir = data_dir.to_string();
-    tokio::spawn(async move {
-        info!(bin = %sidecar.display(), "Starting jcowork-report-search sidecar");
-        let status = tokio::process::Command::new(&sidecar)
-            .env("JCWORK_DATA_DIR", &data_dir)
-            .status()
-            .await;
-        match status {
-            Ok(s) => warn!("jcowork-report-search exited with: {}", s),
-            Err(e) => warn!("jcowork-report-search failed to start: {}", e),
-        }
-    });
 }

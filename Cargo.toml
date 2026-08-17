@@ -12,7 +12,6 @@ members = [
     "crates/jcowork-cron",
     "crates/jcowork-logs",
     "crates/jcowork-feishu",
-    "crates/jcowork-report-search",
     "crates/jcowork-desktop",
 ]
 

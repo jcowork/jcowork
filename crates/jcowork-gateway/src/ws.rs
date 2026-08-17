@@ -23,7 +23,6 @@ use jcowork_tools::excel_db::ExcelDbTool;
 use jcowork_tools::file_ops::{FileReadTool, FileWriteTool, FileListTool, FileDeleteTool, FileMoveTool, FileCopyTool, FileSearchTool, DirCreateTool, DirListTool, FileInfoTool};
 use jcowork_tools::memory::{MemorySaveTool, MemoryUpdateTool, MemoryRecallTool, MemorySearchTool};
 use jcowork_tools::pdf_parse::PdfParseTool;
-use jcowork_tools::report_search::{ReportListCompaniesTool, ReportSearchTool};
 use jcowork_tools::registry::ToolRegistry;
 use jcowork_tools::shell::ShellTool;
 
@@ -99,9 +98,6 @@ pub fn build_tool_registry(
     registry.register(Arc::new(PdfParseTool::default()));
     // Web search tool with log writer
     registry.register(Arc::new(WebSearchTool::default().with_log_writer(log_writer)));
-    // Report search tools
-    registry.register(Arc::new(ReportSearchTool::default()));
-    registry.register(Arc::new(ReportListCompaniesTool::default()));
     // File operations tools (skill-gated behind builtin:code_engineer)
     registry.register(Arc::new(FileReadTool));
     registry.register(Arc::new(FileWriteTool));
@@ -323,7 +319,6 @@ pub async fn ws_handler(
                         // Skill-gated tools: only available when the corresponding skill is enabled
                         let skill_required = match t.function.name.as_str() {
                             "web_search" => Some("builtin:web_search"),
-                            "report_search" | "report_list_companies" => Some("builtin:write_research_report"),
                             "excel_db" => Some("builtin:excel_data"),
                             "file_read" | "file_write" | "file_list" | "file_delete" | "file_move" | "file_copy" | "file_search" | "dir_create" | "dir_list" | "file_info" | "shell" => Some("builtin:code_engineer"),
                             _ => None,
@@ -773,7 +768,6 @@ pub async fn ws_handler(
                                 .filter(|t| {
                                     let skill_required = match t.function.name.as_str() {
                                         "web_search" => Some("builtin:web_search"),
-                                        "report_search" | "report_list_companies" => Some("builtin:write_research_report"),
                                         _ => None,
                                     };
                                     match skill_required {

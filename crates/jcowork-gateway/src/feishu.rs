@@ -150,7 +150,6 @@ async fn handle_feishu_message(
         .filter(|t| {
             let skill_required = match t.function.name.as_str() {
                 "web_search" => Some("builtin:web_search"),
-                "report_search" | "report_list_companies" => Some("builtin:write_research_report"),
                 "excel_db" => Some("builtin:excel_data"),
                 "file_read" | "file_write" | "file_list" | "file_delete" | "file_move" | "file_copy" | "file_search" | "dir_create" | "dir_list" | "file_info" | "shell" => Some("builtin:code_engineer"),
                 _ => None,
