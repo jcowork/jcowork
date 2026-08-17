@@ -113,6 +113,53 @@ jcowork-server
 | Cron Scheduler | `jcowork-cron::scheduler` | 每用户定时任务，基于 `cron` crate |
 | Auth | `jcowork-gateway::auth` | JWT + Argon2（多用户认证） |
 
+## 桌面应用（macOS / Windows）
+
+基于 [Tauri v2](https://tauri.app/) 构建的原生桌面应用，将完整的后端 + 前端打包为单一可安装程序 — 无需 Docker、Python 或 Node.js。
+
+**下载安装包：**
+
+| 平台 | 格式 | 下载 |
+|------|------|------|
+| macOS (Apple Silicon) | `.dmg` | [Jcowork_0.2.2_aarch64.dmg](https://github.com/jcowork/jcowork/releases/download/v0.2.2/Jcowork_0.2.2_aarch64.dmg) |
+
+**macOS 安装：**
+1. 下载并打开 `.dmg` 文件
+2. 将 `Jcowork.app` 拖入「应用程序」文件夹
+3. 从「应用程序」或 Spotlight 启动 Jcowork
+4. 应用会自动启动后端服务并打开对话窗口
+
+> **注意：** 如果 macOS 提示"Jcowork 已损坏，无法打开"，在终端运行以下命令移除隔离标记：
+> ```bash
+> xattr -cr /Applications/Jcowork.app
+> ```
+> 这是因为应用尚未经过 Apple 公证。运行命令后即可正常打开。
+
+**Windows 安装：**
+1. 下载 `.msi` 或 `.exe` 安装程序
+2. 运行安装程序并按提示完成安装
+3. 从开始菜单启动 Jcowork
+
+**从源码构建：**
+
+```bash
+# 前置要求：Rust 1.85+、Node.js 20+
+cargo install tauri-cli --version "^2"
+
+# 构建前端
+cd web && npm install && npm run build && cd ..
+
+# 构建桌面应用
+cd crates/jcowork-desktop
+cargo tauri build
+
+# 输出：
+#   target/release/bundle/dmg/Jcowork_0.1.0_aarch64.dmg   (macOS)
+#   target/release/bundle/msi/Jcowork_0.1.0_x64.msi        (Windows)
+```
+
+> **注意：** 桌面应用需要在 `.env` 中配置至少一个 LLM API Key。Docling PDF 解析服务为可选，如可用会自动连接。
+
 ## 快速开始
 
 ### 一键安装（推荐）
@@ -146,53 +193,6 @@ powershell -ExecutionPolicy Bypass -File scripts\stop.ps1
 ```
 
 浏览器打开 http://localhost:3000 即可。下面的手动步骤面向希望自己掌控过程的开发者。
-
-### 桌面应用（macOS / Windows）
-
-基于 [Tauri v2](https://tauri.app/) 构建的原生桌面应用，将完整的后端 + 前端打包为单一可安装程序 — 无需 Docker、Python 或 Node.js。
-
-**下载安装包：**
-
-| 平台 | 格式 | 下载 |
-|------|------|------|
-| macOS (Apple Silicon) | `.dmg` | [Jcowork_0.2.2_aarch64.dmg](https://github.com/jcowork/jcowork/releases/download/v0.2.2/Jcowork_0.2.2_aarch64.dmg) |
-
-**macOS 安装：**
-1. 下载并打开 `.dmg` 文件
-2. 将 `Jcowork.app` 拖入「应用程序」文件夹
-3. 从「应用程序」或 Spotlight 启动 Jcowork
-4. 应用会自动启动后端服务并打开对话窗口
-
-> **注意：** 如果 macOS 提示“Jcowork 已损坏，无法打开”，在终端运行以下命令移除隔离标记：
-> ```bash
-> xattr -cr /Applications/Jcowork.app
-> ```
-> 这是因为应用尚未经过 Apple 公证。运行命令后即可正常打开。
-
-**Windows 安装：**
-1. 下载 `.msi` 或 `.exe` 安装程序
-2. 运行安装程序并按提示完成安装
-3. 从开始菜单启动 Jcowork
-
-**从源码构建：**
-
-```bash
-# 前置要求：Rust 1.85+、Node.js 20+
-cargo install tauri-cli --version "^2"
-
-# 构建前端
-cd web && npm install && npm run build && cd ..
-
-# 构建桌面应用
-cd crates/jcowork-desktop
-cargo tauri build
-
-# 输出：
-#   target/release/bundle/dmg/Jcowork_0.1.0_aarch64.dmg   (macOS)
-#   target/release/bundle/msi/Jcowork_0.1.0_x64.msi        (Windows)
-```
-
-> **注意：** 桌面应用需要在 `.env` 中配置至少一个 LLM API Key。Docling PDF 解析服务为可选，如可用会自动连接。
 
 ### 前置要求
 

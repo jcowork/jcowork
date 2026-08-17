@@ -115,42 +115,7 @@ jcowork-server
 | Feishu | `jcowork-feishu` | Feishu/Lark bot: event parsing, API client, per-user config |
 | Logging | `jcowork-logs` | JSONL daily rotating logs for LLM and tool calls |
 
-## Quick Start
-
-### One-click install (recommended)
-
-Works on **Windows 11+**, **Ubuntu 24.04+**, and **macOS**. The script installs all
-dependencies (Rust, Python 3.12+, Node 20+, Python venv, Playwright Chromium),
-builds the backend and frontend, and writes a default `.env`:
-
-```bash
-# macOS / Ubuntu
-git clone <repo-url> && cd jcowork
-bash scripts/install.sh          # add --start to launch services right away
-```
-
-```powershell
-# Windows 11 (PowerShell)
-git clone <repo-url>; cd jcowork
-powershell -ExecutionPolicy Bypass -File scripts\install.ps1     # add -Start to launch right away
-```
-
-Then fill in at least one LLM API key in `.env` and start the services:
-
-```bash
-bash scripts/start.sh      # macOS / Ubuntu (docling on :50060 + server on :3000)
-bash scripts/stop.sh
-```
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\start.ps1    # Windows
-powershell -ExecutionPolicy Bypass -File scripts\stop.ps1
-```
-
-Open http://localhost:3000 in your browser. The manual steps below are for
-developers who prefer to run things themselves.
-
-### Desktop App (macOS / Windows)
+## Desktop App (macOS / Windows)
 
 A native desktop application is available for macOS and Windows, powered by [Tauri v2](https://tauri.app/). The desktop app bundles the entire backend + frontend into a single installable package — no Docker, Python, or Node.js required.
 
@@ -196,6 +161,41 @@ cargo tauri build
 ```
 
 > **Note:** The desktop app requires at least one LLM API key configured in `.env`. The Docling PDF parsing service is optional and runs separately if available.
+
+## Quick Start
+
+### One-click install (recommended)
+
+Works on **Windows 11+**, **Ubuntu 24.04+**, and **macOS**. The script installs all
+dependencies (Rust, Python 3.12+, Node 20+, Python venv, Playwright Chromium),
+builds the backend and frontend, and writes a default `.env`:
+
+```bash
+# macOS / Ubuntu
+git clone <repo-url> && cd jcowork
+bash scripts/install.sh          # add --start to launch services right away
+```
+
+```powershell
+# Windows 11 (PowerShell)
+git clone <repo-url>; cd jcowork
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1     # add -Start to launch right away
+```
+
+Then fill in at least one LLM API key in `.env` and start the services:
+
+```bash
+bash scripts/start.sh      # macOS / Ubuntu (docling on :50060 + server on :3000)
+bash scripts/stop.sh
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start.ps1    # Windows
+powershell -ExecutionPolicy Bypass -File scripts\stop.ps1
+```
+
+Open http://localhost:3000 in your browser. The manual steps below are for
+developers who prefer to run things themselves.
 
 ### Prerequisites
 
