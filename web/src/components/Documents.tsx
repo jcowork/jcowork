@@ -116,8 +116,10 @@ export default function Documents({ token }: DocumentsProps) {
   const [newFolderName, setNewFolderName] = useState('');
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<string>('');
   const [currentDir, setCurrentDir] = useState<string>('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState<{ path: string; isDir: boolean; name: string } | null>(null);
 
   const handleCreateFolder = async () => {
     if (!newFolderName.trim()) return;
@@ -146,7 +148,71 @@ export default function Documents({ token }: DocumentsProps) {
   const handleUploadFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
     setUploading(true);
+    setStatusMessage('');
     try {
+      // Check if any PDF files are being uploaded
+      const hasPdf = Array.from(files).some(f =>
+        f.name.toLowerCase().endsWith('.pdf')
+      );
+
+      if (hasPdf) {
+        // Check Docling service status
+        setStatusMessage(t('doclingChecking'));
+        try {
+          const statusRes = await fetch('/api/docling/status', {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (statusRes.ok) {
+            const status = await statusRes.json();
+            if (!status.running) {
+              // Start Docling service
+              setStatusMessage(t('doclingStarting'));
+              const startRes = await fetch('/api/docling/start', {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${token}` },
+              });
+              if (startRes.ok) {
+                // Poll until service is ready
+                const maxWait = 180000; // 3 minutes
+                const pollInterval = 3000;
+                const start = Date.now();
+                let ready = false;
+                while (Date.now() - start < maxWait) {
+                  await new Promise(r => setTimeout(r, pollInterval));
+                  try {
+                    const pollRes = await fetch('/api/docling/status', {
+                      headers: { Authorization: `Bearer ${token}` },
+                    });
+                    if (pollRes.ok) {
+                      const pollStatus = await pollRes.json();
+                      if (pollStatus.running) {
+                        ready = true;
+                        break;
+                      }
+                    }
+                  } catch { /* keep polling */ }
+                }
+                if (!ready) {
+                  setStatusMessage(t('doclingStartFailed'));
+                  setUploading(false);
+                  return;
+                }
+                setStatusMessage(t('doclingReady'));
+              } else {
+                const errData = await startRes.json().catch(() => null);
+                setStatusMessage(`${t('doclingStartFailed')}: ${errData?.message || 'unknown error'}`);
+                setUploading(false);
+                return;
+              }
+            }
+          }
+        } catch {
+          // Status check failed — proceed with upload anyway, backend will auto-start
+        }
+      }
+
+      // Upload files
+      setStatusMessage(t('pdfParsing'));
       const formData = new FormData();
       // Send target directory
       formData.append('path', currentDir || '.');
@@ -167,14 +233,23 @@ export default function Documents({ token }: DocumentsProps) {
           if (failed.length > 0) {
             const msgs = failed.map((f: any) => `${f.filename}: ${f.index_error || 'indexing failed'}`).join('\n');
             alert(`Upload succeeded but indexing failed for:\n${msgs}\n\nYou can try re-indexing from the directory menu.`);
+            setStatusMessage('');
+          } else {
+            setStatusMessage(t('doclingReady'));
+            // Clear status after 3 seconds
+            setTimeout(() => setStatusMessage(''), 3000);
           }
+        } else {
+          setStatusMessage('');
         }
       } else {
         const err = await res.json();
         alert(err.error || 'Upload failed');
+        setStatusMessage('');
       }
     } catch {
       alert('Network error');
+      setStatusMessage('');
     }
     setUploading(false);
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -204,6 +279,53 @@ export default function Documents({ token }: DocumentsProps) {
     })));
     setLoading(false);
   }, [fetchDir]);
+
+  // Collect all expanded directory paths from the tree
+  const getExpandedPaths = (nodes: TreeNode[]): string[] => {
+    const paths: string[] = [];
+    for (const node of nodes) {
+      if (node.type === 'dir' && node.expanded) {
+        paths.push(node.path);
+        if (node.children) paths.push(...getExpandedPaths(node.children));
+      }
+    }
+    return paths;
+  };
+
+  // Reload root and re-expand previously expanded directories
+  const reloadTree = useCallback(async () => {
+    const expandedPaths = getExpandedPaths(tree);
+    setLoading(true);
+    const entries = await fetchDir('.');
+    const visible = entries.filter(e => !e.name.startsWith('.'));
+    let newTree: TreeNode[] = visible.map(e => ({
+      name: e.name,
+      type: e.type as 'file' | 'dir',
+      path: e.name,
+      expanded: false,
+      children: undefined as TreeNode[] | undefined,
+    }));
+    // Re-expand directories that were previously expanded and still exist
+    for (const dirPath of expandedPaths) {
+      const node = findNode(newTree, dirPath);
+      if (node && node.type === 'dir') {
+        const dirEntries = await fetchDir(dirPath);
+        const dirVisible = dirEntries.filter(e => !e.name.startsWith('.'));
+        newTree = updateNode(newTree, dirPath, (n) => ({
+          ...n,
+          expanded: true,
+          children: dirVisible.map(e => ({
+            name: e.name,
+            type: e.type,
+            path: `${dirPath}/${e.name}`,
+            expanded: false,
+          })),
+        }));
+      }
+    }
+    setTree(newTree);
+    setLoading(false);
+  }, [tree, fetchDir]);
 
   useEffect(() => {
     loadRoot();
@@ -329,12 +451,15 @@ export default function Documents({ token }: DocumentsProps) {
     }
   };
 
-  const handleDelete = async (filePath: string, isDir: boolean) => {
+  const handleDelete = (filePath: string, isDir: boolean) => {
     const name = filePath.split('/').pop() || filePath;
-    const msg = isDir
-      ? `${t('confirmDelete')} "${name}"? (folder & contents)`
-      : `${t('confirmDelete')} "${name}"?`;
-    if (!window.confirm(msg)) return;
+    setDeleteConfirm({ path: filePath, isDir, name });
+  };
+
+  const executeDelete = async () => {
+    if (!deleteConfirm) return;
+    const { path: filePath } = deleteConfirm;
+    setDeleteConfirm(null);
     try {
       const res = await fetch('/api/workspace/delete', {
         method: 'POST',
@@ -349,7 +474,7 @@ export default function Documents({ token }: DocumentsProps) {
           setExcelData(null);
           setDocChunks(null);
         }
-        await loadRoot();
+        await reloadTree();
       } else {
         const err = await res.json();
         alert(err.error || 'Delete failed');
@@ -592,6 +717,22 @@ export default function Documents({ token }: DocumentsProps) {
             onChange={(e) => { handleUploadFiles(e.target.files); }}
           />
         </div>
+        {/* Status message bar */}
+        {statusMessage && (
+          <div style={{
+            padding: '8px 16px',
+            borderBottom: '1px solid #333',
+            background: statusMessage.includes(t('doclingStartFailed')) ? '#3a1a1a' : '#1a2a3a',
+            color: statusMessage.includes(t('doclingStartFailed')) ? '#ff8888' : '#8ab4f8',
+            fontSize: 12,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+          }}>
+            <span>{statusMessage.includes(t('doclingStartFailed')) ? '❌' : '⏳'}</span>
+            <span>{statusMessage}</span>
+          </div>
+        )}
         {/* New folder inline input */}
         {showNewFolder && (
           <div style={{
@@ -988,6 +1129,50 @@ export default function Documents({ token }: DocumentsProps) {
           </div>
         )}
       </div>
+      {/* Delete confirmation dialog */}
+      {deleteConfirm && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.5)', display: 'flex',
+          alignItems: 'center', justifyContent: 'center', zIndex: 1000,
+        }} onClick={() => setDeleteConfirm(null)}>
+          <div style={{
+            background: '#1e1e1e', borderRadius: 12, padding: '24px 28px',
+            border: '1px solid #444', boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
+            maxWidth: 400, minWidth: 300,
+          }} onClick={e => e.stopPropagation()}>
+            <div style={{ fontSize: 15, fontWeight: 600, color: '#eee', marginBottom: 12 }}>
+              {t('confirmDelete')}
+            </div>
+            <div style={{ fontSize: 13, color: '#aaa', marginBottom: 20, lineHeight: 1.5 }}>
+              {deleteConfirm.isDir
+                ? `确定要删除文件夹 "${deleteConfirm.name}" 及其所有内容吗？`
+                : `确定要删除 "${deleteConfirm.name}" 吗？`}
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button
+                onClick={() => setDeleteConfirm(null)}
+                style={{
+                  padding: '6px 16px', borderRadius: 6, border: '1px solid #555',
+                  background: 'transparent', color: '#aaa', cursor: 'pointer', fontSize: 13,
+                }}
+              >
+                {t('cancel')}
+              </button>
+              <button
+                onClick={executeDelete}
+                style={{
+                  padding: '6px 16px', borderRadius: 6, border: '1px solid #f85149',
+                  background: '#f8514920', color: '#f85149', cursor: 'pointer',
+                  fontSize: 13, fontWeight: 600,
+                }}
+              >
+                {t('delete')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

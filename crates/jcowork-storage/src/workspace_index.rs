@@ -769,11 +769,20 @@ impl WorkspaceIndex {
 
     /// Parse a PDF file using the Docling HTTP service.
     ///
+    /// If the service is not running, attempts to auto-start it (useful for
+    /// the desktop app where the service is not started alongside the server).
     /// Returns the structured Markdown content and the document hash (for image assets).
     async fn parse_with_docling(&self, pdf_path: &str, file_path: &str, _workspace_root: &str) -> Result<(String, String)> {
         let service_url = std::env::var("DOCLING_SERVICE_URL")
             .unwrap_or_else(|_| "http://localhost:50060".to_string());
-        
+
+        // Ensure the Docling service is running (auto-start if needed).
+        let manager = crate::docling_manager::DoclingManager::global();
+        if !manager.is_healthy().await {
+            info!("Docling service not reachable, attempting auto-start");
+            manager.ensure_running().await?;
+        }
+
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(180))
             .build()?;

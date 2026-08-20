@@ -177,6 +177,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/workspace/doc/chunks", get(get_document_chunks))
         .route("/api/workspace/doc/image", get(get_document_image))
         .route("/api/workspace/excel-db", get(get_excel_db_content))
+        .route("/api/docling/status", get(get_docling_status))
+        .route("/api/docling/start", post(start_docling_service))
         .route("/api/fetch-url", post(fetch_url))
         .route("/api/ws", get(ws_upgrade))
         .layer(auth_mw)
@@ -2248,4 +2250,47 @@ async fn reindex_workspace_dir(
         "errors": errors,
         "total_files": files.len(),
     }))).into_response()
+}
+
+// --- Docling Service Management API ---
+
+/// Get the current status of the Docling service.
+async fn get_docling_status() -> impl IntoResponse {
+    let manager = jcowork_storage::DoclingManager::global();
+    let status = manager.status().await;
+    (StatusCode::OK, Json(serde_json::json!({
+        "running": status.running,
+        "starting": status.starting,
+        "service_url": status.service_url,
+        "message": status.message,
+    }))).into_response()
+}
+
+/// Start the Docling service in the background (returns immediately).
+/// The frontend should poll `/api/docling/status` to track progress.
+async fn start_docling_service() -> impl IntoResponse {
+    let manager = jcowork_storage::DoclingManager::global();
+
+    // Already running?
+    if manager.is_healthy().await {
+        return (StatusCode::OK, Json(serde_json::json!({
+            "ok": true,
+            "message": "Docling service is already running",
+        }))).into_response();
+    }
+
+    // Try to start in background.
+    match manager.start_background().await {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({
+            "ok": true,
+            "message": "Docling service is starting, poll /api/docling/status for progress",
+        }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "ok": false,
+                "message": format!("Failed to start Docling service: {}", e),
+            })),
+        ).into_response(),
+    }
 }

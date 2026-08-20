@@ -41,7 +41,9 @@
     "resources": [
       "providers.json",
       "web_search.py",
-      "../../web/dist/**/*"
+      "../../web/dist/**/*",
+      "../../services/docling/app.py",
+      "../../services/docling/requirements.txt"
     ]
   }
 }

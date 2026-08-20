@@ -2,6 +2,7 @@
 
 pub mod database;
 pub mod doc_chunker;
+pub mod docling_manager;
 pub mod embedding_client;
 pub mod excel_db;
 pub mod feishu_store;
@@ -15,6 +16,7 @@ pub use database::Database;
 pub use doc_chunker::{DocChunk, chunk_markdown};
 pub use embedding_client::{EmbeddingClient, cosine_similarity, embedding_to_bytes, bytes_to_embedding};
 pub use feishu_store::FeishuConfigStore;
+pub use docling_manager::{DoclingManager, DoclingStatus};
 pub use file_store::FileStore;
 pub use user_store::UserStore;
 pub use vector_index::VectorIndex;

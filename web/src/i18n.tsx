@@ -71,6 +71,11 @@ const translations = {
     rows: '行',
     excelPreviewFirst: '预览前',
     excelNoTables: '该 Excel 没有可显示的数据表',
+    doclingStarting: 'Docling 服务正在启动，首次启动可能需要几分钟...',
+    doclingReady: 'Docling 服务已就绪',
+    doclingStartFailed: 'Docling 服务启动失败',
+    doclingChecking: '正在检查 Docling 服务...',
+    pdfParsing: 'PDF 正在解析中...',
 
     // Schedule
     reminders: '提醒',
@@ -264,6 +269,11 @@ const translations = {
     rows: 'rows',
     excelPreviewFirst: 'showing first',
     excelNoTables: 'No displayable tables in this Excel file',
+    doclingStarting: 'Docling service is starting, this may take a few minutes on first run...',
+    doclingReady: 'Docling service is ready',
+    doclingStartFailed: 'Docling service failed to start',
+    doclingChecking: 'Checking Docling service...',
+    pdfParsing: 'PDF is being parsed...',
 
     // Schedule
     reminders: 'Reminders',
