@@ -193,7 +193,9 @@ export default function Documents({ token }: DocumentsProps) {
   const loadRoot = useCallback(async () => {
     setLoading(true);
     const entries = await fetchDir('.');
-    setTree(entries.map(e => ({
+    // Filter out hidden files/dirs (starting with ".")
+    const visible = entries.filter(e => !e.name.startsWith('.'));
+    setTree(visible.map(e => ({
       name: e.name,
       type: e.type,
       path: e.name,
@@ -220,10 +222,12 @@ export default function Documents({ token }: DocumentsProps) {
     const node = findNode(tree, nodePath);
     if (node && !node.expanded && (!node.children || node.children.length === 0)) {
       const entries = await fetchDir(nodePath);
+      // Filter out hidden files/dirs (starting with ".")
+      const visible = entries.filter(e => !e.name.startsWith('.'));
       setTree(prev => updateNode(prev, nodePath, (n) => ({
         ...n,
         loading: false,
-        children: entries.map(e => ({
+        children: visible.map(e => ({
           name: e.name,
           type: e.type,
           path: `${nodePath}/${e.name}`,
@@ -434,6 +438,33 @@ export default function Documents({ token }: DocumentsProps) {
           <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {node.name}
           </span>
+          {/* Folder action buttons: new folder, upload, delete */}
+          {node.type === 'dir' && (
+            <>
+              <span
+                className="tree-icon-btn"
+                style={{
+                  opacity: 0, fontSize: 12, flexShrink: 0, cursor: 'pointer',
+                  transition: 'opacity 0.15s', color: '#58a6ff',
+                }}
+                onClick={(e) => { e.stopPropagation(); setCurrentDir(node.path); setShowNewFolder(true); setNewFolderName(''); }}
+                title={t('newFolder')}
+              >
+                📁+
+              </span>
+              <span
+                className="tree-icon-btn"
+                style={{
+                  opacity: 0, fontSize: 12, flexShrink: 0, cursor: 'pointer',
+                  transition: 'opacity 0.15s', color: '#58a6ff',
+                }}
+                onClick={(e) => { e.stopPropagation(); setCurrentDir(node.path); fileInputRef.current?.click(); }}
+                title={t('upload')}
+              >
+                ⬆
+              </span>
+            </>
+          )}
           {/* Delete button */}
           <span
             style={{
@@ -485,6 +516,8 @@ export default function Documents({ token }: DocumentsProps) {
       <style>{`
         .tree-row:hover .delete-btn { opacity: 0.6 !important; }
         .tree-row:hover .delete-btn:hover { opacity: 1 !important; }
+        .tree-row:hover .tree-icon-btn { opacity: 0.6 !important; }
+        .tree-row:hover .tree-icon-btn:hover { opacity: 1 !important; }
       `}</style>
       {/* File tree sidebar */}
       <div style={{
@@ -697,7 +730,7 @@ export default function Documents({ token }: DocumentsProps) {
                 )}
                 {previewPath}
               </span>
-              <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+              <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
                 {previewPath.endsWith('.html') && (
                   <>
                     <div style={{ display: 'flex', borderRadius: 4, border: '1px solid #555', overflow: 'hidden' }}>
