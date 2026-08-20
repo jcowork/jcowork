@@ -123,7 +123,7 @@ A native desktop application is available for macOS and Windows, powered by [Tau
 
 | Platform | Format | Download |
 |----------|--------|------|
-| macOS (Apple Silicon) | `.dmg` | [Jcowork_0.2.2_aarch64.dmg](https://github.com/jcowork/jcowork/releases/download/v0.2.2/Jcowork_0.2.2_aarch64.dmg) |
+| macOS (Apple Silicon) | `.dmg` | [Jcowork_0.2.5_aarch64.dmg](https://github.com/jcowork/jcowork/releases/download/v0.2.5/Jcowork_0.2.5_aarch64.dmg) |
 
 **macOS installation:**
 1. Download and open the `.dmg` file

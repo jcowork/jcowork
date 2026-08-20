@@ -1,6 +1,6 @@
 {
   "productName": "Jcowork",
-  "version": "0.2.2",
+  "version": "0.2.5",
   "identifier": "com.jcowork.desktop",
   "build": {
     "devUrl": "http://localhost:3000"
