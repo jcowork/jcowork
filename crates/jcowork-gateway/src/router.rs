@@ -122,6 +122,7 @@ pub struct SkillInfo {
 pub struct AuthUser {
     pub user_id: String,
     pub username: String,
+    pub token: String,
 }
 
 // --- Route handlers ---
@@ -293,6 +294,7 @@ async fn auth_middleware(
             req.extensions_mut().insert(AuthUser {
                 user_id: claims.sub,
                 username: claims.username,
+                token,
             });
             next.run(req).await
         }
@@ -959,6 +961,8 @@ async fn list_workspace_files(
 #[derive(Debug, Deserialize)]
 struct DownloadFileQuery {
     path: String,
+    #[serde(default)]
+    token: String,
 }
 
 // --- PDF Upload API ---
@@ -1385,7 +1389,8 @@ async fn download_workspace_file(
     match store.read_file(&params.path).await {
         Ok(content) => {
             // Determine content type from extension
-            let content_type = if params.path.ends_with(".html") || params.path.ends_with(".htm") {
+            let is_html = params.path.ends_with(".html") || params.path.ends_with(".htm");
+            let content_type = if is_html {
                 "text/html; charset=utf-8"
             } else if params.path.ends_with(".css") {
                 "text/css; charset=utf-8"
@@ -1405,6 +1410,49 @@ async fn download_workspace_file(
                 "text/plain; charset=utf-8"
             };
 
+            // For HTML files, inject a script that overrides fetch() to resolve
+            // relative URLs against the workspace download API. This allows HTML
+            // files to load sibling files (e.g. CSV data) regardless of whether
+            // they are opened in an iframe, a new tab, or an external browser.
+            let final_content = if is_html {
+                let dir = params.path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+                let token = &auth_user.token;
+                let inject_script = format!(
+                    r#"<script>
+(function(){{
+  var __dir={dir_json};
+  var __token={token_json};
+  var __orig=window.fetch;
+  function __resolve(u){{var c=u.split('?')[0].split('#')[0];return __dir?__dir+'/'+c:c;}}
+  window.fetch=function(u,o){{
+    if(typeof u==='string'&&!u.startsWith('/')&&!u.startsWith('http')&&!u.startsWith('blob:')&&!u.startsWith('data:')){{
+      u='/api/workspace/download?path='+encodeURIComponent(__resolve(u))+'&token='+encodeURIComponent(__token);
+    }}
+    return __orig.call(this,u,o);
+  }};
+  var __xo=XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open=function(m,u){{
+    if(typeof u==='string'&&!u.startsWith('/')&&!u.startsWith('http')&&!u.startsWith('blob:')&&!u.startsWith('data:')){{
+      u='/api/workspace/download?path='+encodeURIComponent(__resolve(u))+'&token='+encodeURIComponent(__token);
+    }}
+    return __xo.apply(this,arguments);
+  }};
+}})();
+</script>"#,
+                    dir_json = serde_json::to_string(dir).unwrap_or_default(),
+                    token_json = serde_json::to_string(token).unwrap_or_default(),
+                );
+                if let Some(pos) = content.find("<head>") {
+                    format!("{}{}{}", &content[..pos + 6], inject_script, &content[pos + 6..])
+                } else if let Some(pos) = content.find("<HEAD>") {
+                    format!("{}{}{}", &content[..pos + 6], inject_script, &content[pos + 6..])
+                } else {
+                    format!("{}{}", inject_script, content)
+                }
+            } else {
+                content
+            };
+
             let filename = params.path.rsplit('/').next().unwrap_or("file");
             (
                 StatusCode::OK,
@@ -1412,7 +1460,7 @@ async fn download_workspace_file(
                     (axum::http::header::CONTENT_TYPE, content_type.to_string()),
                     (axum::http::header::CONTENT_DISPOSITION, format!("inline; filename=\"{}\"", filename)),
                 ],
-                content,
+                final_content,
             )
                 .into_response()
         }
