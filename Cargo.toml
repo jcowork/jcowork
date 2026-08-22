@@ -111,3 +111,6 @@ tempfile = "3"
 # Desktop app
 tauri = { version = "2", features = [] }
 tauri-build = { version = "2", features = [] }
+
+# Open URLs/files in default browser
+open = "5"

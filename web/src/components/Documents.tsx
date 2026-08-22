@@ -120,6 +120,43 @@ export default function Documents({ token }: DocumentsProps) {
   const [currentDir, setCurrentDir] = useState<string>('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<{ path: string; isDir: boolean; name: string } | null>(null);
+  const [draggedPath, setDraggedPath] = useState<string | null>(null);
+  const [dragOverPath, setDragOverPath] = useState<string | null>(null);
+  const draggedPathRef = useRef<string | null>(null);
+  const [dragDebug, setDragDebug] = useState<string>('');
+
+  const handleMove = async (from: string, to: string) => {
+    // Prevent moving a folder into itself or its own descendant
+    const name = from.split('/').pop() || from;
+    if (to === from || to.startsWith(from + '/')) {
+      alert(`Cannot move "${name}" into itself or its subfolder.`);
+      return;
+    }
+    // Prevent no-op move
+    const fromParent = from.includes('/') ? from.substring(0, from.lastIndexOf('/')) : '';
+    if (fromParent === to) return;
+    const toPath = to ? `${to}/${name}` : name;
+    if (toPath === from) return;
+    try {
+      const res = await fetch('/api/workspace/move', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from, to: toPath }),
+      });
+      if (res.ok) {
+        // If the moved file/folder was being previewed, update preview path
+        if (previewPath && (previewPath === from || previewPath.startsWith(from + '/'))) {
+          setPreviewPath(toPath + previewPath.slice(from.length));
+        }
+        await reloadTree();
+      } else {
+        const err = await res.json();
+        alert(err.error || 'Move failed');
+      }
+    } catch {
+      alert('Network error');
+    }
+  };
 
   const handleCreateFolder = async () => {
     if (!newFolderName.trim()) return;
@@ -492,7 +529,13 @@ export default function Documents({ token }: DocumentsProps) {
   };
 
   const openInNewTab = (filePath: string) => {
-    window.open(`/api/workspace/download?path=${encodeURIComponent(filePath)}&token=${encodeURIComponent(token)}`, '_blank');
+    const url = `/api/workspace/download?path=${encodeURIComponent(filePath)}&token=${encodeURIComponent(token)}`;
+    // In Tauri WebView, use native command to open in system browser
+    if ((window as any).__TAURI__) {
+      (window as any).__TAURI__.core.invoke('open_in_browser', { url: `http://localhost:3000${url}` });
+    } else {
+      window.open(url, '_blank');
+    }
   };
 
   const getFileIcon = (name: string) => {
@@ -518,11 +561,52 @@ export default function Documents({ token }: DocumentsProps) {
   };
 
   const renderTree = (nodes: TreeNode[], depth: number = 0): React.ReactNode => {
-    return nodes.map(node => (
+    return nodes.map(node => {
+      const isDragTarget = node.type === 'dir';
+      const isDragOver = dragOverPath === node.path;
+      const isBeingDragged = draggedPath === node.path;
+      return (
       <div key={node.path}>
         <div
           className="tree-row"
+          draggable
           onClick={() => node.type === 'dir' ? toggleDir(node.path) : openFile(node.path)}
+          onDragStart={(e) => {
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('text/plain', node.path);
+            draggedPathRef.current = node.path;
+            setDraggedPath(node.path);
+            setDragDebug(`dragStart: ${node.path}`);
+          }}
+          onDragEnd={() => {
+            draggedPathRef.current = null;
+            setDraggedPath(null);
+            setDragOverPath(null);
+          }}
+          onDragOver={(e) => {
+            if (isDragTarget && draggedPathRef.current && draggedPathRef.current !== node.path) {
+              if (draggedPathRef.current.startsWith(node.path + '/')) return;
+              e.preventDefault();
+              e.dataTransfer.dropEffect = 'move';
+              setDragOverPath(node.path);
+              setDragDebug(`dragOver: ${node.path} (from: ${draggedPathRef.current})`);
+            }
+          }}
+          onDragLeave={() => {
+            if (dragOverPath === node.path) setDragOverPath(null);
+          }}
+          onDrop={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const fromPath = draggedPathRef.current || e.dataTransfer.getData('text/plain');
+            setDragOverPath(null);
+            setDraggedPath(null);
+            draggedPathRef.current = null;
+            setDragDebug(`drop: from=${fromPath} to=${node.path} isDragTarget=${isDragTarget}`);
+            if (fromPath && isDragTarget) {
+              handleMove(fromPath, node.path);
+            }
+          }}
           style={{
             display: 'flex',
             alignItems: 'center',
@@ -533,19 +617,12 @@ export default function Documents({ token }: DocumentsProps) {
             cursor: 'pointer',
             fontSize: 13,
             color: '#ddd',
-            background: previewPath === node.path ? '#1a3a5a' : 'transparent',
-            transition: 'background 0.1s',
+            border: isDragOver ? '1px dashed #3fb950' : '1px solid transparent',
+            opacity: isBeingDragged ? 0.4 : 1,
+            transition: 'background 0.1s, border 0.1s, opacity 0.1s',
           }}
-          onMouseEnter={e => {
-            if (previewPath !== node.path) {
-              e.currentTarget.style.background = '#1e1e1e';
-            }
-          }}
-          onMouseLeave={e => {
-            if (previewPath !== node.path) {
-              e.currentTarget.style.background = 'transparent';
-            }
-          }}
+          data-selected={previewPath === node.path || undefined}
+          data-dragover={isDragOver || undefined}
         >
           {node.type === 'dir' ? (
             <>
@@ -622,7 +699,23 @@ export default function Documents({ token }: DocumentsProps) {
           )}
         </div>
         {node.type === 'dir' && node.expanded && node.children && (
-          <div>
+          <div
+            onDragOver={(e) => {
+              const src = draggedPathRef.current;
+              if (src && !src.startsWith(node.path + '/') && src !== node.path) {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'move';
+              }
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              const fromPath = draggedPathRef.current || e.dataTransfer.getData('text/plain');
+              if (fromPath && !fromPath.startsWith(node.path + '/') && fromPath !== node.path) {
+                handleMove(fromPath, node.path);
+              }
+            }}
+            style={{ minHeight: 4 }}
+          >
             {node.children.length === 0 && !node.loading ? (
               <div style={{ paddingLeft: 24 + depth * 16, fontSize: 12, color: '#555', padding: '4px 8px' }}>
                 Empty
@@ -633,12 +726,19 @@ export default function Documents({ token }: DocumentsProps) {
           </div>
         )}
       </div>
-    ));
+      );
+    });
   };
 
   return (
     <div style={{ display: 'flex', height: '100%' }}>
       <style>{`
+        .tree-row { background: transparent; }
+        .tree-row:hover { background: #1e1e1e; }
+        .tree-row[data-selected] { background: #1a3a5a; }
+        .tree-row[data-selected]:hover { background: #1a3a5a; }
+        .tree-row[data-dragover] { background: #1a4a2a; }
+        .tree-row[data-dragover]:hover { background: #1a4a2a; }
         .tree-row:hover .delete-btn { opacity: 0.6 !important; }
         .tree-row:hover .delete-btn:hover { opacity: 1 !important; }
         .tree-row:hover .tree-icon-btn { opacity: 0.6 !important; }
@@ -828,7 +928,26 @@ export default function Documents({ token }: DocumentsProps) {
             </div>
           </div>
         )}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '8px 4px' }}>
+        <div style={{
+          flex: 1, overflowY: 'auto', padding: '8px 4px',
+        }}
+          onDragOver={(e) => {
+            // Allow drop on root area only if dragging a non-root item
+            const src = draggedPathRef.current;
+            if (src && src.includes('/')) {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = 'move';
+            }
+          }}
+          onDrop={(e) => {
+            e.preventDefault();
+            const fromPath = draggedPathRef.current || e.dataTransfer.getData('text/plain');
+            // Only allow moving to root if item is currently in a subfolder
+            if (fromPath && fromPath.includes('/')) {
+              handleMove(fromPath, '');
+            }
+          }}
+        >
           {loading ? (
             <div style={{ color: '#666', padding: 16, textAlign: 'center' }}>{t('loading')}</div>
           ) : tree.length === 0 ? (
@@ -842,9 +961,17 @@ export default function Documents({ token }: DocumentsProps) {
             renderTree(tree)
           )}
         </div>
+        {/* Drag debug panel - remove after verification */}
+        {dragDebug && (
+          <div style={{
+            padding: '4px 8px', fontSize: 10, color: '#0f0', background: '#000',
+            borderTop: '1px solid #333', fontFamily: 'monospace',
+            maxHeight: 40, overflow: 'auto',
+          }}>
+            {dragDebug}
+          </div>
+        )}
       </div>
-
-      {/* File preview area */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
         {previewPath ? (
           <>

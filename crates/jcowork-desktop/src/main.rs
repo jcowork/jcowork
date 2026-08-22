@@ -349,12 +349,20 @@ async fn main() {
     info!("Server ready, launching Tauri window");
 
     // ── 17. Launch Tauri desktop app ─
-    if let Err(e) = tauri::Builder::default().run(tauri::generate_context!()) {
+    if let Err(e) = tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![open_in_browser])
+        .run(tauri::generate_context!()) {
         error!(error = %e, "Tauri application error");
         eprintln!("Tauri error: {}", e);
     }
 
     info!("Jcowork Desktop stopped");
+}
+
+/// Open a URL in the system's default browser.
+#[tauri::command]
+fn open_in_browser(url: String) -> Result<(), String> {
+    open::that(&url).map_err(|e| format!("Failed to open browser: {}", e))
 }
 
 /// Show a native error dialog and exit.

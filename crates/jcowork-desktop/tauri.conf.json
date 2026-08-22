@@ -1,17 +1,18 @@
 {
   "productName": "Jcowork",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "identifier": "com.jcowork.desktop",
   "build": {
     "devUrl": "http://localhost:3000"
   },
   "app": {
-    "withGlobalTauri": false,
+    "withGlobalTauri": true,
     "windows": [
       {
         "title": "Jcowork",
         "label": "main",
         "url": "http://localhost:3000",
+        "dragDropEnabled": false,
         "width": 1200,
         "height": 800,
         "minWidth": 800,
