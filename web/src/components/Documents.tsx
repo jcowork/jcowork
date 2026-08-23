@@ -97,6 +97,40 @@ const ALLOWED_EXTENSIONS = '.pdf,.md,.html,.htm,.xlsx,.xls,.docx,.doc';
 // Characters fetched per page when previewing long documents (PDFs)
 const PREVIEW_PAGE_SIZE = 30000;
 
+/**
+ * Inject a script into HTML content that overrides `fetch()` to resolve
+ * relative URLs against the workspace download API. Used only for iframe
+ * srcDoc rendering — the stored content stays clean.
+ */
+function injectWorkspaceFetch(html: string, filePath: string, token: string): string {
+  const dir = filePath.includes('/') ? filePath.substring(0, filePath.lastIndexOf('/')) : '';
+  const script = `<script>
+(function() {
+  var __dir = ${JSON.stringify(dir)};
+  var __token = ${JSON.stringify(token)};
+  var __orig = window.fetch;
+  function __resolve(u) { var c = u.split('?')[0].split('#')[0]; return __dir ? __dir + '/' + c : c; }
+  window.fetch = function(u, o) {
+    if (typeof u === 'string' && !u.startsWith('/') && !u.startsWith('http') && !u.startsWith('blob:') && !u.startsWith('data:')) {
+      u = '/api/workspace/download?path=' + encodeURIComponent(__resolve(u)) + '&token=' + encodeURIComponent(__token);
+    }
+    return __orig.call(this, u, o);
+  };
+  var __xo = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(m, u) {
+    if (typeof u === 'string' && !u.startsWith('/') && !u.startsWith('http') && !u.startsWith('blob:') && !u.startsWith('data:')) {
+      u = '/api/workspace/download?path=' + encodeURIComponent(__resolve(u)) + '&token=' + encodeURIComponent(__token);
+    }
+    return __xo.apply(this, arguments);
+  };
+})();
+</script>`;
+  if (/<head[^>]*>/i.test(html)) {
+    return html.replace(/(<head[^>]*>)/i, `$1${script}`);
+  }
+  return script + html;
+}
+
 export default function Documents({ token }: DocumentsProps) {
   const t = useT();
   const [tree, setTree] = useState<TreeNode[]>([]);
@@ -124,6 +158,56 @@ export default function Documents({ token }: DocumentsProps) {
   const [dragOverPath, setDragOverPath] = useState<string | null>(null);
   const draggedPathRef = useRef<string | null>(null);
   const [dragDebug, setDragDebug] = useState<string>('');
+  // Editor state for text files
+  const [editing, setEditing] = useState(false);
+  const [editContent, setEditContent] = useState('');
+  const [editDirty, setEditDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const isEditableFile = (path: string) => {
+    const ext = path.split('.').pop()?.toLowerCase();
+    return ext === 'html' || ext === 'htm' || ext === 'md' || ext === 'txt' || ext === 'csv';
+  };
+
+  const startEditing = () => {
+    setEditContent(previewContent);
+    setEditDirty(false);
+    setEditing(true);
+  };
+
+  const cancelEditing = () => {
+    if (editDirty && !confirm('有未保存的更改，确定放弃吗？')) return;
+    setEditing(false);
+    setEditDirty(false);
+  };
+
+  const saveFile = async () => {
+    if (!previewPath || saving) return;
+    setSaving(true);
+    try {
+      const res = await fetch('/api/workspace/save', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ path: previewPath, content: editContent }),
+      });
+      if (res.ok) {
+        setPreviewContent(editContent);
+        setEditing(false);
+        setEditDirty(false);
+        setStatusMessage('✓ 已保存');
+        setTimeout(() => setStatusMessage(''), 2000);
+      } else {
+        const err = await res.json();
+        alert(err.error || '保存失败');
+      }
+    } catch {
+      alert('网络错误，保存失败');
+    }
+    setSaving(false);
+  };
 
   const handleMove = async (from: string, to: string) => {
     // Prevent moving a folder into itself or its own descendant
@@ -408,6 +492,8 @@ export default function Documents({ token }: DocumentsProps) {
     setHtmlViewMode('preview');
     setPreviewPaging(null);
     setPreviewLoadingMore(false);
+    setEditing(false);
+    setEditDirty(false);
 
     const ext = filePath.split('.').pop()?.toLowerCase();
 
@@ -455,8 +541,10 @@ export default function Documents({ token }: DocumentsProps) {
         }
       }
     } else {
-      // Text files: fetch directly
-      const res = await fetch(`/api/workspace/download?path=${encodeURIComponent(filePath)}`, {
+      // Text files: fetch directly (use raw=true for HTML to get clean content)
+      const isHtml = ext === 'html' || ext === 'htm';
+      const rawParam = isHtml ? '&raw=true' : '';
+      const res = await fetch(`/api/workspace/download?path=${encodeURIComponent(filePath)}${rawParam}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
@@ -999,53 +1087,109 @@ export default function Documents({ token }: DocumentsProps) {
                 {previewPath}
               </span>
               <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-                {previewPath.endsWith('.html') && (
+                {editing ? (
                   <>
-                    <div style={{ display: 'flex', borderRadius: 4, border: '1px solid #555', overflow: 'hidden' }}>
-                      <button
-                        onClick={() => setHtmlViewMode('preview')}
-                        style={{
-                          padding: '3px 10px',
-                          border: 'none',
-                          borderRight: '1px solid #555',
-                          background: htmlViewMode === 'preview' ? '#1f6feb' : 'transparent',
-                          color: htmlViewMode === 'preview' ? '#fff' : '#aaa',
-                          cursor: 'pointer',
-                          fontSize: 12,
-                          fontWeight: htmlViewMode === 'preview' ? 600 : 400,
-                        }}
-                      >
-                        {t('preview')}
-                      </button>
-                      <button
-                        onClick={() => setHtmlViewMode('source')}
-                        style={{
-                          padding: '3px 10px',
-                          border: 'none',
-                          background: htmlViewMode === 'source' ? '#1f6feb' : 'transparent',
-                          color: htmlViewMode === 'source' ? '#fff' : '#aaa',
-                          cursor: 'pointer',
-                          fontSize: 12,
-                          fontWeight: htmlViewMode === 'source' ? 600 : 400,
-                        }}
-                      >
-                        {t('source')}
-                      </button>
-                    </div>
                     <button
-                      onClick={() => openInNewTab(previewPath)}
+                      onClick={saveFile}
+                      disabled={saving}
                       style={{
                         padding: '3px 10px',
                         borderRadius: 4,
-                        border: '1px solid #1f6feb',
+                        border: '1px solid #3fb950',
+                        background: saving ? '#1a3a1a' : '#238636',
+                        color: saving ? '#666' : '#fff',
+                        cursor: saving ? 'not-allowed' : 'pointer',
+                        fontSize: 12,
+                        fontWeight: 600,
+                      }}
+                    >
+                      {saving ? '⏳' : '✓'} {t('save')}
+                    </button>
+                    <button
+                      onClick={cancelEditing}
+                      style={{
+                        padding: '3px 10px',
+                        borderRadius: 4,
+                        border: '1px solid #555',
                         background: 'transparent',
-                        color: '#58a6ff',
+                        color: '#aaa',
                         cursor: 'pointer',
                         fontSize: 12,
                       }}
                     >
-                      {t('openInBrowser')}
+                      {t('cancel')}
                     </button>
+                    {editDirty && (
+                      <span style={{ fontSize: 11, color: '#f0883e', alignSelf: 'center' }}>● 未保存</span>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    {previewPath.endsWith('.html') && (
+                      <>
+                        <div style={{ display: 'flex', borderRadius: 4, border: '1px solid #555', overflow: 'hidden' }}>
+                          <button
+                            onClick={() => setHtmlViewMode('preview')}
+                            style={{
+                              padding: '3px 10px',
+                              border: 'none',
+                              borderRight: '1px solid #555',
+                              background: htmlViewMode === 'preview' ? '#1f6feb' : 'transparent',
+                              color: htmlViewMode === 'preview' ? '#fff' : '#aaa',
+                              cursor: 'pointer',
+                              fontSize: 12,
+                              fontWeight: htmlViewMode === 'preview' ? 600 : 400,
+                            }}
+                          >
+                            {t('preview')}
+                          </button>
+                          <button
+                            onClick={() => setHtmlViewMode('source')}
+                            style={{
+                              padding: '3px 10px',
+                              border: 'none',
+                              background: htmlViewMode === 'source' ? '#1f6feb' : 'transparent',
+                              color: htmlViewMode === 'source' ? '#fff' : '#aaa',
+                              cursor: 'pointer',
+                              fontSize: 12,
+                              fontWeight: htmlViewMode === 'source' ? 600 : 400,
+                            }}
+                          >
+                            {t('source')}
+                          </button>
+                        </div>
+                        <button
+                          onClick={() => openInNewTab(previewPath)}
+                          style={{
+                            padding: '3px 10px',
+                            borderRadius: 4,
+                            border: '1px solid #1f6feb',
+                            background: 'transparent',
+                            color: '#58a6ff',
+                            cursor: 'pointer',
+                            fontSize: 12,
+                          }}
+                        >
+                          {t('openInBrowser')}
+                        </button>
+                      </>
+                    )}
+                    {isEditableFile(previewPath) && (
+                      <button
+                        onClick={startEditing}
+                        style={{
+                          padding: '3px 10px',
+                          borderRadius: 4,
+                          border: '1px solid #f0883e',
+                          background: 'transparent',
+                          color: '#f0883e',
+                          cursor: 'pointer',
+                          fontSize: 12,
+                        }}
+                      >
+                        ✎ {t('edit')}
+                      </button>
+                    )}
                   </>
                 )}
                 <button
@@ -1063,7 +1207,11 @@ export default function Documents({ token }: DocumentsProps) {
                   {t('download')}
                 </button>
                 <button
-                  onClick={() => { setPreviewPath(null); setPreviewContent(''); setExcelData(null); setDocChunks(null); setPreviewPaging(null); setPreviewLoadingMore(false); }}
+                  onClick={() => {
+                    if (editing && editDirty && !confirm('有未保存的更改，确定关闭吗？')) return;
+                    setPreviewPath(null); setPreviewContent(''); setExcelData(null); setDocChunks(null); setPreviewPaging(null); setPreviewLoadingMore(false);
+                    setEditing(false); setEditDirty(false);
+                  }}
                   style={{
                     padding: '3px 10px',
                     borderRadius: 4,
@@ -1116,8 +1264,9 @@ export default function Documents({ token }: DocumentsProps) {
               </div>
             )}
             <div
-              style={{ flex: 1, overflow: 'auto', padding: 16 }}
+              style={{ flex: 1, overflow: 'hidden', padding: editing ? 0 : 16 }}
               onScroll={(e) => {
+                if (editing) return;
                 const el = e.currentTarget;
                 if (previewPaging && el.scrollTop + el.clientHeight >= el.scrollHeight - 300) {
                   loadMorePreview();
@@ -1126,6 +1275,43 @@ export default function Documents({ token }: DocumentsProps) {
             >
               {previewLoading ? (
                 <div style={{ color: '#666', textAlign: 'center', paddingTop: 40 }}>{t('loading')}</div>
+              ) : editing ? (
+                <textarea
+                  value={editContent}
+                  onChange={(e) => { setEditContent(e.target.value); setEditDirty(true); }}
+                  onKeyDown={(e) => {
+                    if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+                      e.preventDefault();
+                      saveFile();
+                    }
+                    if (e.key === 'Tab') {
+                      e.preventDefault();
+                      const start = e.currentTarget.selectionStart;
+                      const end = e.currentTarget.selectionEnd;
+                      const val = editContent;
+                      setEditContent(val.substring(0, start) + '  ' + val.substring(end));
+                      requestAnimationFrame(() => {
+                        e.currentTarget.selectionStart = e.currentTarget.selectionEnd = start + 2;
+                      });
+                    }
+                  }}
+                  spellCheck={false}
+                  style={{
+                    width: '100%',
+                    height: '100%',
+                    margin: 0,
+                    padding: 16,
+                    border: 'none',
+                    outline: 'none',
+                    resize: 'none',
+                    fontSize: 13,
+                    lineHeight: 1.6,
+                    color: '#c9d1d9',
+                    background: '#0d1117',
+                    fontFamily: "'SF Mono', 'Fira Code', 'Consolas', monospace",
+                    tabSize: 2,
+                  }}
+                />
               ) : excelData ? (
                 renderExcelPreview(excelData, activeTable, setActiveTable, t)
               ) : previewMode === 'chunks' && docChunks ? (
@@ -1211,7 +1397,7 @@ export default function Documents({ token }: DocumentsProps) {
                 </div>
               ) : previewPath.endsWith('.html') && htmlViewMode === 'preview' ? (
                 <iframe
-                  srcDoc={previewContent}
+                  srcDoc={injectWorkspaceFetch(previewContent, previewPath, token)}
                   style={{
                     width: '100%',
                     height: '100%',

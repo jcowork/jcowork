@@ -170,6 +170,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/workspace/files-recursive", get(list_workspace_files_recursive))
         .route("/api/workspace/delete", post(delete_workspace_file))
         .route("/api/workspace/move", post(move_workspace_path))
+        .route("/api/workspace/save", post(save_workspace_file))
         .route("/api/workspace/index/search", get(search_workspace_index))
         .route("/api/workspace/index/list", get(list_workspace_index))
         .route("/api/workspace/index/content", get(get_indexed_content))
@@ -963,6 +964,8 @@ struct DownloadFileQuery {
     path: String,
     #[serde(default)]
     token: String,
+    #[serde(default)]
+    raw: bool,
 }
 
 // --- PDF Upload API ---
@@ -1414,7 +1417,7 @@ async fn download_workspace_file(
             // relative URLs against the workspace download API. This allows HTML
             // files to load sibling files (e.g. CSV data) regardless of whether
             // they are opened in an iframe, a new tab, or an external browser.
-            let final_content = if is_html {
+            let final_content = if is_html && !params.raw {
                 let dir = params.path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
                 let token = &auth_user.token;
                 let inject_script = format!(
@@ -1469,6 +1472,31 @@ async fn download_workspace_file(
             Json(serde_json::json!({ "error": e.to_string() })),
         )
             .into_response(),
+    }
+}
+
+// --- Save (overwrite) a text file in workspace ---
+
+#[derive(Debug, Deserialize)]
+struct SaveFileRequest {
+    path: String,
+    content: String,
+}
+
+async fn save_workspace_file(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Json(body): Json<SaveFileRequest>,
+) -> impl IntoResponse {
+    let workspace_root = format!("{}/{}/workspace", state.data_dir, auth_user.user_id);
+    let store = FileStore::new(&workspace_root);
+
+    match store.write_file(&body.path, &body.content).await {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "ok": true, "path": body.path }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("Failed to save file: {}", e) })),
+        ).into_response(),
     }
 }
 
