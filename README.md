@@ -4,89 +4,98 @@ A cloud-native, multi-user shared AI agent built with Rust (axum + tokio) and Re
 
 English | [中文](./README_CN.md)
 
-## Quick Start
-
-One-click install scripts for **Windows 11+**, **Ubuntu 24.04+**, and **macOS**. The script installs all dependencies
-(Rust, Python 3.12+, Node 20+, Python venv, Playwright Chromium),
-builds the backend and frontend, and generates a default `.env` config:
-
-```bash
-# macOS / Ubuntu
-git clone <repo> && cd jcowork
-bash scripts/install.sh          # Add --start to launch the service after install
-```
-
-```powershell
-# Windows 11 (PowerShell)
-git clone <repo>; cd jcowork
-powershell -ExecutionPolicy Bypass -File scripts\install.ps1     # Add -Start to launch immediately
-```
-
-Then add at least one LLM API key to `.env` and start the service:
-
-```bash
-bash scripts/start.sh      # macOS / Ubuntu (docling :50060 + main server :3000)
-bash scripts/stop.sh
-```
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\start.ps1    # Windows
-powershell -ExecutionPolicy Bypass -File scripts\stop.sh
-```
-
-Open http://localhost:3000 in your browser. The manual steps below are for developers who want full control.
-
 ## Architecture Overview
 
 ```
 ┌─────────────────────────────────────────────────┐
-│                   Client                          │
+│                   Clients                        │
 │  (Web UI / API)                                  │
 └──────────────────┬──────────────────────────────┘
                    │ WebSocket / REST
 ┌──────────────────▼──────────────────────────────┐
-│           Gateway (axum + tokio)                  │
+│           Gateway Layer (axum + tokio)            │
 │  ┌──────────┐ ┌──────────┐ ┌──────────────────┐ │
-│  │  Auth &  │ │ Session  │ │  Message Router  │ │
-│  │  User    │ │ Manager  │ │ (Multi-platform) │ │
-│  │  (JWT)  │ │(DashMap) │ │                  │ │
+│  │  Auth &   │ │ Session  │ │  Delivery Router  │ │
+│  │  Users    │ │ Manager  │ │  (per-platform)   │ │
+│  │  (JWT)   │ │(DashMap) │ │                   │ │
 │  └──────────┘ └──────────┘ └──────────────────┘ │
 └──────────────────┬──────────────────────────────┘
-                   │ Per-user mpsc channel
+                   │ mpsc channel per user
 ┌──────────────────▼──────────────────────────────┐
 │        UserActor (per-user tokio task)            │
 │  ┌──────────┐ ┌──────────┐ ┌──────────────────┐ │
-│  │ Agent    │ │ Prompt   │ │  Context Engine  │ │
-│  │ Loop     │ │ Builder  │ │  (Compressor)    │ │
+│  │  Agent   │ │  Prompt  │ │  Context Engine   │ │
+│  │  Loop    │ │  Builder │ │  (Compressor)     │ │
 │  └──────────┘ └──────────┘ └──────────────────┘ │
 │  ┌──────────┐ ┌──────────┐ ┌──────────────────┐ │
-│  │ Memory   │ │ Skill    │ │  Tool Registry   │ │
-│  │ Manager  │ │ System   │ │  & Dispatch      │ │
+│  │  Memory  │ │  Skill   │ │  Tool Registry    │ │
+│  │  Manager │ │  System  │ │  & Dispatcher     │ │
 │  └──────────┘ └──────────┘ └──────────────────┘ │
 └──────────────────┬──────────────────────────────┘
                    │
 ┌──────────────────▼──────────────────────────────┐
-│             Storage & External Services           │
+│             Storage & External                    │
 │  ┌──────────┐ ┌──────────┐ ┌──────────────────┐ │
-│  │  SQLite  │ │  File    │ │  LLM Providers   │ │
-│  │ (per-user│ │  Store   │ │ (DeepSeek, Qwen, │ │
-│  │  own DB) │ │(Sandboxed│ │  Moonshot,Ollama)│ │
-│  └──────────┘ └──────────┘ └──────────────────┘ │
+│  │  SQLite  │ │  File    │ │  LLM Providers    │ │
+│  │ (per-user│ │  Store   │ │ (DeepSeek,Qwen,   │ │
+│  │  WAL)    │ │ (sandbox)│ │  Moonshot,Ollama)  │ │
+│                            └──────────────────┘ │
 └─────────────────────────────────────────────────┘
 ```
 
 ### Multi-User Concurrency Model
 
-Each user has an independent **UserActor** (tokio task) with a dedicated mpsc channel:
+Each user gets a dedicated **UserActor** (tokio task) with its own mpsc channel:
 
-- **DashMap<UserId, UserActorHandle>** — Lock-free concurrent session lookup
-- **Per-user isolation** — Separate SQLite database, workspace, memory store, skill library
-- **No cross-user shared mutable state** — Zero lock contention
-- **Async I/O** — One user's LLM streaming response never blocks others
-- **Idle reclamation** — UserActor auto-shuts down after timeout to free resources
+- **DashMap<UserId, UserActorHandle>** — lock-free concurrent session lookup
+- **Per-user isolation** — separate SQLite DB, workspace, memory, skill store
+- **No shared mutable state** across users — zero lock contention
+- **Async I/O** — one user's LLM streaming never blocks another
+- **Idle eviction** — UserActors shut down after configurable timeout
 
 ```
-WebSocket → JWT Auth → DashMap lookup/create UserActor → Forward via mpsc → AgentLoop processes
+WebSocket connect → JWT lookup → DashMap get/spawn UserActor → forward via mpsc → AgentLoop processes
+```
+
+## Project Structure
+
+```
+jcowork/
+├── Cargo.toml                        # Workspace root
+├── crates/
+│   ├── jcowork-server/                  # Binary: axum server entry point
+│   ├── jcowork-gateway/                 # HTTP + WebSocket + Auth + Sessions
+│   ├── jcowork-agent/                   # AgentLoop, PromptBuilder, ContextEngine
+│   ├── jcowork-memory/                  # MemoryProvider, BuiltinSQLite, Manager
+│   ├── jcowork-skills/                  # Skill CRUD, Patch, Loader
+│   ├── jcowork-tools/                   # Tool trait, Registry, 10+ tool impls
+│   ├── jcowork-llm/                     # LlmProvider trait, JSON-driven provider config, SSE streaming
+│   ├── jcowork-storage/                 # Database, Migrations, FileStore
+│   ├── jcowork-cron/                    # Cron scheduler
+│   ├── jcowork-desktop/                 # Tauri v2 desktop app (Mac/Windows)
+│   ├── jcowork-feishu/                  # Feishu/Lark bot integration
+│   └── jcowork-logs/                    # JSONL log writer
+├── web/                               # React + Vite frontend
+├── providers.json                    # LLM provider & model configuration
+├── Dockerfile                         # Multi-stage Rust build
+├── docker-compose.yml
+├── Makefile
+└── .env.example
+```
+
+### Crate Dependency Graph
+
+```
+jcowork-server
+  └── jcowork-gateway
+        ├── jcowork-agent
+        │     ├── jcowork-llm
+        │     ├── jcowork-memory → jcowork-storage
+        │     ├── jcowork-skills → jcowork-storage
+        │     ├── jcowork-tools → jcowork-memory, jcowork-skills, jcowork-storage
+        │     └── jcowork-cron
+        ├── jcowork-feishu
+        └── jcowork-storage
 ```
 
 ## Core Modules
@@ -153,48 +162,40 @@ cargo tauri build
 
 > **Note:** The desktop app requires at least one LLM API key configured in `.env`. The Docling PDF parsing service is optional and runs separately if available.
 
-## Project Structure
+## Quick Start
 
-```
-jcowork/
-├── Cargo.toml                        # Workspace root config
-├── crates/
-│   ├── jcowork-server/                # Executable: axum server entry point
-│   ├── jcowork-gateway/               # HTTP + WebSocket + Auth + Session mgmt
-│   ├── jcowork-agent/                 # AgentLoop, PromptBuilder, ContextEngine
-│   ├── jcowork-memory/                # MemoryProvider, BuiltinSQLite, Manager
-│   ├── jcowork-skills/                # Skill CRUD, Patch, Loader
-│   ├── jcowork-tools/                 # Tool trait, Registry, 10+ tool implementations
-│   ├── jcowork-llm/                   # LlmProvider trait, JSON-driven config, SSE streaming
-│   ├── jcowork-storage/               # Database, Migrations, File store
-│   ├── jcowork-cron/                  # Cron scheduler
-│   ├── jcowork-desktop/               # Tauri v2 desktop app (macOS/Windows)
-│   ├── jcowork-feishu/                # Feishu/Lark bot integration
-│   └── jcowork-logs/                  # JSONL log writer
-├── web/                               # React + Vite frontend
-├── providers.json                     # LLM provider & model config
-├── Dockerfile                         # Multi-stage Rust build
-├── docker-compose.yml
-├── Makefile
-└── .env.example
+### One-click install (recommended)
+
+Works on **Windows 11+**, **Ubuntu 24.04+**, and **macOS**. The script installs all
+dependencies (Rust, Python 3.12+, Node 20+, Python venv, Playwright Chromium),
+builds the backend and frontend, and writes a default `.env`:
+
+```bash
+# macOS / Ubuntu
+git clone <repo-url> && cd jcowork
+bash scripts/install.sh          # add --start to launch services right away
 ```
 
-### Crate Dependencies
-
-```
-jcowork-server
-  └── jcowork-gateway
-        ├── jcowork-agent
-        │     ├── jcowork-llm
-        │     ├── jcowork-memory → jcowork-storage
-        │     ├── jcowork-skills → jcowork-storage
-        │     ├── jcowork-tools → jcowork-memory, jcowork-skills, jcowork-storage
-        │     └── jcowork-cron
-        ├── jcowork-feishu
-        └── jcowork-storage
+```powershell
+# Windows 11 (PowerShell)
+git clone <repo-url>; cd jcowork
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1     # add -Start to launch right away
 ```
 
-## Getting Started
+Then fill in at least one LLM API key in `.env` and start the services:
+
+```bash
+bash scripts/start.sh      # macOS / Ubuntu (docling on :50060 + server on :3000)
+bash scripts/stop.sh
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start.ps1    # Windows
+powershell -ExecutionPolicy Bypass -File scripts\stop.ps1
+```
+
+Open http://localhost:3000 in your browser. The manual steps below are for
+developers who prefer to run things themselves.
 
 ### Prerequisites
 
@@ -260,7 +261,12 @@ make setup-python
 powershell -ExecutionPolicy Bypass -File scripts\setup-python.ps1
 ```
 
-#### Start Docling Service (for document parsing & vector search)
+This creates a Python venv with:
+- **playwright** — headless browser for web search (Sogou WAP + Bing fallback)
+- **docling** — IBM's document understanding library for PDF to Markdown conversion
+- **sentence-transformers** — local embedding model for semantic document search
+
+### 3.5. Start Docling Service (for document parsing & vector search)
 
 The Docling service is required for PDF document parsing and semantic search. You can run it using Docker (recommended) or directly with Python.
 
@@ -313,6 +319,16 @@ curl http://localhost:50060/health
 # Expected response:
 # {"status":"ok","docling_loaded":true,"embedding_loaded":true,"embedding_model":"paraphrase-multilingual-MiniLM-L12-v2","embedding_dim":384}
 ```
+
+#### Configuration
+
+| Environment Variable | Default | Description |
+|---------------------|---------|-------------|
+| `DOCLING_SERVICE_URL` | `http://localhost:50060` | Docling service endpoint |
+| `EMBEDDING_DIM` | `384` | Embedding vector dimension |
+| `EMBEDDING_MODEL` | `paraphrase-multilingual-MiniLM-L12-v2` | Sentence transformers model |
+
+> **Note:** The Docling service downloads the embedding model on first run (~80MB). Subsequent starts are faster as the model is cached.
 
 ### 4. Build & Run (Development)
 

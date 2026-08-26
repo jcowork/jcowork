@@ -112,8 +112,6 @@ jcowork-server
 | Delegate | `jcowork-agent::delegate` | tokio::spawn 子 Agent 任务 |
 | Cron Scheduler | `jcowork-cron::scheduler` | 每用户定时任务，基于 `cron` crate |
 | Auth | `jcowork-gateway::auth` | JWT + Argon2（多用户认证） |
-| Feishu | `jcowork-feishu` | 飞书/Lark 机器人：事件解析、API 客户端、每用户配置 |
-| Logging | `jcowork-logs` | JSONL 按日轮转日志，记录 LLM 和工具调用 |
 
 ## 桌面应用（macOS / Windows）
 
@@ -259,6 +257,10 @@ make setup-python
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\setup-python.ps1
 ```
+
+此命令会创建 Python 虚拟环境，包含：
+- **playwright** — 无头浏览器，用于网页搜索（搜狗 WAP + Bing 备用）
+- **pdftext** — 离线 PDF 文本提取，用于报告解析
 
 ### 4. 构建与运行（开发模式）
 
@@ -741,7 +743,7 @@ Jcowork 支持自动文档索引和语义搜索。上传 PDF 或 Markdown 文档
 ├─────────────────────────────────────────────────────────┤
 │  PDF 上传 → Docling 服务 → Markdown + 表格              │
 │                                    ↓                     │
-│                    文档分块器（按标题/表格/图片）          │
+│                    文档分块器（按标题/表格）               │
 │                                    ↓                     │
 │              嵌入服务（sentence-transformers）            │
 │                                    ↓                     │
@@ -755,7 +757,7 @@ Jcowork 支持自动文档索引和语义搜索。上传 PDF 或 Markdown 文档
 |------|------|
 | **Docling 服务** | Python FastAPI 服务，运行在 50060 端口，处理 PDF→Markdown 转换 |
 | **嵌入服务** | Docling 服务的一部分，使用 `paraphrase-multilingual-MiniLM-L12-v2` 生成 384 维向量 |
-| **文档分块器** | Rust 模块，按标题、表格和图片将 Markdown 拆分为块 |
+| **文档分块器** | Rust 模块，按标题和表格将 Markdown 拆分为块 |
 | **向量存储** | SQLite 表（`doc_chunks`、`chunk_embeddings`），支持 FTS5 回退 |
 | **文档检索工具** | Agent 工具，用于文档分块的语义搜索 |
 
