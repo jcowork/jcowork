@@ -230,7 +230,71 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-python.ps1
 - **playwright** — 无头浏览器，用于网页搜索（搜狗 WAP + Bing 备用）
 - **pdftext** — 离线 PDF 文本提取，用于报告解析
 
-### 4. 构建与运行（开发模式）
+### 4. 启动 Docling 服务（用于文档解析与语义搜索）
+
+Docling 服务是 PDF 文档解析和语义搜索的必需组件。可使用 Docker（推荐）或直接运行 Python。
+
+#### 方案 A：使用 Docker（推荐）
+
+```bash
+# 仅启动 Docling 服务
+docker-compose up -d docling
+
+# 或同时启动 jcowork 和 docling
+docker-compose up -d
+
+# 查看服务状态
+docker-compose ps
+
+# 查看日志
+docker-compose logs -f docling
+```
+
+Docling 服务将运行在 `http://localhost:50060`。
+
+#### 方案 B：使用 Python 直接运行（开发模式）
+
+```bash
+# 激活 Python 虚拟环境（由 make setup-python 创建）
+source ~/.jcowork/venv/bin/activate  # Linux/macOS
+# 或
+.\.jcowork\venv\Scripts\activate     # Windows
+
+# 启动 Docling 服务
+cd services/docling
+python app.py
+```
+
+服务将启动在 `http://localhost:50060`，你应该看到：
+```
+Loading Docling converter...
+Docling converter loaded.
+Loading embedding model: paraphrase-multilingual-MiniLM-L12-v2
+Embedding model loaded.
+INFO:     Uvicorn running on http://0.0.0.0:50060
+```
+
+#### 验证 Docling 服务
+
+```bash
+# 健康检查
+curl http://localhost:50060/health
+
+# 预期响应：
+# {"status":"ok","docling_loaded":true,"embedding_loaded":true,"embedding_model":"paraphrase-multilingual-MiniLM-L12-v2","embedding_dim":384}
+```
+
+#### 配置
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `DOCLING_SERVICE_URL` | `http://localhost:50060` | Docling 服务端点 |
+| `EMBEDDING_DIM` | `384` | 嵌入向量维度 |
+| `EMBEDDING_MODEL` | `paraphrase-multilingual-MiniLM-L12-v2` | Sentence transformers 模型 |
+
+> **注意：** Docling 服务首次运行时会下载嵌入模型（约 80MB）。后续启动更快，因为模型已缓存。
+
+### 5. 构建与运行（开发模式）
 
 ```bash
 # 构建所有 crate
@@ -244,7 +308,7 @@ make run
 # 服务器运行在 http://localhost:3000
 ```
 
-### 5. 前端（开发模式）
+### 6. 前端（开发模式）
 
 ```bash
 cd web
@@ -253,7 +317,7 @@ npm run dev
 # 前端运行在 http://localhost:5173（API 代理到 :3000）
 ```
 
-### 6. 验证
+### 7. 验证
 
 ```bash
 # 健康检查

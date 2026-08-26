@@ -233,7 +233,7 @@ This creates a Python venv with:
 - **docling** — IBM's document understanding library for PDF to Markdown conversion
 - **sentence-transformers** — local embedding model for semantic document search
 
-### 3.5. Start Docling Service (for document parsing & vector search)
+### 4. Start Docling Service (for document parsing & vector search)
 
 The Docling service is required for PDF document parsing and semantic search. You can run it using Docker (recommended) or directly with Python.
 
@@ -297,7 +297,7 @@ curl http://localhost:50060/health
 
 > **Note:** The Docling service downloads the embedding model on first run (~80MB). Subsequent starts are faster as the model is cached.
 
-### 4. Build & Run (Development)
+### 5. Build & Run (Development)
 
 ```bash
 # Build all crates
@@ -311,7 +311,7 @@ make run
 # Server starts at http://localhost:3000
 ```
 
-### 5. Frontend (Development)
+### 6. Frontend (Development)
 
 ```bash
 cd web
@@ -320,7 +320,7 @@ npm run dev
 # Frontend starts at http://localhost:5173 (proxies API to :3000)
 ```
 
-### 6. Verify
+### 7. Verify
 
 ```bash
 # Health check
