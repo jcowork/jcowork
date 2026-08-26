@@ -24,16 +24,40 @@ use jcowork_storage::FeishuConfigStore;
 
 /// Resolve the Tauri resource directory relative to the current executable.
 ///
-/// macOS bundle layout:
-///   Jcowork.app/Contents/MacOS/jcowork-desktop   ← current_exe
-///   Jcowork.app/Contents/Resources/               ← resource_dir
+/// Layouts per platform:
+///   macOS bundle:
+///     Jcowork.app/Contents/MacOS/jcowork-desktop   ← current_exe
+///     Jcowork.app/Contents/Resources/               ← resource_dir
+///   Windows NSIS install:
+///     InstallDir/jcowork-desktop.exe                ← current_exe
+///     InstallDir/web/dist/...                       ← resources (same dir)
+///   Windows dev build (target/release/):
+///     target/release/jcowork-desktop.exe            ← current_exe
+///     web/dist/                                     ← project root (exe/../..)
 fn resolve_resource_dir() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    // Go up from MacOS/ to Contents/, then into Resources/
-    exe.parent()?
-        .parent()?
-        .join("Resources")
-        .into()
+    let exe_dir = exe.parent()?;
+
+    // macOS: exe is in Contents/MacOS/, resources in Contents/Resources/
+    let macos_resources = exe_dir.parent()?.parent()?.join("Resources");
+    if macos_resources.is_dir() {
+        return Some(macos_resources);
+    }
+
+    // Windows/Linux NSIS install: resources (web/dist, providers.json) are
+    // alongside the exe.
+    if exe_dir.join("web").join("dist").is_dir() {
+        return Some(exe_dir.to_path_buf());
+    }
+
+    // Dev build: exe at target/release/, project root at exe/../..
+    let project_root = exe_dir.parent()?.parent()?.to_path_buf();
+    if project_root.join("web").join("dist").is_dir() {
+        return Some(project_root);
+    }
+
+    // Fallback: return exe dir even if nothing found yet
+    Some(exe_dir.to_path_buf())
 }
 
 /// Try to load .env from the app bundle resource directory.
@@ -77,7 +101,7 @@ fn set_web_dir_from_resources() {
         return; // Already set externally
     }
     if let Some(res_dir) = resolve_resource_dir() {
-        // Tauri encodes ".." as "_up_" in resource paths
+        // Tauri encodes ".." as "_up_" in resource paths (used on some platforms)
         let candidates = [
             res_dir.join("web").join("dist"),
             res_dir.join("_up_").join("_up_").join("web").join("dist"),
@@ -89,6 +113,14 @@ fn set_web_dir_from_resources() {
                 info!(path = %web_dist.display(), "Set JCWORK_WEB_DIR from app resources");
                 return;
             }
+        }
+    }
+    // Fallback: try relative to current working directory
+    let cwd_web = std::path::Path::new("web/dist");
+    if cwd_web.exists() {
+        if let Ok(abs) = std::path::absolute(cwd_web) {
+            unsafe { std::env::set_var("JCWORK_WEB_DIR", abs.to_str().unwrap_or("")); }
+            info!(path = %abs.display(), "Set JCWORK_WEB_DIR from cwd");
         }
     }
 }

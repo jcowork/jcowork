@@ -114,3 +114,8 @@ tauri-build = { version = "2", features = [] }
 
 # Open URLs/files in default browser
 open = "5"
+
+# Patch crates to fix MSVC build
+[patch.crates-io]
+numkong = { path = "patches/numkong" } # Fix: use /std:c11 + /utf-8 for MSVC
+usearch = { path = "patches/usearch" } # Fix: add /utf-8 for MSVC

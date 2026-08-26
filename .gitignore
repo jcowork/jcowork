@@ -30,3 +30,8 @@ __pycache__/
 
 # Data
 data/
+
+# Build artifacts
+nsis-*.zip
+patches/*/Cargo.lock
+patches/**/*.orig
