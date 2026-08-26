@@ -112,6 +112,8 @@ jcowork-server
 | Delegate | `jcowork-agent::delegate` | tokio::spawn 子 Agent 任务 |
 | Cron Scheduler | `jcowork-cron::scheduler` | 每用户定时任务，基于 `cron` crate |
 | Auth | `jcowork-gateway::auth` | JWT + Argon2（多用户认证） |
+| Feishu | `jcowork-feishu` | 飞书/Lark 机器人：事件解析、API 客户端、每用户配置 |
+| Logging | `jcowork-logs` | JSONL 按日轮转日志，记录 LLM 和工具调用 |
 
 ## 桌面应用（macOS / Windows）
 
@@ -257,10 +259,6 @@ make setup-python
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\setup-python.ps1
 ```
-
-此命令会创建 Python 虚拟环境，包含：
-- **playwright** — 无头浏览器，用于网页搜索（搜狗 WAP + Bing 备用）
-- **pdftext** — 离线 PDF 文本提取，用于报告解析
 
 ### 4. 构建与运行（开发模式）
 
@@ -723,6 +721,74 @@ Jcowork 支持飞书作为 Web UI 之外的输入渠道。每个用户可以配�
 ### 通过 Web UI 配置
 
 飞书配置通过 Web 设置页面按用户管理，无需设置环境变量。
+
+## 文档索引与语义搜索
+
+Jcowork 支持自动文档索引和语义搜索。上传 PDF 或 Markdown 文档到工作空间后，系统会自动解析并建立索引，实现智能检索。
+
+### 工作原理
+
+1. **文档上传** — 在文档页面上传 PDF 或 Markdown 文件
+2. **自动解析** — PDF 使用 [Docling](https://github.com/DS4SD/docling)（IBM 文档理解库）解析为结构化 Markdown，保留表格和图片
+3. **向量索引** — 文档分块后通过本地 sentence-transformers 模型生成嵌入向量，存入 SQLite 用于语义搜索
+4. **智能检索** — 提问时系统通过向量相似度搜索检索相关文档片段
+
+### 架构
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   文档处理流水线                           │
+├─────────────────────────────────────────────────────────┤
+│  PDF 上传 → Docling 服务 → Markdown + 表格              │
+│                                    ↓                     │
+│                    文档分块器（按标题/表格/图片）          │
+│                                    ↓                     │
+│              嵌入服务（sentence-transformers）            │
+│                                    ↓                     │
+│              SQLite 向量存储（BLOB + 余弦相似度）         │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 组件
+
+| 组件 | 说明 |
+|------|------|
+| **Docling 服务** | Python FastAPI 服务，运行在 50060 端口，处理 PDF→Markdown 转换 |
+| **嵌入服务** | Docling 服务的一部分，使用 `paraphrase-multilingual-MiniLM-L12-v2` 生成 384 维向量 |
+| **文档分块器** | Rust 模块，按标题、表格和图片将 Markdown 拆分为块 |
+| **向量存储** | SQLite 表（`doc_chunks`、`chunk_embeddings`），支持 FTS5 回退 |
+| **文档检索工具** | Agent 工具，用于文档分块的语义搜索 |
+
+### 部署
+
+Docling 服务作为独立 Docker 容器运行：
+
+```bash
+# 使用 docker-compose（推荐）
+docker-compose up -d docling
+
+# 或手动运行
+cd services/docling
+docker build -t jcowork-docling .
+docker run -p 50060:50060 jcowork-docling
+```
+
+### 配置
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `DOCLING_SERVICE_URL` | `http://localhost:50060` | Docling 服务端点 |
+| `EMBEDDING_DIM` | `384` | 嵌入向量维度 |
+| `EMBEDDING_MODEL` | `paraphrase-multilingual-MiniLM-L12-v2` | Sentence transformers 模型 |
+
+### 使用方式
+
+当你在聊天中附加文档时，系统会自动：
+1. 检索文档的完整内容（最多 15,000 字符）
+2. 作为参考资料注入 LLM 上下文
+3. LLM 可直接基于文档内容回答问题
+
+对于较长文档或更精确的检索，LLM 还可使用 `doc_retrieve` 工具对文档分块进行语义搜索。
 
 ## API 参考
 
