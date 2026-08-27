@@ -77,8 +77,6 @@ jcowork/
 │   └── jcowork-logs/                    # JSONL 日志写入器
 ├── web/                               # React + Vite 前端
 ├── providers.json                    # LLM 提供者与模型配置
-├── Dockerfile                         # 多阶段 Rust 构建
-├── docker-compose.yml
 ├── Makefile
 └── .env.example
 ```
@@ -146,17 +144,22 @@ jcowork-server
 # 前置要求：Rust 1.85+、Node.js 20+
 cargo install tauri-cli --version "^2"
 
-# 构建前端
-cd web && npm install && npm run build && cd ..
+# 1. 构建前端（必须 — Tauri 将 web/dist/ 打包进应用）
+cd web
+npm install
+npm run build    # 输出到 web/dist/
+cd ..
 
-# 构建桌面应用
+# 2. 构建桌面应用
 cd crates/jcowork-desktop
 cargo tauri build
 
 # 输出：
-#   target/release/bundle/dmg/Jcowork_0.1.0_aarch64.dmg   (macOS)
-#   target/release/bundle/msi/Jcowork_0.1.0_x64.msi        (Windows)
+#   target/release/bundle/dmg/Jcowork_0.2.6_aarch64.dmg   (macOS)
+#   target/release/bundle/msi/Jcowork_0.2.6_x64.msi        (Windows)
 ```
+
+> **重要：** 执行 `cargo tauri build` 前务必先在 `web/` 目录下运行 `npm run build`。Tauri 会将 `web/dist/` 复制到应用包中 — 如果 dist 目录过期或缺失，桌面应用将显示白屏。
 
 > **注意：** 桌面应用需要在 `.env` 中配置至少一个 LLM API Key。Docling PDF 解析服务为可选，如可用会自动连接。
 
@@ -232,27 +235,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-python.ps1
 
 ### 4. 启动 Docling 服务（用于文档解析与语义搜索）
 
-Docling 服务是 PDF 文档解析和语义搜索的必需组件。可使用 Docker（推荐）或直接运行 Python。
-
-#### 方案 A：使用 Docker（推荐）
-
-```bash
-# 仅启动 Docling 服务
-docker-compose up -d docling
-
-# 或同时启动 jcowork 和 docling
-docker-compose up -d
-
-# 查看服务状态
-docker-compose ps
-
-# 查看日志
-docker-compose logs -f docling
-```
-
-Docling 服务将运行在 `http://localhost:50060`。
-
-#### 方案 B：使用 Python 直接运行（开发模式）
+Docling 服务是 PDF 文档解析和语义搜索的必需组件。直接使用 Python 运行：
 
 ```bash
 # 激活 Python 虚拟环境（由 make setup-python 创建）
@@ -310,12 +293,28 @@ make run
 
 ### 6. 前端（开发模式）
 
+前端是基于 React + Vite + TypeScript 的 SPA，位于 `web/` 目录。
+
 ```bash
 cd web
 npm install
 npm run dev
-# 前端运行在 http://localhost:5173（API 代理到 :3000）
+# 开发服务器运行在 http://localhost:5173
+# API 请求自动代理到后端 :3000
 ```
+
+**可用脚本：**
+
+| 命令 | 说明 |
+|------|------|
+| `npm run dev` | 启动 Vite 开发服务器，支持热更新（端口 5173） |
+| `npm run build` | 生产构建 → 输出到 `web/dist/` |
+| `npm run preview` | 本地预览生产构建结果 |
+| `npm run lint` | 运行 ESLint 检查源代码 |
+
+> **开发流程：** 开发时需同时运行 `make run`（后端 :3000）和 `npm run dev`（前端 :5173）。Vite 代理会将 `/api/*` 和 `/api/ws` 转发到后端。
+>
+> 构建桌面应用前，必须先运行 `npm run build` — Tauri 会将 `web/dist/` 打包进最终产品。
 
 ### 7. 验证
 
@@ -795,17 +794,19 @@ Jcowork 支持自动文档索引和语义搜索。上传 PDF 或 Markdown 文档
 
 ### 部署
 
-Docling 服务作为独立 Docker 容器运行：
+Docling 服务作为 Python FastAPI 服务器运行：
 
 ```bash
-# 使用 docker-compose（推荐）
-docker-compose up -d docling
+# 激活 Python 虚拟环境
+source ~/.jcowork/venv/bin/activate  # Linux/macOS
+.\.jcowork\venv\Scripts\activate     # Windows PowerShell
 
-# 或手动运行
+# 启动服务
 cd services/docling
-docker build -t jcowork-docling .
-docker run -p 50060:50060 jcowork-docling
+python app.py
 ```
+
+服务将运行在 `http://localhost:50060`。
 
 ### 配置
 

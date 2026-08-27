@@ -146,17 +146,22 @@ A native desktop application is available for macOS and Windows, powered by [Tau
 # Prerequisites: Rust 1.85+, Node.js 20+
 cargo install tauri-cli --version "^2"
 
-# Build frontend
-cd web && npm install && npm run build && cd ..
+# 1. Build frontend (required — Tauri bundles web/dist/ into the app)
+cd web
+npm install
+npm run build    # outputs to web/dist/
+cd ..
 
-# Build desktop app
+# 2. Build desktop app
 cd crates/jcowork-desktop
 cargo tauri build
 
 # Output:
-#   target/release/bundle/dmg/Jcowork_0.1.0_aarch64.dmg   (macOS)
-#   target/release/bundle/msi/Jcowork_0.1.0_x64.msi        (Windows)
+#   target/release/bundle/dmg/Jcowork_0.2.6_aarch64.dmg   (macOS)
+#   target/release/bundle/msi/Jcowork_0.2.6_x64.msi        (Windows)
 ```
+
+> **Important:** Always run `npm run build` in `web/` before `cargo tauri build`. The Tauri bundler copies `web/dist/` into the app bundle — if the dist is stale or missing, the desktop app will show a blank screen.
 
 > **Note:** The desktop app requires at least one LLM API key configured in `.env`. The Docling PDF parsing service is optional and runs separately if available.
 
@@ -291,12 +296,28 @@ make run
 
 ### 6. Frontend (Development)
 
+The frontend is a React + Vite + TypeScript SPA located in `web/`.
+
 ```bash
 cd web
 npm install
 npm run dev
-# Frontend starts at http://localhost:5173 (proxies API to :3000)
+# Dev server starts at http://localhost:5173
+# API requests are proxied to the backend at :3000
 ```
+
+**Available scripts:**
+
+| Command | Description |
+|---------|-------------|
+| `npm run dev` | Start Vite dev server with hot-reload (port 5173) |
+| `npm run build` | Production build → outputs to `web/dist/` |
+| `npm run preview` | Preview production build locally |
+| `npm run lint` | Run ESLint on source files |
+
+> **Workflow:** During development, run both `make run` (backend on :3000) and `npm run dev` (frontend on :5173) simultaneously. The Vite proxy forwards `/api/*` and `/api/ws` to the backend.
+>
+> When building the desktop app, you must run `npm run build` first — Tauri bundles `web/dist/` into the final package.
 
 ### 7. Verify
 
