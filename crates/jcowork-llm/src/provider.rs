@@ -105,3 +105,81 @@ pub trait LlmProvider: Send + Sync {
     /// Get the model's context length.
     fn context_length(&self) -> usize;
 }
+
+/// Mock LLM provider for testing.
+#[cfg(any(test, feature = "test-utils"))]
+pub struct MockLlmProvider {
+    context_len: usize,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl MockLlmProvider {
+    pub fn new() -> Self {
+        Self { context_len: 128000 }
+    }
+
+    pub fn with_context_length(context_len: usize) -> Self {
+        Self { context_len }
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl Default for MockLlmProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+#[async_trait]
+impl LlmProvider for MockLlmProvider {
+    fn name(&self) -> &str {
+        "mock"
+    }
+
+    async fn chat(
+        &self,
+        _messages: &[ChatMessage],
+        _tools: &[ToolDefinition],
+    ) -> Result<ChatResponse> {
+        Ok(ChatResponse {
+            message: ChatMessage {
+                role: "assistant".to_string(),
+                content: "This is a mock response for testing.".to_string(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            usage: Usage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+            },
+        })
+    }
+
+    async fn chat_stream(
+        &self,
+        _messages: &[ChatMessage],
+        _tools: &[ToolDefinition],
+    ) -> Result<ChatStream> {
+        use futures::stream::{self, StreamExt};
+        
+        let chunks = vec![
+            Ok(StreamChunk::Delta("Mock ".to_string())),
+            Ok(StreamChunk::Delta("response ".to_string())),
+            Ok(StreamChunk::Delta("for testing.".to_string())),
+            Ok(StreamChunk::Done(Usage {
+                prompt_tokens: 10,
+                completion_tokens: 3,
+                total_tokens: 13,
+            })),
+        ];
+        
+        Ok(Box::pin(stream::iter(chunks)))
+    }
+
+    fn context_length(&self) -> usize {
+        self.context_len
+    }
+}

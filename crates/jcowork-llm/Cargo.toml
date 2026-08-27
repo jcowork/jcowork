@@ -16,3 +16,7 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 schemars = { workspace = true }
+
+[features]
+default = []
+test-utils = []

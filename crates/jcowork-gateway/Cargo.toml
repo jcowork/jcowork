@@ -30,3 +30,8 @@ dashmap = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true }
 rand_core = { version = "0.6", features = ["std"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+sqlx = { workspace = true }
+jcowork-llm = { workspace = true, features = ["test-utils"] }

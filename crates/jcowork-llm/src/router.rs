@@ -83,6 +83,14 @@ impl LlmRouter {
         self.providers.insert(name.to_string(), provider);
     }
 
+    /// Create a router with a mock provider for testing.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn from_mock(provider: Arc<dyn LlmProvider>) -> Self {
+        let mut router = Self::new();
+        router.register("mock", provider);
+        router
+    }
+
     /// Load provider configs from a JSON file and register providers from env vars.
     ///
     /// Reads `providers.json` for provider definitions (base_url, models, etc.).

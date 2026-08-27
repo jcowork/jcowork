@@ -77,8 +77,6 @@ jcowork/
 │   └── jcowork-logs/                    # JSONL log writer
 ├── web/                               # React + Vite frontend
 ├── providers.json                    # LLM provider & model configuration
-├── Dockerfile                         # Multi-stage Rust build
-├── docker-compose.yml
 ├── Makefile
 └── .env.example
 ```
@@ -235,27 +233,7 @@ This creates a Python venv with:
 
 ### 4. Start Docling Service (for document parsing & vector search)
 
-The Docling service is required for PDF document parsing and semantic search. You can run it using Docker (recommended) or directly with Python.
-
-#### Option A: Using Docker (Recommended)
-
-```bash
-# Start only the Docling service
-docker-compose up -d docling
-
-# Or start both jcowork and docling together
-docker-compose up -d
-
-# Check service status
-docker-compose ps
-
-# View logs
-docker-compose logs -f docling
-```
-
-The Docling service will be available at `http://localhost:50060`.
-
-#### Option B: Run Directly with Python (Development)
+The Docling service is required for PDF document parsing and semantic search. Run it directly with Python:
 
 ```bash
 # Activate the Python venv (created by make setup-python)
@@ -799,17 +777,19 @@ Jcowork supports automatic document indexing with semantic search capabilities. 
 
 ### Deployment
 
-The Docling service runs as a separate Docker container:
+The Docling service runs as a Python FastAPI server:
 
 ```bash
-# Using docker-compose (recommended)
-docker-compose up -d docling
+# Activate the Python venv
+source ~/.jcowork/venv/bin/activate  # Linux/macOS
+.\~\.jcowork\venv\Scripts\activate  # Windows PowerShell
 
-# Or run manually
+# Start the service
 cd services/docling
-docker build -t jcowork-docling .
-docker run -p 50060:50060 jcowork-docling
+python app.py
 ```
+
+The service will be available at `http://localhost:50060`.
 
 ### Configuration
 
