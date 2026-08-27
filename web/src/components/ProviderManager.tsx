@@ -302,7 +302,7 @@ export default function ProviderManager({ token, onClose, onSaved }: ProviderMan
                     <div style={{ flex: 1 }}>
                       <div style={{ fontSize: 14, fontWeight: 500, color: '#eee' }}>
                         {entry.name}
-                        {entry.api_key_set && (
+                        {(entry.api_key_set || entry.base_url) && (
                           <span style={{
                             display: 'inline-block',
                             padding: '1px 6px',

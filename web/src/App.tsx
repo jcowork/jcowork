@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import Chat from './components/Chat';
 import Documents from './components/Documents';
 import Memory from './components/Memory';
@@ -15,6 +15,21 @@ interface AuthState {
   userId: string;
   username: string;
 }
+
+// Global 401 interceptor — wraps window.fetch to auto-logout on expired token.
+// This runs once at module load and affects ALL fetch calls across the app.
+const _origFetch = window.fetch;
+window.fetch = async function(input: RequestInfo | URL, init?: RequestInit) {
+  const res = await _origFetch.call(window, input, init);
+  if (res.status === 401) {
+    localStorage.removeItem('jcowork_auth');
+    // Only reload if not already on the login screen
+    if (document.querySelector('#root')?.childElementCount) {
+      window.location.reload();
+    }
+  }
+  return res;
+};
 
 export default function App() {
   return (
@@ -38,6 +53,33 @@ function AppInner() {
   const [mobileSidebar, setMobileSidebar] = useState(false);
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [isRegister, setIsRegister] = useState(false);
+  const hiddenTimeRef = useRef(0);
+
+  // Sleep/wake recovery: when the page becomes visible again after being hidden
+  // for a while (e.g. laptop lid closed), reload to restore WebView rendering.
+  const handleVisibilityChange = useCallback(() => {
+    if (document.visibilityState === 'visible') {
+      const now = Date.now();
+      const elapsed = now - hiddenTimeRef.current;
+      // If was hidden for more than 30 seconds, force reload to fix WebKit rendering
+      if (hiddenTimeRef.current > 0 && elapsed > 30_000) {
+        window.location.reload();
+        return;
+      }
+      // Even for short hides, verify auth state hasn't been cleared by the 401 interceptor
+      const current = localStorage.getItem('jcowork_auth');
+      if (!current && auth) {
+        setAuth(null);
+      }
+    } else if (document.visibilityState === 'hidden') {
+      hiddenTimeRef.current = Date.now();
+    }
+  }, [auth]);
+
+  useEffect(() => {
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [handleVisibilityChange]);
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();

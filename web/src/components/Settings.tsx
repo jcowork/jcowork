@@ -31,6 +31,7 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
   const [identitySaving, setIdentitySaving] = useState(false);
   const [identityStatus, setIdentityStatus] = useState<'idle' | 'saved' | 'error'>('idle');
   const [showProviderManager, setShowProviderManager] = useState(false);
+  const [loadError, setLoadError] = useState('');
 
   // Feishu config state
   const [feishuAppId, setFeishuAppId] = useState('');
@@ -163,7 +164,10 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
     fetch('/api/providers', {
       headers: { 'Authorization': `Bearer ${token}` },
     })
-      .then(r => r.json())
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
       .then((data: { providers: ProviderInfo[]; default_model: string }) => {
         const providers = data.providers;
         const serverDefault = data.default_model || ''; // e.g. "moonshot:kimi-k2.6"
@@ -205,7 +209,10 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
           }
         }
       })
-      .catch(() => setLoading(false));
+      .catch(() => {
+        setLoading(false);
+        setLoadError('Failed to load settings. Please try refreshing the page.');
+      });
   }, []);
 
   const currentProvider = providers.find(p => p.id === selectedProvider);
@@ -286,6 +293,15 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
           {t('backToChat')}
         </button>
       </div>
+
+      {loadError && (
+        <div style={{
+          padding: '12px 16px', marginBottom: 16, borderRadius: 8,
+          background: '#3b1111', border: '1px solid #f87171', color: '#fca5a5', fontSize: 14,
+        }}>
+          ⚠️ {loadError}
+        </div>
+      )}
 
       {/* LLM Provider Section */}
       <div style={cardStyle}>
