@@ -5,5 +5,7 @@ pub mod provider;
 pub mod router;
 
 pub use openai::OpenAiConfig;
-pub use provider::{LlmProvider, MockLlmProvider};
+pub use provider::LlmProvider;
+#[cfg(any(test, feature = "test-utils"))]
+pub use provider::MockLlmProvider;
 pub use router::{LlmRouter, ProviderConfig, ProviderEntry, ProviderInfo, ModelInfo};
