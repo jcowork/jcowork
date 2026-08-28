@@ -19,6 +19,23 @@ pub struct CronJob {
     pub enabled: bool,
     pub last_run: Option<String>,
     pub created_at: String,
+    /// Human-readable task name (UI-created tasks only).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Model to use for execution, e.g. "deepseek:deepseek-chat".
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// Result of a periodic task execution.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TaskResult {
+    pub id: String,
+    pub cron_job_id: String,
+    pub user_id: String,
+    pub output: String,
+    pub status: String, // "success" | "error"
+    pub executed_at: String,
 }
 
 /// A one-time reminder.
@@ -35,6 +52,12 @@ pub struct Reminder {
     /// Optional action to execute when the reminder fires (e.g., "search 俄乌战争最新进展")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
+    /// Associated cron job ID (for periodic task execution).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cron_job_id: Option<String>,
+    /// Model to use for execution (for periodic tasks).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// Manages per-user cron jobs and reminders.
@@ -49,6 +72,8 @@ pub struct CronScheduler {
     timers: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
     /// Channel to send reminder notifications.
     reminder_tx: tokio::sync::broadcast::Sender<Reminder>,
+    /// Per-task execution results: cron_job_id -> Vec<TaskResult>
+    task_results: Arc<Mutex<HashMap<String, Vec<TaskResult>>>>,
 }
 
 impl CronScheduler {
@@ -60,7 +85,112 @@ impl CronScheduler {
             reminders: Arc::new(Mutex::new(HashMap::new())),
             timers: Arc::new(Mutex::new(HashMap::new())),
             reminder_tx,
+            task_results: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Add a periodic task with name, model, and schedule details.
+    /// Returns the job ID.
+    pub async fn add_periodic_task(
+        &self,
+        user_id: &str,
+        name: &str,
+        prompt: &str,
+        model: &str,
+        schedule_expr: &str,
+    ) -> Result<String> {
+        // Auto-convert 5-field cron to 7-field
+        let schedule_expr = if schedule_expr.split_whitespace().count() == 5 {
+            Self::convert_5field_to_7field(schedule_expr)
+        } else {
+            schedule_expr.to_string()
+        };
+
+        // Validate schedule
+        let schedule = Schedule::from_str(&schedule_expr)?;
+        let next = schedule.upcoming(Utc).next()
+            .ok_or_else(|| anyhow::anyhow!("No upcoming fire time for schedule"))?;
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().naive_utc().to_string();
+        let job = CronJob {
+            id: id.clone(),
+            user_id: user_id.to_string(),
+            schedule: schedule_expr.to_string(),
+            prompt: prompt.to_string(),
+            enabled: true,
+            last_run: None,
+            created_at: now,
+            name: Some(name.to_string()),
+            model: Some(model.to_string()),
+        };
+
+        self.cron_jobs.lock().await.insert(id.clone(), job.clone());
+
+        // Schedule the recurring task
+        let job_id = id.clone();
+        let cron_jobs = self.cron_jobs.clone();
+        let reminder_tx = self.reminder_tx.clone();
+        let user_id_clone = user_id.to_string();
+        let prompt_clone = prompt.to_string();
+        let model_clone = Some(model.to_string());
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let schedule = match Schedule::from_str(&job.schedule) {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let next = match schedule.upcoming(Utc).next() {
+                    Some(n) => n,
+                    None => break,
+                };
+                let delay = next.signed_duration_since(Utc::now());
+                if delay.num_seconds() <= 0 {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(delay.num_seconds() as u64)).await;
+
+                if let Some(j) = cron_jobs.lock().await.get_mut(&job_id) {
+                    j.last_run = Some(Utc::now().naive_utc().to_string());
+                }
+
+                let reminder = Reminder {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    user_id: user_id_clone.clone(),
+                    fire_at: Utc::now().to_rfc3339(),
+                    message: format!("[Cron] {}", prompt_clone),
+                    triggered: true,
+                    action: None,
+                    cron_job_id: Some(job_id.clone()),
+                    model: model_clone.clone(),
+                };
+                let _ = reminder_tx.send(reminder.clone());
+                tracing::info!(id = %job_id, prompt = %prompt_clone, "Cron job triggered");
+            }
+        });
+
+        self.cron_handles.lock().await.insert(id.clone(), handle);
+        tracing::info!(id = %id, name = %name, schedule = %schedule_expr, next = %next, "Periodic task added");
+        Ok(id)
+    }
+
+    /// Store a task execution result.
+    pub async fn store_task_result(&self, result: TaskResult) {
+        let mut results = self.task_results.lock().await;
+        results
+            .entry(result.cron_job_id.clone())
+            .or_insert_with(Vec::new)
+            .push(result);
+    }
+
+    /// List execution results for a specific cron job (most recent first).
+    pub async fn list_task_results(&self, cron_job_id: &str) -> Vec<TaskResult> {
+        let results = self.task_results.lock().await;
+        let mut items = results.get(cron_job_id).cloned().unwrap_or_default();
+        items.reverse(); // most recent first
+        items
     }
 
     /// Subscribe to reminder notifications.
@@ -89,6 +219,8 @@ impl CronScheduler {
             message: message.to_string(),
             triggered: false,
             action: action.map(|s| s.to_string()),
+            cron_job_id: None,
+            model: None,
         };
 
         // Calculate delay
@@ -182,6 +314,8 @@ impl CronScheduler {
             enabled: true,
             last_run: None,
             created_at: now,
+            name: None,
+            model: None,
         };
 
         // Store job
@@ -225,6 +359,8 @@ impl CronScheduler {
                     message: format!("[Cron] {}", prompt_clone),
                     triggered: true,
                     action: None,
+                    cron_job_id: Some(job_id.clone()),
+                    model: None,
                 };
                 let _ = reminder_tx.send(reminder.clone());
                 tracing::info!(id = %job_id, prompt = %prompt_clone, "Cron job triggered");

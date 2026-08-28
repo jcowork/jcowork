@@ -2,4 +2,4 @@
 
 pub mod scheduler;
 
-pub use scheduler::{CronScheduler, CronJob, Reminder};
+pub use scheduler::{CronScheduler, CronJob, Reminder, TaskResult};

@@ -863,6 +863,14 @@ For larger documents or more precise retrieval, the LLM can also use the `doc_re
 | GET | `/api/memory` | List user memories |
 | GET | `/api/health` | Health check |
 
+### Periodic Tasks
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/api/cron-jobs` | Yes | Create periodic task (name, prompt, model, frequency) |
+| GET | `/api/cron-jobs/{id}/results` | Yes | Get execution results for a task |
+| POST | `/api/cron-jobs/{id}/results` | Yes | Store task execution result |
+
 ## Agent Tools
 
 The Jcowork Agent has built-in tools that the LLM can invoke automatically during conversation. You don't need to use any special syntax — just ask in natural language.
@@ -916,6 +924,39 @@ Agent: ✅ Cron job created! Schedule: 0 9 * * * — 每天早上9:00提醒你�
 ```
 
 > **Note:** Reminders and cron jobs are stored in memory. They are lost when the server restarts. Persistent storage will be added in a future release.
+
+### Periodic Tasks
+
+Periodic Tasks is a UI-based scheduled LLM invocation feature. Users can create and manage recurring tasks directly from the Periodic Tasks page without using chat commands.
+
+#### Core Features
+
+- **Task Creation** — Set task name, Prompt description, execution model, and frequency
+- **Model Selection** — Choose execution model from configured LLM Providers, grouped by provider
+- **Execution Frequency** — Three frequency modes supported:
+  - **Hourly** — Specify minute, execute once per hour
+  - **Daily** — Specify hour:minute, execute once per day
+  - **Monthly** — Specify day, hour:minute, execute once per month
+- **Execution Results** — Each task displays a collapsible execution result list below, including execution status (success/failure), execution time, and output content
+
+#### Usage
+
+1. Click "Periodic Tasks" in the left sidebar to enter the page
+2. Click "+ Add New Task" to expand the creation form
+3. Fill in task name and Prompt description
+4. Select execution model from dropdown (grouped by LLM provider)
+5. Choose execution frequency (hourly/daily/monthly) and set specific time
+6. Click "Create Task" to complete task creation
+7. Each task in the task list has a "▶ Execution Results" button to expand/collapse the task's execution history
+
+#### Comparison with Chat Cron Jobs
+
+| Feature | Periodic Tasks (UI) | Cron Jobs (Chat) |
+|---------|---------------------|------------------|
+| Creation Method | Web UI form | Chat via Agent tool |
+| Model Selection | Each task can specify model independently | Uses current chat model |
+| Execution Results | Collapsible display in UI | Push notifications |
+| Use Case | Regular reports, data analysis, fixed tasks | Temporary scheduled reminders |
 
 ## Key Design Decisions
 

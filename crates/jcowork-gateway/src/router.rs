@@ -21,7 +21,7 @@ use crate::auth;
 use crate::session::SessionManager;
 use crate::ws;
 use dashmap::DashMap;
-use jcowork_cron::CronScheduler;
+use jcowork_cron::{CronScheduler, TaskResult};
 use jcowork_feishu::client::FeishuClient;
 use jcowork_llm::{LlmRouter, ProviderEntry};
 use jcowork_logs::LogWriter;
@@ -152,7 +152,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/reminders", get(list_reminders))
         .route("/api/reminders/{id}", delete(remove_reminder))
         .route("/api/cron-jobs", get(list_cron_jobs))
+        .route("/api/cron-jobs", post(create_cron_job))
         .route("/api/cron-jobs/{id}", delete(remove_cron_job))
+        .route("/api/cron-jobs/{id}/results", get(get_cron_job_results))
+        .route("/api/cron-jobs/{id}/results", post(store_cron_job_result))
         .route("/api/providers", get(list_providers))
         .route("/api/providers/entries", get(list_provider_entries))
         .route("/api/providers", post(save_providers))
@@ -635,6 +638,159 @@ async fn remove_cron_job(
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "removed"}))),
         Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e.to_string()}))),
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateCronJobRequest {
+    pub name: String,
+    pub prompt: String,
+    pub model: String,
+    pub frequency: String,         // "hourly" | "daily" | "weekly" | "monthly"
+    pub minute: Option<u32>,       // for hourly: specific minute
+    pub hour: Option<u32>,         // for daily/weekly/monthly: specific hour
+    pub day: Option<u32>,          // for monthly: specific day (1-28)
+    pub days_of_week: Option<Vec<u32>>, // for weekly: list of days (0=Sun, 1=Mon, ..., 6=Sat)
+}
+
+/// Convert frequency + time parameters to a 5-field cron expression.
+/// Returns Err if frequency is invalid.
+fn build_cron_expression(
+    frequency: &str,
+    minute: Option<u32>,
+    hour: Option<u32>,
+    day: Option<u32>,
+    days_of_week: Option<Vec<u32>>,
+) -> Result<String, String> {
+    match frequency {
+        "hourly" => {
+            let minute = minute.unwrap_or(0);
+            if minute > 59 {
+                return Err(format!("Invalid minute {} for hourly (must be 0-59)", minute));
+            }
+            Ok(format!("{} * * * *", minute))
+        }
+        "daily" => {
+            let minute = minute.unwrap_or(0);
+            let hour = hour.unwrap_or(9);
+            if minute > 59 {
+                return Err(format!("Invalid minute {} for daily (must be 0-59)", minute));
+            }
+            if hour > 23 {
+                return Err(format!("Invalid hour {} for daily (must be 0-23)", hour));
+            }
+            Ok(format!("{} {} * * *", minute, hour))
+        }
+        "weekly" => {
+            let minute = minute.unwrap_or(0);
+            let hour = hour.unwrap_or(9);
+            let dows = days_of_week.unwrap_or_else(|| vec![1]); // Default: Monday
+            if minute > 59 {
+                return Err(format!("Invalid minute {} for weekly (must be 0-59)", minute));
+            }
+            if hour > 23 {
+                return Err(format!("Invalid hour {} for weekly (must be 0-23)", hour));
+            }
+            if dows.is_empty() {
+                return Err("days_of_week must not be empty for weekly".to_string());
+            }
+            // Validate and sort days
+            let sorted_dows: Vec<u32> = dows.into_iter().collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+            for &dow in &sorted_dows {
+                if dow > 6 {
+                    return Err(format!("Invalid day_of_week {} for weekly (must be 0-6)", dow));
+                }
+            }
+            let dow_str = sorted_dows.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(",");
+            Ok(format!("{} {} * * {}", minute, hour, dow_str))
+        }
+        "monthly" => {
+            let minute = minute.unwrap_or(0);
+            let hour = hour.unwrap_or(9);
+            let day = day.unwrap_or(1).min(28);
+            if minute > 59 {
+                return Err(format!("Invalid minute {} for monthly (must be 0-59)", minute));
+            }
+            if hour > 23 {
+                return Err(format!("Invalid hour {} for monthly (must be 0-23)", hour));
+            }
+            Ok(format!("{} {} {} * *", minute, hour, day))
+        }
+        other => Err(format!("Invalid frequency '{}'. Use: hourly, daily, weekly, monthly", other)),
+    }
+}
+
+/// POST /api/cron-jobs — create a periodic task with name, model, and frequency.
+async fn create_cron_job(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Json(req): Json<CreateCronJobRequest>,
+) -> impl IntoResponse {
+    // Convert frequency + time to cron expression
+    let schedule_expr = match build_cron_expression(&req.frequency, req.minute, req.hour, req.day, req.days_of_week) {
+        Ok(expr) => expr,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": e})),
+            );
+        }
+    };
+
+    match state.cron_scheduler.add_periodic_task(
+        &auth_user.user_id,
+        &req.name,
+        &req.prompt,
+        &req.model,
+        &schedule_expr,
+    ).await {
+        Ok(id) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "id": id,
+                "schedule": schedule_expr,
+                "status": "created",
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+/// GET /api/cron-jobs/{id}/results — get execution results for a task.
+async fn get_cron_job_results(
+    State(state): State<AppState>,
+    _auth: axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let results = state.cron_scheduler.list_task_results(&id).await;
+    (StatusCode::OK, Json(results))
+}
+
+#[derive(Debug, Deserialize)]
+struct StoreCronJobResultRequest {
+    pub output: String,
+    pub status: String,
+}
+
+/// POST /api/cron-jobs/{id}/results — store an execution result.
+async fn store_cron_job_result(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    Json(req): Json<StoreCronJobResultRequest>,
+) -> impl IntoResponse {
+    let result = TaskResult {
+        id: uuid::Uuid::new_v4().to_string(),
+        cron_job_id: id.clone(),
+        user_id: auth_user.user_id,
+        output: req.output,
+        status: req.status,
+        executed_at: chrono::Utc::now().to_rfc3339(),
+    };
+    state.cron_scheduler.store_task_result(result).await;
+    (StatusCode::OK, Json(serde_json::json!({"status": "stored"})))
 }
 
 async fn update_memory(
@@ -2368,5 +2524,221 @@ async fn start_docling_service() -> impl IntoResponse {
                 "message": format!("Failed to start Docling service: {}", e),
             })),
         ).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper function for cleaner tests
+    fn build(freq: &str, min: Option<u32>, hr: Option<u32>, day: Option<u32>, dows: Option<Vec<u32>>) -> Result<String, String> {
+        build_cron_expression(freq, min, hr, day, dows)
+    }
+
+    // ========== build_cron_expression tests ==========
+
+    // --- Hourly tests ---
+    #[test]
+    fn test_hourly_default() {
+        assert_eq!(build("hourly", None, None, None, None).unwrap(), "0 * * * *");
+    }
+
+    #[test]
+    fn test_hourly_specific_minute() {
+        assert_eq!(build("hourly", Some(30), None, None, None).unwrap(), "30 * * * *");
+    }
+
+    #[test]
+    fn test_hourly_minute_59() {
+        assert_eq!(build("hourly", Some(59), None, None, None).unwrap(), "59 * * * *");
+    }
+
+    #[test]
+    fn test_hourly_invalid_minute() {
+        let result = build("hourly", Some(60), None, None, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid minute"));
+    }
+
+    #[test]
+    fn test_hourly_ignores_other_params() {
+        assert_eq!(build("hourly", Some(15), Some(10), Some(5), Some(vec![3])).unwrap(), "15 * * * *");
+    }
+
+    // --- Daily tests ---
+    #[test]
+    fn test_daily_default() {
+        assert_eq!(build("daily", None, None, None, None).unwrap(), "0 9 * * *");
+    }
+
+    #[test]
+    fn test_daily_specific_time() {
+        assert_eq!(build("daily", Some(30), Some(15), None, None).unwrap(), "30 15 * * *");
+    }
+
+    #[test]
+    fn test_daily_midnight() {
+        assert_eq!(build("daily", Some(0), Some(0), None, None).unwrap(), "0 0 * * *");
+    }
+
+    #[test]
+    fn test_daily_end_of_day() {
+        assert_eq!(build("daily", Some(59), Some(23), None, None).unwrap(), "59 23 * * *");
+    }
+
+    #[test]
+    fn test_daily_invalid_minute() {
+        let result = build("daily", Some(60), Some(10), None, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_daily_invalid_hour() {
+        let result = build("daily", Some(30), Some(24), None, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_daily_ignores_day_and_dows() {
+        assert_eq!(build("daily", Some(0), Some(12), Some(15), Some(vec![3])).unwrap(), "0 12 * * *");
+    }
+
+    // --- Weekly tests (multi-select) ---
+    #[test]
+    fn test_weekly_default() {
+        // Default: Monday at 9:00
+        assert_eq!(build("weekly", None, None, None, None).unwrap(), "0 9 * * 1");
+    }
+
+    #[test]
+    fn test_weekly_single_day_sunday() {
+        assert_eq!(build("weekly", Some(0), Some(10), None, Some(vec![0])).unwrap(), "0 10 * * 0");
+    }
+
+    #[test]
+    fn test_weekly_single_day_saturday() {
+        assert_eq!(build("weekly", Some(30), Some(14), None, Some(vec![6])).unwrap(), "30 14 * * 6");
+    }
+
+    #[test]
+    fn test_weekly_multiple_days() {
+        // Mon, Wed, Fri
+        assert_eq!(build("weekly", Some(0), Some(9), None, Some(vec![1, 3, 5])).unwrap(), "0 9 * * 1,3,5");
+    }
+
+    #[test]
+    fn test_weekly_weekdays_equivalent() {
+        // Mon-Fri (like old weekdays)
+        assert_eq!(build("weekly", Some(0), Some(9), None, Some(vec![1, 2, 3, 4, 5])).unwrap(), "0 9 * * 1,2,3,4,5");
+    }
+
+    #[test]
+    fn test_weekly_weekends_equivalent() {
+        // Sat, Sun (like old weekends)
+        assert_eq!(build("weekly", Some(0), Some(10), None, Some(vec![0, 6])).unwrap(), "0 10 * * 0,6");
+    }
+
+    #[test]
+    fn test_weekly_all_days() {
+        // Every day
+        assert_eq!(build("weekly", Some(0), Some(9), None, Some(vec![0, 1, 2, 3, 4, 5, 6])).unwrap(), "0 9 * * 0,1,2,3,4,5,6");
+    }
+
+    #[test]
+    fn test_weekly_duplicate_days_deduped() {
+        // Duplicates should be removed
+        assert_eq!(build("weekly", Some(0), Some(9), None, Some(vec![1, 1, 3, 3])).unwrap(), "0 9 * * 1,3");
+    }
+
+    #[test]
+    fn test_weekly_unsorted_days_sorted() {
+        // Days should be sorted
+        assert_eq!(build("weekly", Some(0), Some(9), None, Some(vec![5, 1, 3])).unwrap(), "0 9 * * 1,3,5");
+    }
+
+    #[test]
+    fn test_weekly_invalid_dow() {
+        let result = build("weekly", Some(0), Some(9), None, Some(vec![7]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid day_of_week"));
+    }
+
+    #[test]
+    fn test_weekly_empty_dows() {
+        let result = build("weekly", Some(0), Some(9), None, Some(vec![]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("must not be empty"));
+    }
+
+    #[test]
+    fn test_weekly_invalid_minute() {
+        let result = build("weekly", Some(60), Some(9), None, Some(vec![1]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_weekly_invalid_hour() {
+        let result = build("weekly", Some(0), Some(24), None, Some(vec![1]));
+        assert!(result.is_err());
+    }
+
+    // --- Monthly tests ---
+    #[test]
+    fn test_monthly_default() {
+        assert_eq!(build("monthly", None, None, None, None).unwrap(), "0 9 1 * *");
+    }
+
+    #[test]
+    fn test_monthly_specific_time() {
+        assert_eq!(build("monthly", Some(30), Some(14), Some(15), None).unwrap(), "30 14 15 * *");
+    }
+
+    #[test]
+    fn test_monthly_day_28() {
+        assert_eq!(build("monthly", Some(0), Some(10), Some(28), None).unwrap(), "0 10 28 * *");
+    }
+
+    #[test]
+    fn test_monthly_day_clamped_to_28() {
+        assert_eq!(build("monthly", Some(0), Some(10), Some(31), None).unwrap(), "0 10 28 * *");
+    }
+
+    #[test]
+    fn test_monthly_invalid_minute() {
+        let result = build("monthly", Some(100), Some(10), Some(15), None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_monthly_invalid_hour() {
+        let result = build("monthly", Some(0), Some(25), Some(15), None);
+        assert!(result.is_err());
+    }
+
+    // --- Invalid frequency tests ---
+    #[test]
+    fn test_invalid_frequency() {
+        let result = build("yearly", Some(0), Some(9), None, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid frequency"));
+    }
+
+    #[test]
+    fn test_empty_frequency() {
+        let result = build("", None, None, None, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_weekdays_not_supported() {
+        let result = build("weekdays", Some(0), Some(9), None, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_weekends_not_supported() {
+        let result = build("weekends", Some(0), Some(9), None, None);
+        assert!(result.is_err());
     }
 }
