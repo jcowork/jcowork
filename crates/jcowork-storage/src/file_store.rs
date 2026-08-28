@@ -245,7 +245,8 @@ impl FileStore {
                 Box::pin(Self::collect_entries_recursive(&path, base, results)).await?;
             } else if file_type.is_file() {
                 if let Ok(rel) = path.strip_prefix(base) {
-                    results.push(rel.to_string_lossy().to_string());
+                    // Normalize to forward slashes so paths are consistent across platforms
+                    results.push(rel.to_string_lossy().replace('\\', "/"));
                 }
             }
         }
@@ -308,7 +309,8 @@ impl FileStore {
             Ok(c) => c,
             Err(_) => return Ok(()), // skip non-UTF8 files
         };
-        let rel = path.strip_prefix(base).unwrap_or(path).to_string_lossy().to_string();
+        // Normalize to forward slashes so paths are consistent across platforms
+        let rel = path.strip_prefix(base).unwrap_or(path).to_string_lossy().replace('\\', "/");
         for (i, line) in content.lines().enumerate() {
             if line.contains(pattern) {
                 let preview = if line.len() > 200 {
