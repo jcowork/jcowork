@@ -2309,6 +2309,7 @@ name = "jcowork-cron"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "cron",
  "serde",
@@ -2507,8 +2508,10 @@ name = "jcowork-storage"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "calamine",
  "chrono",
+ "jcowork-cron",
  "reqwest 0.12.28",
  "rust_xlsxwriter",
  "serde",

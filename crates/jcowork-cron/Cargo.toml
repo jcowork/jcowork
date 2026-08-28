@@ -13,3 +13,4 @@ cron = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+async-trait = { workspace = true }

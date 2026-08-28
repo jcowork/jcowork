@@ -4,7 +4,9 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+jcowork-cron = { workspace = true }
 sqlx = { workspace = true }
+async-trait = { workspace = true }
 calamine = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -298,8 +298,12 @@ async fn main() {
     let skill_manager = Arc::new(SkillManager::new(pool.clone()));
     info!("Skill manager initialized");
 
-    // ── 8. Initialize cron scheduler ──
-    let cron_scheduler = Arc::new(jcowork_cron::CronScheduler::new());
+    // ── 8. Initialize cron scheduler (SQLite-backed: survives restarts, restores jobs) ──
+    let mut cron_scheduler = jcowork_cron::CronScheduler::new();
+    cron_scheduler.with_store(Arc::new(jcowork_storage::CronJobStore::new(pool.clone())));
+    cron_scheduler.restore().await;
+    let cron_scheduler = Arc::new(cron_scheduler);
+    info!("Cron scheduler initialized (persistent)");
 
     // ── 9. Initialize user store ──
     let user_store = match jcowork_storage::UserStore::new(&data_dir).await {

@@ -1,13 +1,121 @@
 //! Cron Scheduler - per-user scheduled job and reminder management.
+//!
+//! Schedule expressions are interpreted in the local timezone (default:
+//! UTC+8 Beijing time, override minutes via `JCWORK_TZ_OFFSET`), so
+//! "daily at 00:00" fires at local midnight rather than UTC midnight.
 
 use anyhow::Result;
-use chrono::Utc;
-use cron::Schedule;
+use async_trait::async_trait;
+use chrono::{Datelike, FixedOffset, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc};
+use cron::{Schedule, TimeUnitSpec};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+
+/// Default local timezone offset in minutes (UTC+8, Beijing time).
+const DEFAULT_TZ_OFFSET_MINUTES: i32 = 480;
+
+/// Local timezone offset used to interpret schedule expressions.
+fn local_offset() -> FixedOffset {
+    let minutes = std::env::var("JCWORK_TZ_OFFSET")
+        .ok()
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(DEFAULT_TZ_OFFSET_MINUTES);
+    FixedOffset::east_opt(minutes * 60).unwrap_or_else(|| FixedOffset::east_opt(DEFAULT_TZ_OFFSET_MINUTES * 60).unwrap())
+}
+
+/// Parse a cron schedule expression (timezone-independent field matching).
+fn parse_schedule(expr: &str) -> Result<Schedule, cron::error::Error> {
+    Schedule::from_str(expr)
+}
+
+/// Compute the next fire time of a schedule, interpreting the fields in the
+/// local timezone (the cron crate itself only supports UTC iteration).
+///
+/// Field matching is per-field AND, except day-of-month/day-of-week which
+/// are OR-combined when both are restricted — mirroring standard cron.
+fn next_local_fire(schedule: &Schedule, after: chrono::DateTime<Utc>) -> Option<chrono::DateTime<Utc>> {
+    let offset = local_offset();
+    let local_now = after.with_timezone(&offset);
+    let mut year = local_now.year();
+
+    // Search up to ~5 years ahead (covers Feb 29 schedules)
+    for _ in 0..5 {
+        let is_first_year = year == local_now.year();
+        for month in schedule.months().iter() {
+            if is_first_year && month < local_now.month() {
+                continue;
+            }
+            let first_day = if is_first_year && month == local_now.month() {
+                local_now.day()
+            } else {
+                1
+            };
+            let last_day = NaiveDate::from_ymd_opt(
+                if month == 12 { year + 1 } else { year },
+                if month == 12 { 1 } else { month + 1 },
+                1,
+            )?
+            .pred_opt()?
+            .day();
+
+            for day in first_day..=last_day {
+                let date = NaiveDate::from_ymd_opt(year, month, day)?;
+                // cron crate DOW: 1=Sun..7=Sat; std cron: 0=Sun..6=Sat
+                let dow = (date.weekday().num_days_from_sunday() + 1) as u32;
+
+                let dom_restricted = schedule.days_of_month().iter().count() < 31;
+                let dow_restricted = schedule.days_of_week().iter().count() < 7;
+                let dom_ok = schedule.days_of_month().iter().any(|d| d == day);
+                let dow_ok = schedule.days_of_week().iter().any(|d| d == dow);
+                let day_ok = match (dom_restricted, dow_restricted) {
+                    (true, true) => dom_ok || dow_ok,
+                    (true, false) => dom_ok,
+                    (false, true) => dow_ok,
+                    _ => true,
+                };
+                if !day_ok {
+                    continue;
+                }
+
+                let first_hour = if is_first_year && month == local_now.month() && day == local_now.day() {
+                    local_now.hour()
+                } else {
+                    0
+                };
+                for hour in first_hour..=23 {
+                    if !schedule.hours().iter().any(|h| h == hour) {
+                        continue;
+                    }
+                    let first_min = if is_first_year && month == local_now.month() && day == local_now.day() && hour == local_now.hour() {
+                        local_now.minute()
+                    } else {
+                        0
+                    };
+                    for minute in first_min..=59 {
+                        if !schedule.minutes().iter().any(|m| m == minute) {
+                            continue;
+                        }
+                        for second in schedule.seconds().iter() {
+                            let naive = NaiveDateTime::new(
+                                date,
+                                chrono::NaiveTime::from_hms_opt(hour, minute, second)?,
+                            );
+                            let local_dt = offset.from_local_datetime(&naive).single()?;
+                            if local_dt > local_now {
+                                return Some(local_dt.with_timezone(&Utc));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        year += 1;
+    }
+    None
+}
 
 /// A scheduled cron job.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -36,6 +144,48 @@ pub struct TaskResult {
     pub output: String,
     pub status: String, // "success" | "error"
     pub executed_at: String,
+}
+
+/// Flat representation of a persisted cron job (store layer interchange format).
+#[derive(Debug, Clone)]
+pub struct CronStoreJob {
+    pub id: String,
+    pub user_id: String,
+    pub schedule: String,
+    pub prompt: String,
+    pub enabled: bool,
+    pub last_run: Option<String>,
+    pub created_at: String,
+    pub name: Option<String>,
+    pub model: Option<String>,
+}
+
+impl From<&CronJob> for CronStoreJob {
+    fn from(j: &CronJob) -> Self {
+        Self {
+            id: j.id.clone(),
+            user_id: j.user_id.clone(),
+            schedule: j.schedule.clone(),
+            prompt: j.prompt.clone(),
+            enabled: j.enabled,
+            last_run: j.last_run.clone(),
+            created_at: j.created_at.clone(),
+            name: j.name.clone(),
+            model: j.model.clone(),
+        }
+    }
+}
+
+/// Persistence backend for cron jobs and their execution results.
+/// Implementations must tolerate saving jobs/results for jobs they don't know.
+#[async_trait]
+pub trait CronStore: Send + Sync {
+    async fn save_job(&self, job: CronStoreJob) -> Result<()>;
+    async fn delete_job(&self, id: &str) -> Result<()>;
+    async fn list_jobs(&self) -> Result<Vec<CronStoreJob>>;
+    async fn save_result(&self, result: TaskResult) -> Result<()>;
+    async fn list_results(&self, cron_job_id: &str) -> Result<Vec<TaskResult>>;
+    async fn delete_results(&self, cron_job_id: &str) -> Result<()>;
 }
 
 /// A one-time reminder.
@@ -77,19 +227,156 @@ pub struct CronScheduler {
     reminder_tx: tokio::sync::broadcast::Sender<Reminder>,
     /// Per-task execution results: cron_job_id -> Vec<TaskResult>
     task_results: Arc<Mutex<HashMap<String, Vec<TaskResult>>>>,
+    /// Optional persistence backend (must be set before Arc-wrapping the scheduler).
+    store: Option<Arc<dyn CronStore>>,
+    /// Shared clones used by spawned job loops (stable addresses).
+    jobs_ref: Arc<Mutex<HashMap<String, CronJob>>>,
+    handles_ref: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
 }
 
 impl CronScheduler {
     pub fn new() -> Self {
         let (reminder_tx, _) = tokio::sync::broadcast::channel(256);
+        let cron_jobs = Arc::new(Mutex::new(HashMap::new()));
+        let cron_handles = Arc::new(Mutex::new(HashMap::new()));
         Self {
-            cron_jobs: Arc::new(Mutex::new(HashMap::new())),
-            cron_handles: Arc::new(Mutex::new(HashMap::new())),
+            jobs_ref: cron_jobs.clone(),
+            handles_ref: cron_handles.clone(),
+            cron_jobs,
+            cron_handles,
             reminders: Arc::new(Mutex::new(HashMap::new())),
             timers: Arc::new(Mutex::new(HashMap::new())),
             reminder_tx,
             task_results: Arc::new(Mutex::new(HashMap::new())),
+            store: None,
         }
+    }
+
+    /// Attach a persistence backend. Must be called before the scheduler is
+    /// wrapped in `Arc` and shared. Call `restore` afterwards to load and
+    /// re-schedule persisted jobs.
+    pub fn with_store(&mut self, store: Arc<dyn CronStore>) {
+        self.store = Some(store);
+    }
+
+    /// Load persisted jobs from the store and re-schedule them.
+    /// Jobs already present in memory are skipped.
+    pub async fn restore(&self) {
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        let jobs = match store.list_jobs().await {
+            Ok(jobs) => jobs,
+            Err(e) => {
+                tracing::warn!(error = %e, "Cron restore: failed to load persisted jobs");
+                return;
+            }
+        };
+        let mut restored = 0;
+        for sj in jobs {
+            if !sj.enabled {
+                continue;
+            }
+            let already = self.cron_jobs.lock().await.contains_key(&sj.id);
+            if already {
+                continue;
+            }
+            let job = CronJob {
+                id: sj.id.clone(),
+                user_id: sj.user_id.clone(),
+                schedule: sj.schedule.clone(),
+                prompt: sj.prompt.clone(),
+                enabled: sj.enabled,
+                last_run: sj.last_run.clone(),
+                created_at: sj.created_at.clone(),
+                name: sj.name.clone(),
+                model: sj.model.clone(),
+            };
+            if let Err(e) = self.spawn_job_loop(job).await {
+                tracing::warn!(error = %e, id = %sj.id, "Cron restore: failed to schedule job");
+            } else {
+                restored += 1;
+            }
+        }
+        tracing::info!(restored, "Cron scheduler restored persisted jobs");
+    }
+
+    /// Spawn the recurring trigger loop for a job and register it in memory.
+    async fn spawn_job_loop(&self, job: CronJob) -> Result<()> {
+        // Validate upfront so callers get a meaningful error.
+        let schedule = parse_schedule(&job.schedule)?;
+        let next = next_local_fire(&schedule, Utc::now())
+            .ok_or_else(|| anyhow::anyhow!("No upcoming fire time for schedule"))?;
+
+        let job_id = job.id.clone();
+        let user_id = job.user_id.clone();
+        let prompt = job.prompt.clone();
+        let model = job.model.clone();
+        let schedule_expr = job.schedule.clone();
+        let cron_jobs = self.jobs_ref.clone();
+        let reminder_tx = self.reminder_tx.clone();
+        let store = self.store.clone();
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let schedule = match parse_schedule(&schedule_expr) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!(error = %e, id = %job_id, "Cron loop: invalid schedule, stopping");
+                        break;
+                    }
+                };
+                let next = match next_local_fire(&schedule, Utc::now()) {
+                    Some(n) => n,
+                    None => break,
+                };
+                let delay = next.signed_duration_since(Utc::now());
+                if delay.num_seconds() <= 0 {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(delay.num_seconds() as u64)).await;
+
+                let last_run = Utc::now().naive_utc().to_string();
+                {
+                    let mut jobs = cron_jobs.lock().await;
+                    match jobs.get_mut(&job_id) {
+                        Some(j) => j.last_run = Some(last_run.clone()),
+                        // Job was removed while we were sleeping.
+                        None => break,
+                    }
+                }
+                // Persist last_run update
+                if let Some(store) = &store {
+                    let jobs = cron_jobs.lock().await;
+                    if let Some(j) = jobs.get(&job_id) {
+                        if let Err(e) = store.save_job(CronStoreJob::from(j)).await {
+                            tracing::warn!(error = %e, id = %job_id, "Cron loop: failed to persist last_run");
+                        }
+                    }
+                }
+
+                let reminder = Reminder {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    user_id: user_id.clone(),
+                    fire_at: Utc::now().to_rfc3339(),
+                    message: format!("[Cron] {}", prompt),
+                    triggered: true,
+                    action: None,
+                    cron_job_id: Some(job_id.clone()),
+                    model: model.clone(),
+                    prompt: Some(prompt.clone()),
+                };
+                let _ = reminder_tx.send(reminder.clone());
+                tracing::info!(id = %job_id, prompt = %prompt, "Cron job triggered");
+            }
+        });
+
+        // Register in memory maps
+        self.cron_jobs.lock().await.insert(job.id.clone(), job.clone());
+        self.cron_handles.lock().await.insert(job.id.clone(), handle);
+        tracing::info!(id = %job.id, schedule = %job.schedule, next = %next, "Cron job scheduled");
+        Ok(())
     }
 
     /// Add a periodic task with name, model, and schedule details.
@@ -109,17 +396,12 @@ impl CronScheduler {
             schedule_expr.to_string()
         };
 
-        // Validate schedule
-        let schedule = Schedule::from_str(&schedule_expr)?;
-        let next = schedule.upcoming(Utc).next()
-            .ok_or_else(|| anyhow::anyhow!("No upcoming fire time for schedule"))?;
-
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now().naive_utc().to_string();
         let job = CronJob {
             id: id.clone(),
             user_id: user_id.to_string(),
-            schedule: schedule_expr.to_string(),
+            schedule: schedule_expr.clone(),
             prompt: prompt.to_string(),
             enabled: true,
             last_run: None,
@@ -128,60 +410,27 @@ impl CronScheduler {
             model: Some(model.to_string()),
         };
 
-        self.cron_jobs.lock().await.insert(id.clone(), job.clone());
+        // Validate + spawn the recurring loop (also registers in memory)
+        self.spawn_job_loop(job.clone()).await?;
 
-        // Schedule the recurring task
-        let job_id = id.clone();
-        let cron_jobs = self.cron_jobs.clone();
-        let reminder_tx = self.reminder_tx.clone();
-        let user_id_clone = user_id.to_string();
-        let prompt_clone = prompt.to_string();
-        let model_clone = Some(model.to_string());
-
-        let handle = tokio::spawn(async move {
-            loop {
-                let schedule = match Schedule::from_str(&job.schedule) {
-                    Ok(s) => s,
-                    Err(_) => break,
-                };
-                let next = match schedule.upcoming(Utc).next() {
-                    Some(n) => n,
-                    None => break,
-                };
-                let delay = next.signed_duration_since(Utc::now());
-                if delay.num_seconds() <= 0 {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                    continue;
-                }
-                tokio::time::sleep(tokio::time::Duration::from_secs(delay.num_seconds() as u64)).await;
-
-                if let Some(j) = cron_jobs.lock().await.get_mut(&job_id) {
-                    j.last_run = Some(Utc::now().naive_utc().to_string());
-                }
-
-                let reminder = Reminder {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    user_id: user_id_clone.clone(),
-                    fire_at: Utc::now().to_rfc3339(),
-                    message: format!("[Cron] {}", prompt_clone),
-                    triggered: true,
-                    action: None,
-                    cron_job_id: Some(job_id.clone()),
-                    model: model_clone.clone(),
-                    prompt: Some(prompt_clone.clone()),
-                };
-                let _ = reminder_tx.send(reminder.clone());
-                tracing::info!(id = %job_id, prompt = %prompt_clone, "Cron job triggered");
+        // Persist
+        if let Some(store) = &self.store {
+            if let Err(e) = store.save_job(CronStoreJob::from(&job)).await {
+                tracing::warn!(error = %e, id = %id, "Failed to persist periodic task");
             }
-        });
+        }
 
-        self.cron_handles.lock().await.insert(id.clone(), handle);
-        tracing::info!(id = %id, name = %name, schedule = %schedule_expr, next = %next, "Periodic task added");
+        tracing::info!(id = %id, name = %name, schedule = %schedule_expr, "Periodic task added");
         Ok(id)
     }
 
-    /// Store a task execution result.
+    /// Store a task execution result (memory + persistence).
     pub async fn store_task_result(&self, result: TaskResult) {
+        if let Some(store) = &self.store {
+            if let Err(e) = store.save_result(result.clone()).await {
+                tracing::warn!(error = %e, cron_job_id = %result.cron_job_id, "Failed to persist task result");
+            }
+        }
         let mut results = self.task_results.lock().await;
         results
             .entry(result.cron_job_id.clone())
@@ -190,10 +439,19 @@ impl CronScheduler {
     }
 
     /// List execution results for a specific cron job (most recent first).
+    /// Merges persisted results (if a store is attached) with the in-memory cache.
     pub async fn list_task_results(&self, cron_job_id: &str) -> Vec<TaskResult> {
-        let results = self.task_results.lock().await;
-        let mut items = results.get(cron_job_id).cloned().unwrap_or_default();
-        items.reverse(); // most recent first
+        let mut items: Vec<TaskResult> = match &self.store {
+            Some(store) => match store.list_results(cron_job_id).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, cron_job_id = %cron_job_id, "Failed to load persisted results");
+                    self.task_results.lock().await.get(cron_job_id).cloned().unwrap_or_default()
+                }
+            },
+            None => self.task_results.lock().await.get(cron_job_id).cloned().unwrap_or_default(),
+        };
+        items.sort_by(|a, b| b.executed_at.cmp(&a.executed_at)); // most recent first
         items
     }
 
@@ -304,17 +562,12 @@ impl CronScheduler {
             schedule_expr.to_string()
         };
 
-        // Validate schedule first
-        let schedule = Schedule::from_str(&schedule_expr)?;
-        let next = schedule.upcoming(Utc).next()
-            .ok_or_else(|| anyhow::anyhow!("No upcoming fire time for schedule"))?;
-
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now().naive_utc().to_string();
         let job = CronJob {
             id: id.clone(),
             user_id: user_id.to_string(),
-            schedule: schedule_expr.to_string(),
+            schedule: schedule_expr.clone(),
             prompt: prompt.to_string(),
             enabled: true,
             last_run: None,
@@ -323,59 +576,17 @@ impl CronScheduler {
             model: None,
         };
 
-        // Store job
-        self.cron_jobs.lock().await.insert(id.clone(), job.clone());
+        // Validate + spawn the recurring loop (also registers in memory)
+        self.spawn_job_loop(job.clone()).await?;
 
-        // Schedule the recurring task
-        let job_id = id.clone();
-        let cron_jobs = self.cron_jobs.clone();
-        let reminder_tx = self.reminder_tx.clone();
-        let user_id_clone = user_id.to_string();
-        let prompt_clone = prompt.to_string();
-
-        let handle = tokio::spawn(async move {
-            loop {
-                let schedule = match Schedule::from_str(&job.schedule) {
-                    Ok(s) => s,
-                    Err(_) => break,
-                };
-                let next = match schedule.upcoming(Utc).next() {
-                    Some(n) => n,
-                    None => break,
-                };
-                let delay = next.signed_duration_since(Utc::now());
-                if delay.num_seconds() <= 0 {
-                    // Sleep a bit to avoid busy loop on past times
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                    continue;
-                }
-                tokio::time::sleep(tokio::time::Duration::from_secs(delay.num_seconds() as u64)).await;
-
-                // Mark last_run
-                if let Some(j) = cron_jobs.lock().await.get_mut(&job_id) {
-                    j.last_run = Some(Utc::now().naive_utc().to_string());
-                }
-
-                // Send as a reminder notification
-                let reminder = Reminder {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    user_id: user_id_clone.clone(),
-                    fire_at: Utc::now().to_rfc3339(),
-                    message: format!("[Cron] {}", prompt_clone),
-                    triggered: true,
-                    action: None,
-                    cron_job_id: Some(job_id.clone()),
-                    model: None,
-                    prompt: Some(prompt_clone.clone()),
-                };
-                let _ = reminder_tx.send(reminder.clone());
-                tracing::info!(id = %job_id, prompt = %prompt_clone, "Cron job triggered");
+        // Persist
+        if let Some(store) = &self.store {
+            if let Err(e) = store.save_job(CronStoreJob::from(&job)).await {
+                tracing::warn!(error = %e, id = %id, "Failed to persist cron job");
             }
-        });
+        }
 
-        self.cron_handles.lock().await.insert(id.clone(), handle);
-
-        tracing::info!(id = %id, schedule = %schedule_expr, next = %next, "Cron job added");
+        tracing::info!(id = %id, schedule = %schedule_expr, "Cron job added");
         Ok(id)
     }
 
@@ -397,6 +608,16 @@ impl CronScheduler {
             handle.abort();
         }
         self.cron_jobs.lock().await.remove(id);
+        // Remove from persistence (job + its execution results)
+        if let Some(store) = &self.store {
+            if let Err(e) = store.delete_job(id).await {
+                tracing::warn!(error = %e, id = %id, "Failed to delete persisted cron job");
+            }
+            if let Err(e) = store.delete_results(id).await {
+                tracing::warn!(error = %e, id = %id, "Failed to delete persisted task results");
+            }
+        }
+        self.task_results.lock().await.remove(id);
         Ok(())
     }
 
@@ -408,10 +629,8 @@ impl CronScheduler {
         } else {
             schedule_expr.to_string()
         };
-        let schedule = Schedule::from_str(&schedule_expr)?;
-        let next = schedule
-            .upcoming(Utc)
-            .next()
+        let schedule = parse_schedule(&schedule_expr)?;
+        let next = next_local_fire(&schedule, Utc::now())
             .ok_or_else(|| anyhow::anyhow!("No upcoming fire time for schedule"))?;
         Ok(next)
     }
@@ -424,7 +643,7 @@ impl CronScheduler {
         } else {
             schedule_expr.to_string()
         };
-        Schedule::from_str(&schedule_expr)?;
+        parse_schedule(&schedule_expr)?;
         Ok(())
     }
 
@@ -504,6 +723,38 @@ fn remap_dow_value(val: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_next_local_fire_daily_midnight() {
+        // "0 0 0 * * *" = daily at 00:00:00 local time (UTC+8 by default).
+        // Must fire at local midnight => 16:00 UTC the previous day, NOT 00:00 UTC.
+        let schedule = parse_schedule("0 0 0 * * *").unwrap();
+        // 2026-08-29 02:00 Beijing = 2026-08-28 18:00 UTC
+        let after = chrono::DateTime::parse_from_rfc3339("2026-08-28T18:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let next = next_local_fire(&schedule, after).expect("should find next fire");
+        // Expected: 2026-08-30 00:00 Beijing = 2026-08-29 16:00 UTC
+        assert_eq!(next.to_rfc3339(), "2026-08-29T16:00:00+00:00");
+    }
+
+    #[test]
+    fn test_next_local_fire_specific_time() {
+        // Daily at 09:30 local => 01:30 UTC
+        let schedule = parse_schedule("0 30 9 * * *").unwrap();
+        let after = chrono::DateTime::parse_from_rfc3339("2026-08-29T02:00:00+08:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let next = next_local_fire(&schedule, after).unwrap();
+        assert_eq!(next.to_rfc3339(), "2026-08-29T01:30:00+00:00");
+
+        // After today's 09:30 local, next fire is tomorrow
+        let after_late = chrono::DateTime::parse_from_rfc3339("2026-08-29T10:00:00+08:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let next2 = next_local_fire(&schedule, after_late).unwrap();
+        assert_eq!(next2.to_rfc3339(), "2026-08-30T01:30:00+00:00");
+    }
 
     #[test]
     fn test_cron_dow_mapping() {

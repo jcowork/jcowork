@@ -108,7 +108,36 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
             platform TEXT DEFAULT 'api',
             enabled INTEGER DEFAULT 1,
             last_run TEXT,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            name TEXT,
+            model TEXT
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Upgrade path for pre-existing databases missing the newer columns
+    for col in ["name TEXT", "model TEXT"] {
+        if let Err(e) = sqlx::query(&format!("ALTER TABLE cron_jobs ADD COLUMN {}", col))
+            .execute(pool)
+            .await
+        {
+            // Column already exists — safe to ignore
+            tracing::debug!(error = %e, column = %col, "cron_jobs column migration skipped");
+        }
+    }
+
+    // Cron task execution results table
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS cron_task_results (
+            id TEXT PRIMARY KEY,
+            cron_job_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            output TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'success',
+            executed_at TEXT NOT NULL
         )
         "#,
     )
@@ -144,6 +173,10 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         .await?;
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_cron_jobs_user ON cron_jobs(user_id)")
+        .execute(pool)
+        .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_cron_task_results_job ON cron_task_results(cron_job_id)")
         .execute(pool)
         .await?;
 
