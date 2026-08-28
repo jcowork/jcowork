@@ -410,52 +410,55 @@ pub async fn ws_handler(
                             }).unwrap().into(),
                         )).await;
 
-                        // If reminder has an action, run agent turn to execute it
-                        if let Some(action) = &reminder.action {
-                            tracing::info!(action = %action, "Executing reminder action");
+                        // Cron-job reminders are executed by the background cron executor.
+                        // Only execute one-time reminder actions here (no cron_job_id).
+                        if reminder.cron_job_id.is_none() {
+                            if let Some(action) = &reminder.action {
+                                tracing::info!(action = %action, "Executing reminder action");
 
-                            history.push(jcowork_llm::provider::ChatMessage {
-                                role: "user".to_string(),
-                                content: action.clone(),
-                                tool_calls: None,
-                                tool_call_id: None,
-                                reasoning_content: None,
-                            });
+                                history.push(jcowork_llm::provider::ChatMessage {
+                                    role: "user".to_string(),
+                                    content: action.clone(),
+                                    tool_calls: None,
+                                    tool_call_id: None,
+                                    reasoning_content: None,
+                                });
 
-                            let provider = {
-                                let router = llm_router.read().unwrap();
-                                router.get_provider(&default_model)
-                            };
-                            if let Ok(provider) = provider {
-                                let tools = agent_loop::filter_tools_by_skill(
-                                    &tool_registry.all_schemas(), &enabled_skill_ids,
-                                );
-                                let workspace_root = format!("{}/{}/workspace", data_dir, user_id);
-                                let _ = tokio::fs::create_dir_all(&workspace_root).await;
-                                let tool_ctx = ToolContext {
-                                    user_id: user_id.clone(),
-                                    workspace_root,
+                                let provider = {
+                                    let router = llm_router.read().unwrap();
+                                    router.get_provider(&default_model)
                                 };
-                                let mut sink = WsSink {
-                                    ws_sender: &mut ws_sender,
-                                };
+                                if let Ok(provider) = provider {
+                                    let tools = agent_loop::filter_tools_by_skill(
+                                        &tool_registry.all_schemas(), &enabled_skill_ids,
+                                    );
+                                    let workspace_root = format!("{}/{}/workspace", data_dir, user_id);
+                                    let _ = tokio::fs::create_dir_all(&workspace_root).await;
+                                    let tool_ctx = ToolContext {
+                                        user_id: user_id.clone(),
+                                        workspace_root,
+                                    };
+                                    let mut sink = WsSink {
+                                        ws_sender: &mut ws_sender,
+                                    };
 
-                                let _ = agent_loop::run_turn(AgentTurnOptions {
-                                    history: &mut history,
-                                    tools: &tools,
-                                    provider,
-                                    tool_registry: tool_registry.clone(),
-                                    tool_ctx: &tool_ctx,
-                                    pre_context: None,
-                                    max_turns: 5,
-                                    llm_timeout_secs: 60,
-                                    stream_timeout_secs: 120,
-                                    tool_timeout_secs: 30,
-                                    output: &mut sink,
-                                    user_id: &user_id,
-                                    model: &default_model,
-                                    log_writer: Some(log_writer.clone()),
-                                }).await;
+                                    let _ = agent_loop::run_turn(AgentTurnOptions {
+                                        history: &mut history,
+                                        tools: &tools,
+                                        provider,
+                                        tool_registry: tool_registry.clone(),
+                                        tool_ctx: &tool_ctx,
+                                        pre_context: None,
+                                        max_turns: 5,
+                                        llm_timeout_secs: 60,
+                                        stream_timeout_secs: 120,
+                                        tool_timeout_secs: 30,
+                                        output: &mut sink,
+                                        user_id: &user_id,
+                                        model: &default_model,
+                                        log_writer: Some(log_writer.clone()),
+                                    }).await;
+                                }
                             }
                         }
                     }

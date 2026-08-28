@@ -174,8 +174,21 @@ async fn main() -> Result<()> {
     };
 
     // Build router
-    let app = router::build_router(state)
+    let app = router::build_router(state.clone())
         .layer(CorsLayer::permissive());
+
+    // Spawn background cron executor — runs periodic tasks independently of WS connections
+    jcowork_gateway::cron_executor::spawn_cron_executor(
+        state.cron_scheduler.clone(),
+        state.llm_router.clone(),
+        state.default_model.clone(),
+        state.tool_registry.clone(),
+        state.memory_manager.clone(),
+        state.skill_manager.clone(),
+        state.log_writer.clone(),
+        state.data_dir.clone(),
+    );
+    info!("Background cron executor spawned");
 
     // Bind and serve
     let addr = format!("{}:{}", config.host, config.port);

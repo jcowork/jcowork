@@ -356,7 +356,20 @@ async fn main() {
     };
 
     // ── 14. Build router ──
-    let app = router::build_router(state).layer(CorsLayer::permissive());
+    let app = router::build_router(state.clone()).layer(CorsLayer::permissive());
+
+    // ── 14b. Spawn background cron executor ──
+    jcowork_gateway::cron_executor::spawn_cron_executor(
+        state.cron_scheduler.clone(),
+        state.llm_router.clone(),
+        state.default_model.clone(),
+        state.tool_registry.clone(),
+        state.memory_manager.clone(),
+        state.skill_manager.clone(),
+        state.log_writer.clone(),
+        state.data_dir.clone(),
+    );
+    info!("Background cron executor spawned");
 
     // ── 15. Start Axum server on localhost:3000 in background ──
     let addr = "127.0.0.1:3000";

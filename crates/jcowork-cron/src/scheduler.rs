@@ -58,6 +58,9 @@ pub struct Reminder {
     /// Model to use for execution (for periodic tasks).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Original prompt text (for cron job execution).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
 }
 
 /// Manages per-user cron jobs and reminders.
@@ -165,6 +168,7 @@ impl CronScheduler {
                     action: None,
                     cron_job_id: Some(job_id.clone()),
                     model: model_clone.clone(),
+                    prompt: Some(prompt_clone.clone()),
                 };
                 let _ = reminder_tx.send(reminder.clone());
                 tracing::info!(id = %job_id, prompt = %prompt_clone, "Cron job triggered");
@@ -221,6 +225,7 @@ impl CronScheduler {
             action: action.map(|s| s.to_string()),
             cron_job_id: None,
             model: None,
+            prompt: None,
         };
 
         // Calculate delay
@@ -361,6 +366,7 @@ impl CronScheduler {
                     action: None,
                     cron_job_id: Some(job_id.clone()),
                     model: None,
+                    prompt: Some(prompt_clone.clone()),
                 };
                 let _ = reminder_tx.send(reminder.clone());
                 tracing::info!(id = %job_id, prompt = %prompt_clone, "Cron job triggered");
