@@ -2290,6 +2290,7 @@ dependencies = [
  "futures",
  "jcowork-cron",
  "jcowork-llm",
+ "jcowork-logs",
  "jcowork-memory",
  "jcowork-skills",
  "jcowork-storage",

@@ -10,6 +10,7 @@ jcowork-skills = { workspace = true }
 jcowork-tools = { workspace = true }
 jcowork-storage = { workspace = true }
 jcowork-cron = { workspace = true }
+jcowork-logs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
