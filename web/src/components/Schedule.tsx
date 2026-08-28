@@ -48,7 +48,7 @@ interface ScheduleProps {
   token: string;
 }
 
-type Frequency = 'hourly' | 'daily' | 'weekly' | 'monthly';
+type Frequency = 'hourly' | 'daily' | 'weekly' | 'monthly' | 'yearly';
 
 export default function Schedule({ userId: _userId, token }: ScheduleProps) {
   const t = useT();
@@ -63,9 +63,11 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
   const [taskPrompt, setTaskPrompt] = useState('');
   const [taskModel, setTaskModel] = useState('');
   const [frequency, setFrequency] = useState<Frequency>('daily');
+  const [second, setSecond] = useState(0);
   const [minute, setMinute] = useState(0);
   const [hour, setHour] = useState(9);
   const [day, setDay] = useState(1);
+  const [month, setMonth] = useState(1);
   const [daysOfWeek, setDaysOfWeek] = useState<number[]>([1]); // For multi-select weekly, 0=Sun, 1=Mon, ..., 6=Sat
   const [submitting, setSubmitting] = useState(false);
   const [submitStatus, setSubmitStatus] = useState<'idle' | 'success' | 'error'>('idle');
@@ -179,10 +181,13 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
           prompt: taskPrompt.trim(),
           model: taskModel,
           frequency,
+          second,
           minute,
           hour,
-          // Only send day for monthly frequency
-          day: frequency === 'monthly' ? day : undefined,
+          // Only send day for monthly/yearly frequency
+          day: (frequency === 'monthly' || frequency === 'yearly') ? day : undefined,
+          // Only send month for yearly frequency
+          month: frequency === 'yearly' ? month : undefined,
           // Only send days_of_week for weekly frequency
           days_of_week: frequency === 'weekly' ? daysOfWeek : undefined,
         }),
@@ -338,11 +343,12 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
             <div style={{ marginBottom: 12 }}>
               <label style={labelStyle}>{t('executionFrequency')}</label>
               <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
-                {(['hourly', 'daily', 'weekly', 'monthly'] as Frequency[]).map(f => (
+                {(['hourly', 'daily', 'weekly', 'monthly', 'yearly'] as Frequency[]).map(f => (
                   <button key={f} onClick={() => {
                     setFrequency(f);
                     // Reset values when switching frequencies
-                    if (f !== 'monthly') setDay(1);
+                    if (f !== 'monthly' && f !== 'yearly') setDay(1);
+                    if (f !== 'yearly') setMonth(1);
                     if (f !== 'weekly') setDaysOfWeek([1]);
                   }} style={{
                     flex: '1 1 auto', padding: '8px 12px', borderRadius: 6, cursor: 'pointer',
@@ -351,7 +357,7 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
                     background: frequency === f ? '#1f6feb22' : 'transparent',
                     color: frequency === f ? '#58a6ff' : '#aaa',
                   }}>
-                    {t(f === 'hourly' ? 'frequencyHourly' : f === 'daily' ? 'frequencyDaily' : f === 'weekly' ? 'frequencyWeekly' : 'frequencyMonthly')}
+                    {t(f === 'hourly' ? 'frequencyHourly' : f === 'daily' ? 'frequencyDaily' : f === 'weekly' ? 'frequencyWeekly' : f === 'monthly' ? 'frequencyMonthly' : 'frequencyYearly')}
                   </button>
                 ))}
               </div>
@@ -361,9 +367,17 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
                 {(frequency === 'hourly') && (
                   <div style={{ flex: 1 }}>
                     <label style={labelStyle}>{t('specificMinute')}</label>
-                    <input type="number" min={0} max={59} value={minute}
-                      onChange={e => setMinute(parseInt(e.target.value) || 0)}
-                      style={inputStyle} />
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                      <input type="number" min={0} max={59} value={minute}
+                        onChange={e => setMinute(parseInt(e.target.value) || 0)}
+                        style={{ ...inputStyle, textAlign: 'center', width: 60 }} />
+                      <span style={{ color: '#666', fontSize: 13 }}>{t('minuteUnit')}</span>
+                      <span style={{ color: '#666' }}>:</span>
+                      <input type="number" min={0} max={59} value={second}
+                        onChange={e => setSecond(parseInt(e.target.value) || 0)}
+                        style={{ ...inputStyle, textAlign: 'center', width: 60 }} />
+                      <span style={{ color: '#666', fontSize: 13 }}>{t('secondUnit')}</span>
+                    </div>
                   </div>
                 )}
                 {(frequency === 'daily') && (
@@ -380,6 +394,11 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
                           onChange={e => setMinute(parseInt(e.target.value) || 0)}
                           style={{ ...inputStyle, textAlign: 'center', width: 60 }} />
                         <span style={{ color: '#666', fontSize: 13 }}>{t('minuteUnit')}</span>
+                        <span style={{ color: '#666' }}>:</span>
+                        <input type="number" min={0} max={59} value={second}
+                          onChange={e => setSecond(parseInt(e.target.value) || 0)}
+                          style={{ ...inputStyle, textAlign: 'center', width: 60 }} />
+                        <span style={{ color: '#666', fontSize: 13 }}>{t('secondUnit')}</span>
                       </div>
                     </div>
                   </>
@@ -423,6 +442,11 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
                         onChange={e => setMinute(parseInt(e.target.value) || 0)}
                         style={{ ...inputStyle, textAlign: 'center', width: 60 }} />
                       <span style={{ color: '#666', fontSize: 13 }}>{t('minuteUnit')}</span>
+                      <span style={{ color: '#666' }}>:</span>
+                      <input type="number" min={0} max={59} value={second}
+                        onChange={e => setSecond(parseInt(e.target.value) || 0)}
+                        style={{ ...inputStyle, textAlign: 'center', width: 60 }} />
+                      <span style={{ color: '#666', fontSize: 13 }}>{t('secondUnit')}</span>
                     </div>
                   </div>
                 )}
@@ -443,6 +467,44 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
                         onChange={e => setMinute(parseInt(e.target.value) || 0)}
                         style={{ ...inputStyle, textAlign: 'center', width: 60 }} />
                       <span style={{ color: '#666', fontSize: 13 }}>{t('minuteUnit')}</span>
+                      <span style={{ color: '#666' }}>:</span>
+                      <input type="number" min={0} max={59} value={second}
+                        onChange={e => setSecond(parseInt(e.target.value) || 0)}
+                        style={{ ...inputStyle, textAlign: 'center', width: 60 }} />
+                      <span style={{ color: '#666', fontSize: 13 }}>{t('secondUnit')}</span>
+                    </div>
+                  </div>
+                )}
+                {frequency === 'yearly' && (
+                  <div style={{ flex: 1 }}>
+                    <label style={labelStyle}>{t('specificMonth')} & {t('specificDay')} & {t('specificTime')}</label>
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <select value={month} onChange={e => setMonth(parseInt(e.target.value) || 1)}
+                        style={{ ...inputStyle, width: 70, cursor: 'pointer' }}>
+                        {['monthJanuary', 'monthFebruary', 'monthMarch', 'monthApril', 'monthMay', 'monthJune',
+                          'monthJuly', 'monthAugust', 'monthSeptember', 'monthOctober', 'monthNovember', 'monthDecember'
+                        ].map((key, idx) => (
+                          <option key={idx} value={idx + 1}>{t(key as any)}</option>
+                        ))}
+                      </select>
+                      <input type="number" min={1} max={28} value={day}
+                        onChange={e => setDay(parseInt(e.target.value) || 1)}
+                        style={{ ...inputStyle, textAlign: 'center', width: 60 }} />
+                      <span style={{ color: '#666', fontSize: 13 }}>{t('dayOfMonth')}</span>
+                      <input type="number" min={0} max={23} value={hour}
+                        onChange={e => setHour(parseInt(e.target.value) || 0)}
+                        style={{ ...inputStyle, textAlign: 'center', width: 60 }} />
+                      <span style={{ color: '#666', fontSize: 13 }}>{t('hourUnit')}</span>
+                      <span style={{ color: '#666' }}>:</span>
+                      <input type="number" min={0} max={59} value={minute}
+                        onChange={e => setMinute(parseInt(e.target.value) || 0)}
+                        style={{ ...inputStyle, textAlign: 'center', width: 60 }} />
+                      <span style={{ color: '#666', fontSize: 13 }}>{t('minuteUnit')}</span>
+                      <span style={{ color: '#666' }}>:</span>
+                      <input type="number" min={0} max={59} value={second}
+                        onChange={e => setSecond(parseInt(e.target.value) || 0)}
+                        style={{ ...inputStyle, textAlign: 'center', width: 60 }} />
+                      <span style={{ color: '#666', fontSize: 13 }}>{t('secondUnit')}</span>
                     </div>
                   </div>
                 )}

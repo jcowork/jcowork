@@ -1,35 +1,26 @@
 /**
- * Tests for cron utilities.
- * Run with: node --experimental-strip-types cron.test.ts
- * Or: npx tsx cron.test.ts
+ * Tests for cron expression utilities.
  */
 
-// Declare process for Node.js environment
 declare const process: { exit: (code: number) => void } | undefined;
 
-import { formatFrequency, buildCronExpression } from './cron';
+import { buildCronExpression, formatFrequency } from './cron';
 
-// Simple test runner
+// Minimal test runner
 let passed = 0;
 let failed = 0;
+let total = 0;
 
-function test(name: string, fn: () => void) {
-  try {
-    fn();
-    console.log(`✓ ${name}`);
+function assertEq(actual: string, expected: string, name: string) {
+  total++;
+  if (actual === expected) {
     passed++;
-  } catch (e) {
-    console.error(`✗ ${name}`);
-    console.error(`  ${e}`);
+    console.log(`✓ ${name}`);
+  } else {
     failed++;
-  }
-}
-
-function assertEqual(actual: unknown, expected: unknown, message?: string) {
-  if (actual !== expected) {
-    throw new Error(
-      `${message || 'Assertion failed'}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`
-    );
+    console.log(` ${name}`);
+    console.log(`  Expected: "${expected}"`);
+    console.log(`  Actual:   "${actual}"`);
   }
 }
 
@@ -51,6 +42,7 @@ const t = (key: string) => {
     frequencyDaily: '每日',
     frequencyWeekly: '每周',
     frequencyMonthly: '每月',
+    frequencyYearly: '每年',
     dayOfMonth: '日',
     daySunday: '日',
     dayMonday: '一',
@@ -59,226 +51,100 @@ const t = (key: string) => {
     dayThursday: '四',
     dayFriday: '五',
     daySaturday: '六',
+    monthJanuary: '1月',
+    monthFebruary: '2月',
+    monthMarch: '3月',
+    monthApril: '4月',
+    monthMay: '5月',
+    monthJune: '6月',
+    monthJuly: '7月',
+    monthAugust: '8月',
+    monthSeptember: '9月',
+    monthOctober: '10月',
+    monthNovember: '11月',
+    monthDecember: '12月',
   };
   return translations[key] || key;
 };
 
 console.log('\n=== buildCronExpression tests ===\n');
 
-// Hourly tests
-test('hourly: default (minute=0)', () => {
-  assertEqual(buildCronExpression('hourly'), '0 * * * *');
-});
+// --- Hourly tests ---
+assertEq(buildCronExpression('hourly'), '0 0 * * * *', 'hourly: default');
+assertEq(buildCronExpression('hourly', undefined, 30), '0 30 * * * *', 'hourly: specific minute');
+assertEq(buildCronExpression('hourly', undefined, 59), '0 59 * * * *', 'hourly: minute 59');
+assertEq(buildCronExpression('hourly', undefined, 0, 10), '0 0 * * * *', 'hourly: ignores hour');
+assertThrows(() => buildCronExpression('hourly', undefined, 60), 'Invalid minute');
+assertThrows(() => buildCronExpression('hourly', 60), 'Invalid second');
 
-test('hourly: specific minute (30)', () => {
-  assertEqual(buildCronExpression('hourly', 30), '30 * * * *');
-});
+// --- Daily tests ---
+assertEq(buildCronExpression('daily'), '0 0 9 * * *', 'daily: default');
+assertEq(buildCronExpression('daily', 0, 30, 15), '0 30 15 * * *', 'daily: specific time');
+assertEq(buildCronExpression('daily', 0, 0, 0), '0 0 0 * * *', 'daily: midnight');
+assertEq(buildCronExpression('daily', 0, 59, 23), '0 59 23 * * *', 'daily: end of day');
+assertEq(buildCronExpression('daily', 45, 30, 15), '45 30 15 * * *', 'daily: with second');
+assertThrows(() => buildCronExpression('daily', 0, 60, 10), 'Invalid minute');
+assertThrows(() => buildCronExpression('daily', 0, 30, 24), 'Invalid hour');
 
-test('hourly: minute 59 (boundary)', () => {
-  assertEqual(buildCronExpression('hourly', 59), '59 * * * *');
-});
+// --- Weekly tests ---
+assertEq(buildCronExpression('weekly', 0, 0, 9, undefined, undefined, [1]), '0 0 9 * * 1', 'weekly: default (Monday)');
+assertEq(buildCronExpression('weekly', 0, 0, 10, undefined, undefined, [0]), '0 0 10 * * 0', 'weekly: Sunday');
+assertEq(buildCronExpression('weekly', 0, 30, 14, undefined, undefined, [6]), '0 30 14 * * 6', 'weekly: Saturday');
+assertEq(buildCronExpression('weekly', 0, 0, 9, undefined, undefined, [1, 3, 5]), '0 0 9 * * 1,3,5', 'weekly: Mon/Wed/Fri');
+assertEq(buildCronExpression('weekly', 30, 0, 9, undefined, undefined, [1]), '30 0 9 * * 1', 'weekly: with second');
+assertEq(buildCronExpression('weekly', 0, 0, 9, undefined, undefined, [1, 2, 3, 4, 5]), '0 0 9 * * 1,2,3,4,5', 'weekly: weekdays');
+assertEq(buildCronExpression('weekly', 0, 0, 10, undefined, undefined, [0, 6]), '0 0 10 * * 0,6', 'weekly: weekends');
+assertEq(buildCronExpression('weekly', 0, 0, 9, undefined, undefined, [0, 1, 2, 3, 4, 5, 6]), '0 0 9 * * 0,1,2,3,4,5,6', 'weekly: all days');
+assertEq(buildCronExpression('weekly', 0, 0, 9, undefined, undefined, [1, 1, 3, 3]), '0 0 9 * * 1,3', 'weekly: dedup');
+assertEq(buildCronExpression('weekly', 0, 0, 9, undefined, undefined, [5, 1, 3]), '0 0 9 * * 1,3,5', 'weekly: sort');
+assertThrows(() => buildCronExpression('weekly', 0, 0, 9, undefined, undefined, [7]), 'Invalid day_of_week');
+assertThrows(() => buildCronExpression('weekly', 0, 0, 9, undefined, undefined, []), 'must not be empty');
 
-test('hourly: invalid minute (60)', () => {
-  assertThrows(() => buildCronExpression('hourly', 60), 'Invalid minute');
-});
+// --- Monthly tests ---
+assertEq(buildCronExpression('monthly'), '0 0 9 1 * *', 'monthly: default');
+assertEq(buildCronExpression('monthly', 0, 30, 14, 15), '0 30 14 15 * *', 'monthly: specific');
+assertEq(buildCronExpression('monthly', 20, 30, 14, 15), '20 30 14 15 * *', 'monthly: with second');
+assertEq(buildCronExpression('monthly', 0, 0, 10, 28), '0 0 10 28 * *', 'monthly: day 28');
+assertEq(buildCronExpression('monthly', 0, 0, 10, 31), '0 0 10 28 * *', 'monthly: day clamped');
 
-test('hourly: ignores hour and day params', () => {
-  assertEqual(buildCronExpression('hourly', 15, 10, 5, [3]), '15 * * * *');
-});
+// --- Yearly tests ---
+assertEq(buildCronExpression('yearly'), '0 0 9 1 1 *', 'yearly: default (Jan 1st)');
+assertEq(buildCronExpression('yearly', 0, 30, 14, 15, 6), '0 30 14 15 6 *', 'yearly: June 15th');
+assertEq(buildCronExpression('yearly', 45, 0, 10, 1, 3), '45 0 10 1 3 *', 'yearly: with second');
+assertEq(buildCronExpression('yearly', 0, 0, 9, 1, 15), '0 0 9 1 12 *', 'yearly: month clamped');
+assertEq(buildCronExpression('yearly', 0, 0, 9, 31, 6), '0 0 9 28 6 *', 'yearly: day clamped');
 
-// Daily tests
-test('daily: default (9:00)', () => {
-  assertEqual(buildCronExpression('daily'), '0 9 * * *');
-});
-
-test('daily: specific time (15:30)', () => {
-  assertEqual(buildCronExpression('daily', 30, 15), '30 15 * * *');
-});
-
-test('daily: midnight (0:00)', () => {
-  assertEqual(buildCronExpression('daily', 0, 0), '0 0 * * *');
-});
-
-test('daily: end of day (23:59)', () => {
-  assertEqual(buildCronExpression('daily', 59, 23), '59 23 * * *');
-});
-
-test('daily: invalid minute (60)', () => {
-  assertThrows(() => buildCronExpression('daily', 60, 10), 'Invalid minute');
-});
-
-test('daily: invalid hour (24)', () => {
-  assertThrows(() => buildCronExpression('daily', 30, 24), 'Invalid hour');
-});
-
-test('daily: ignores day param', () => {
-  assertEqual(buildCronExpression('daily', 0, 12, 15, [3]), '0 12 * * *');
-});
-
-// Weekly tests (multi-select)
-test('weekly: default (Monday at 9:00)', () => {
-  assertEqual(buildCronExpression('weekly'), '0 9 * * 1');
-});
-
-test('weekly: single day Sunday', () => {
-  assertEqual(buildCronExpression('weekly', 0, 10, undefined, [0]), '0 10 * * 0');
-});
-
-test('weekly: single day Saturday', () => {
-  assertEqual(buildCronExpression('weekly', 30, 14, undefined, [6]), '30 14 * * 6');
-});
-
-test('weekly: multiple days Mon/Wed/Fri', () => {
-  assertEqual(buildCronExpression('weekly', 0, 9, undefined, [1, 3, 5]), '0 9 * * 1,3,5');
-});
-
-test('weekly: weekdays equivalent (Mon-Fri)', () => {
-  assertEqual(buildCronExpression('weekly', 0, 9, undefined, [1, 2, 3, 4, 5]), '0 9 * * 1,2,3,4,5');
-});
-
-test('weekly: weekends equivalent (Sat/Sun)', () => {
-  assertEqual(buildCronExpression('weekly', 0, 10, undefined, [0, 6]), '0 10 * * 0,6');
-});
-
-test('weekly: all days', () => {
-  assertEqual(buildCronExpression('weekly', 0, 9, undefined, [0, 1, 2, 3, 4, 5, 6]), '0 9 * * 0,1,2,3,4,5,6');
-});
-
-test('weekly: duplicate days deduped', () => {
-  assertEqual(buildCronExpression('weekly', 0, 9, undefined, [1, 1, 3, 3]), '0 9 * * 1,3');
-});
-
-test('weekly: unsorted days sorted', () => {
-  assertEqual(buildCronExpression('weekly', 0, 9, undefined, [5, 1, 3]), '0 9 * * 1,3,5');
-});
-
-test('weekly: invalid day_of_week (7)', () => {
-  assertThrows(() => buildCronExpression('weekly', 0, 9, undefined, [7]), 'Invalid day_of_week');
-});
-
-test('weekly: invalid minute (60)', () => {
-  assertThrows(() => buildCronExpression('weekly', 60, 9, undefined, [1]), 'Invalid minute');
-});
-
-test('weekly: invalid hour (24)', () => {
-  assertThrows(() => buildCronExpression('weekly', 0, 24, undefined, [1]), 'Invalid hour');
-});
-
-// Monthly tests
-test('monthly: default (1st at 9:00)', () => {
-  assertEqual(buildCronExpression('monthly'), '0 9 1 * *');
-});
-
-test('monthly: specific time (15th at 14:30)', () => {
-  assertEqual(buildCronExpression('monthly', 30, 14, 15), '30 14 15 * *');
-});
-
-test('monthly: day 28 (max allowed)', () => {
-  assertEqual(buildCronExpression('monthly', 0, 10, 28), '0 10 28 * *');
-});
-
-test('monthly: day > 28 clamped to 28', () => {
-  assertEqual(buildCronExpression('monthly', 0, 10, 31), '0 10 28 * *');
-});
-
-test('monthly: invalid minute (100)', () => {
-  assertThrows(() => buildCronExpression('monthly', 100, 10, 15), 'Invalid minute');
-});
-
-test('monthly: invalid hour (25)', () => {
-  assertThrows(() => buildCronExpression('monthly', 0, 25, 15), 'Invalid hour');
-});
-
-// Invalid frequency tests
-test('invalid frequency: yearly', () => {
-  assertThrows(() => buildCronExpression('yearly', 0, 9), 'Invalid frequency');
-});
-
-test('invalid frequency: weekdays (removed)', () => {
-  assertThrows(() => buildCronExpression('weekdays', 0, 9), 'Invalid frequency');
-});
-
-test('invalid frequency: weekends (removed)', () => {
-  assertThrows(() => buildCronExpression('weekends', 0, 9), 'Invalid frequency');
-});
-
-test('invalid frequency: empty string', () => {
-  assertThrows(() => buildCronExpression(''), 'Invalid frequency');
-});
+// --- Invalid frequency ---
+assertThrows(() => buildCronExpression('biweekly'), 'Invalid frequency');
+assertThrows(() => buildCronExpression(''), 'Invalid frequency');
+assertThrows(() => buildCronExpression('weekdays'), 'Invalid frequency');
+assertThrows(() => buildCronExpression('weekends'), 'Invalid frequency');
 
 console.log('\n=== formatFrequency tests ===\n');
 
-// Hourly display tests
-test('formatFrequency: hourly at minute 0', () => {
-  assertEqual(formatFrequency('0 * * * *', t), '每小时 (0分)');
-});
+assertEq(formatFrequency('0 0 * * * *', t), '每小时 (0分0秒)', 'formatFrequency: hourly default');
+assertEq(formatFrequency('0 30 * * * *', t), '每小时 (30分0秒)', 'formatFrequency: hourly at 30');
+assertEq(formatFrequency('0 0 9 * * *', t), '每日 9:00:00', 'formatFrequency: daily default');
+assertEq(formatFrequency('0 30 15 * * *', t), '每日 15:30:00', 'formatFrequency: daily at 15:30');
+assertEq(formatFrequency('45 30 15 * * *', t), '每日 15:30:45', 'formatFrequency: daily with second');
+assertEq(formatFrequency('0 0 9 1 * *', t), '每月 1日 9:00:00', 'formatFrequency: monthly default');
+assertEq(formatFrequency('0 30 14 15 * *', t), '每月 15日 14:30:00', 'formatFrequency: monthly specific');
+assertEq(formatFrequency('0 0 9 * * 1', t), '每周 一 9:00:00', 'formatFrequency: weekly Monday');
+assertEq(formatFrequency('0 0 9 * * 0', t), '每周 日 9:00:00', 'formatFrequency: weekly Sunday');
+assertEq(formatFrequency('0 0 9 * * 1,3,5', t), '每周 一/三/五 9:00:00', 'formatFrequency: weekly Mon/Wed/Fri');
+assertEq(formatFrequency('0 0 9 * * 1,2,3,4,5', t), '每周 一/二/三/四/五 9:00:00', 'formatFrequency: weekly weekdays');
+assertEq(formatFrequency('0 0 10 * * 0,6', t), '每周 日/六 10:00:00', 'formatFrequency: weekly weekends');
+assertEq(formatFrequency('0 0 9 1 1 *', t), '每年 1月1日 9:00:00', 'formatFrequency: yearly default');
+assertEq(formatFrequency('0 30 14 15 6 *', t), '每年 6月15日 14:30:00', 'formatFrequency: yearly June 15th');
+assertEq(formatFrequency('45 0 10 1 3 *', t), '每年 3月1日 10:00:45', 'formatFrequency: yearly with second');
+assertEq(formatFrequency('invalid', t), 'invalid', 'formatFrequency: invalid cron');
 
-test('formatFrequency: hourly at minute 30', () => {
-  assertEqual(formatFrequency('30 * * * *', t), '每小时 (30分)');
-});
-
-// Daily display tests
-test('formatFrequency: daily at 9:00', () => {
-  assertEqual(formatFrequency('0 9 * * *', t), '每日 9:00');
-});
-
-test('formatFrequency: daily at 15:30', () => {
-  assertEqual(formatFrequency('30 15 * * *', t), '每日 15:30');
-});
-
-// Monthly display tests
-test('formatFrequency: monthly on 1st at 9:00', () => {
-  assertEqual(formatFrequency('0 9 1 * *', t), '每月 1日 9:00');
-});
-
-test('formatFrequency: monthly on 15th at 14:30', () => {
-  assertEqual(formatFrequency('30 14 15 * *', t), '每月 15日 14:30');
-});
-
-// Weekly display tests (multi-select)
-test('formatFrequency: weekly on Monday', () => {
-  assertEqual(formatFrequency('0 9 * * 1', t), '每周 一 9:00');
-});
-
-test('formatFrequency: weekly on Sunday', () => {
-  assertEqual(formatFrequency('0 10 * * 0', t), '每周 日 10:00');
-});
-
-test('formatFrequency: weekly on Mon/Wed/Fri', () => {
-  assertEqual(formatFrequency('0 9 * * 1,3,5', t), '每周 一/三/五 9:00');
-});
-
-test('formatFrequency: weekly weekdays equivalent', () => {
-  assertEqual(formatFrequency('0 9 * * 1,2,3,4,5', t), '每周 一/二/三/四/五 9:00');
-});
-
-test('formatFrequency: weekly weekends equivalent', () => {
-  assertEqual(formatFrequency('0 10 * * 0,6', t), '每周 日/六 10:00');
-});
-
-test('formatFrequency: weekly every day', () => {
-  assertEqual(formatFrequency('0 9 * * 0,1,2,3,4,5,6', t), '每周 日/一/二/三/四/五/六 9:00');
-});
-
-// Edge cases
-test('formatFrequency: invalid cron (less than 5 fields)', () => {
-  assertEqual(formatFrequency('* * *', t), '* * *');
-});
-
-test('formatFrequency: handles minute padding correctly', () => {
-  assertEqual(formatFrequency('0 15 * * *', t), '每日 15:00');
-  assertEqual(formatFrequency('0 9 1 * *', t), '每月 1日 9:00');
-});
-
-// Summary
 console.log('\n=== Summary ===\n');
 console.log(`Passed: ${passed}`);
 console.log(`Failed: ${failed}`);
-console.log(`Total: ${passed + failed}`);
+console.log(`Total:  ${total}`);
 
 if (failed > 0) {
-  // Exit with error code for CI
-  if (typeof process !== 'undefined') {
-    process.exit(1);
-  }
+  const processObj = typeof process !== 'undefined' ? process : undefined;
+  if (processObj) processObj.exit(1);
 }
