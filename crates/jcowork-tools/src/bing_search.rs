@@ -14,17 +14,25 @@ use std::sync::Arc;
 use crate::base::{Tool, ToolContext, truncate_str};
 use jcowork_logs::{LogEntry, LogWriter};
 
+/// Resolve the home directory. On Windows the desktop app process may not
+/// have HOME set, so fall back to USERPROFILE (same convention as
+/// jcowork-server::config and jcowork-storage::docling_manager).
+fn home_dir() -> String {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default()
+}
+
 /// Resolve the Python binary path in the jcowork venv.
 /// On Unix: ~/.jcowork/venv/bin/python
 /// On Windows: ~/.jcowork/venv/Scripts/python.exe
 /// Falls back to system Python (`python3`/`python`) if the venv is missing,
 /// so the tool degrades gracefully instead of failing with OS error 3.
 fn resolve_python_bin() -> String {
-    let base = shellexpand::tilde("~/.jcowork/venv").to_string();
     let venv_bin = if cfg!(windows) {
-        format!("{}\\Scripts\\python.exe", base)
+        format!("{}\\.jcowork\\venv\\Scripts\\python.exe", home_dir())
     } else {
-        format!("{}/bin/python", base)
+        format!("{}/.jcowork/venv/bin/python", home_dir())
     };
     if std::path::Path::new(&venv_bin).exists() {
         return venv_bin;
@@ -57,8 +65,58 @@ fn which(cmd: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// Extract a meaningful error message from a failed subprocess run.
+/// The script reports errors as JSON `{"error": "..."}` on stdout;
+/// only fall back to stderr if stdout has no structured error
+/// (otherwise the LLM receives an empty, useless error message).
+fn extract_subprocess_error(stdout: &[u8], stderr: &[u8]) -> String {
+    let stdout_str = String::from_utf8_lossy(stdout);
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&stdout_str) {
+        if let Some(err) = parsed.get("error").and_then(|e| e.as_str()) {
+            if !err.is_empty() {
+                return err.to_string();
+            }
+        }
+    }
+    String::from_utf8_lossy(stderr).trim().to_string()
+}
+
 /// Path to the search script (relative to workspace root or absolute).
 const SEARCH_SCRIPT: &str = "scripts/web_search.py";
+
+/// Locate web_search.py. Search order (first existing wins):
+///   1. JCWORK_SCRIPTS_DIR env var (set by the desktop app from bundle resources)
+///   2. workspace_root/scripts/web_search.py (cwd = project root)
+///   3. next to the executable, or its scripts/ subdir
+///   4. exe_dir/../../scripts/ (dev build: target/release → project root)
+fn resolve_script_path(workspace_root: &str) -> String {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(scripts_dir) = std::env::var("JCWORK_SCRIPTS_DIR") {
+        candidates.push(std::path::Path::new(&scripts_dir).join("web_search.py"));
+    }
+    candidates.push(std::path::Path::new(workspace_root).join(SEARCH_SCRIPT));
+    if let Some(ref dir) = exe_dir {
+        candidates.push(dir.join("web_search.py"));
+        candidates.push(dir.join(SEARCH_SCRIPT));
+        if let Some(grand) = dir.parent().and_then(|p| p.parent()) {
+            candidates.push(grand.join(SEARCH_SCRIPT));
+        }
+    }
+    for c in &candidates {
+        if c.exists() {
+            return c.to_string_lossy().to_string();
+        }
+    }
+    // Nothing found — return the first candidate so the error is understandable
+    candidates
+        .first()
+        .map(|c| c.to_string_lossy().to_string())
+        .unwrap_or_else(|| SEARCH_SCRIPT.to_string())
+}
 
 /// Web search tool — uses Sogou WAP (primary) / cn.bing.com (fallback) via headless Chromium.
 /// Returns titles, URLs, and snippets as structured text.
@@ -127,40 +185,9 @@ impl Tool for WebSearchTool {
 
         let python_bin = resolve_python_bin();
 
-        // Resolve script path: try JCWORK_SCRIPTS_DIR env var first (for bundled app),
-        // then absolute path, then relative to workspace root, then next to binary
-        let script_path = {
-            // Check JCWORK_SCRIPTS_DIR (set by desktop app from bundle resources)
-            if let Ok(scripts_dir) = std::env::var("JCWORK_SCRIPTS_DIR") {
-                let p = std::path::Path::new(&scripts_dir).join("web_search.py");
-                if p.exists() {
-                    p.to_string_lossy().to_string()
-                } else {
-                    // Fallback to other locations
-                    let abs = std::path::Path::new(&self.workspace_root).join(SEARCH_SCRIPT);
-                    if abs.exists() {
-                        abs.to_string_lossy().to_string()
-                    } else {
-                        let exe_dir = std::env::current_exe()
-                            .ok()
-                            .and_then(|p| p.parent().map(|d| d.to_string_lossy().to_string()))
-                            .unwrap_or_default();
-                        std::path::Path::new(&exe_dir).join(SEARCH_SCRIPT).to_string_lossy().to_string()
-                    }
-                }
-            } else {
-                let abs = std::path::Path::new(&self.workspace_root).join(SEARCH_SCRIPT);
-                if abs.exists() {
-                    abs.to_string_lossy().to_string()
-                } else {
-                    let exe_dir = std::env::current_exe()
-                        .ok()
-                        .and_then(|p| p.parent().map(|d| d.to_string_lossy().to_string()))
-                        .unwrap_or_default();
-                    std::path::Path::new(&exe_dir).join(SEARCH_SCRIPT).to_string_lossy().to_string()
-                }
-            }
-        };
+        // Resolve script path across all known locations (env var, workspace,
+        // executable dir, dev-build project root)
+        let script_path = resolve_script_path(&self.workspace_root);
 
         let result = timeout(
             Duration::from_secs(60),
@@ -179,8 +206,8 @@ impl Tool for WebSearchTool {
         };
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Ok(format!("web_search error: {}", stderr.trim()));
+            let err = extract_subprocess_error(&output.stdout, &output.stderr);
+            return Ok(format!("web_search error: {}", err));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -273,5 +300,145 @@ impl Tool for WebSearchTool {
         };
         
         Ok(result_text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::tempdir;
+
+    /// Create `dir/scripts/web_search.py` so the path exists as a candidate.
+    fn create_script(dir: &std::path::Path) -> std::path::PathBuf {
+        let scripts = dir.join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        let script = scripts.join("web_search.py");
+        std::fs::File::create(&script).unwrap().write_all(b"# test").unwrap();
+        script
+    }
+
+    // ── Script path resolution ──────────────────────────────────────────
+
+    /// All JCWORK_SCRIPTS_DIR-dependent cases run in one test to avoid
+    /// env-var races with parallel tests.
+    #[test]
+    fn test_resolve_script_path_candidates() {
+        // 1. JCWORK_SCRIPTS_DIR points to a dir containing web_search.py → wins
+        let env_dir = tempdir().unwrap();
+        let env_script = env_dir.path().join("web_search.py");
+        std::fs::File::create(&env_script).unwrap().write_all(b"# test").unwrap();
+        unsafe { std::env::set_var("JCWORK_SCRIPTS_DIR", env_dir.path()); }
+        let got = resolve_script_path("/nonexistent-workspace");
+        assert_eq!(
+            std::path::Path::new(&got).canonicalize().unwrap(),
+            env_script.canonicalize().unwrap(),
+            "env var candidate should win when the script exists there"
+        );
+
+        // 2. Env var removed → workspace_root/scripts/web_search.py is used
+        unsafe { std::env::remove_var("JCWORK_SCRIPTS_DIR"); }
+        let ws = tempdir().unwrap();
+        let ws_script = create_script(ws.path());
+        let got = resolve_script_path(&ws.path().to_string_lossy());
+        assert_eq!(
+            std::path::Path::new(&got).canonicalize().unwrap(),
+            ws_script.canonicalize().unwrap(),
+            "workspace candidate should be used when env var is unset"
+        );
+
+        // 3. No candidate in env/workspace → still returns a path (no panic).
+        //    In dev builds the exe-dir grandparent (project scripts/) may be
+        //    found, so only assert a non-empty result here.
+        let empty_ws = tempdir().unwrap();
+        let got = resolve_script_path(&empty_ws.path().to_string_lossy());
+        assert!(!got.is_empty(), "must always return a candidate path");
+    }
+
+    #[test]
+    fn test_resolve_script_path_env_var_without_script_falls_through() {
+        // JCWORK_SCRIPTS_DIR set but no script there → must fall through to
+        // the workspace candidate instead of returning the missing env path.
+        let bogus_dir = tempdir().unwrap();
+        unsafe { std::env::set_var("JCWORK_SCRIPTS_DIR", bogus_dir.path()); }
+        let ws = tempdir().unwrap();
+        let ws_script = create_script(ws.path());
+        let got = resolve_script_path(&ws.path().to_string_lossy());
+        unsafe { std::env::remove_var("JCWORK_SCRIPTS_DIR"); }
+        assert_eq!(
+            std::path::Path::new(&got).canonicalize().unwrap(),
+            ws_script.canonicalize().unwrap(),
+            "missing env-var script must fall through to workspace candidate"
+        );
+    }
+
+    // ── Subprocess error extraction ─────────────────────────────────────
+
+    #[test]
+    fn test_extract_subprocess_error_json_on_stdout() {
+        let stdout = br#"{"error": "playwright not installed"}"#;
+        let err = extract_subprocess_error(stdout, b"ignored stderr");
+        assert_eq!(err, "playwright not installed");
+    }
+
+    #[test]
+    fn test_extract_subprocess_error_plain_stderr() {
+        // Non-JSON stdout (e.g. Python "can't open file") → use trimmed stderr
+        let stdout = b"";
+        let stderr = b"python.exe: can't open file 'x.py'\r\n";
+        let err = extract_subprocess_error(stdout, stderr);
+        assert_eq!(err, "python.exe: can't open file 'x.py'");
+    }
+
+    #[test]
+    fn test_extract_subprocess_error_json_without_error_field() {
+        let stdout = br#"{"results": []}"#;
+        let err = extract_subprocess_error(stdout, b"some stderr");
+        assert_eq!(err, "some stderr");
+    }
+
+    #[test]
+    fn test_extract_subprocess_error_empty_error_field_falls_back() {
+        // Empty error string (the previously swallowed case) → stderr instead
+        let stdout = br#"{"error": ""}"#;
+        let err = extract_subprocess_error(stdout, b"real failure reason");
+        assert_eq!(err, "real failure reason");
+    }
+
+    #[test]
+    fn test_extract_subprocess_error_both_empty() {
+        let err = extract_subprocess_error(b"", b"");
+        assert_eq!(err, "");
+    }
+
+    // ── Home dir / python resolution ────────────────────────────────────
+
+    #[test]
+    fn test_resolve_python_bin_points_into_jcowork_venv() {
+        // Must never contain an unexpanded tilde (the old shellexpand bug
+        // when HOME is unset in the desktop app process).
+        let bin = resolve_python_bin();
+        assert!(!bin.contains('~'), "unexpanded tilde in python path: {}", bin);
+        assert!(
+            bin.contains(".jcowork") || bin == "python3" || bin == "python",
+            "unexpected python bin: {}",
+            bin
+        );
+    }
+
+    #[test]
+    fn test_home_dir_prefers_home_then_userprofile() {
+        // Only assert consistency with the environment, not specific values
+        // (mutating HOME/USERPROFILE here would race parallel tests).
+        let home = home_dir();
+        let expected = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default();
+        assert_eq!(home, expected);
+    }
+
+    #[test]
+    fn test_which_returns_none_for_missing_command() {
+        assert!(which("definitely-not-a-real-cmd-xyz-12345").is_none());
     }
 }

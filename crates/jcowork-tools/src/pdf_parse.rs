@@ -18,12 +18,16 @@ const MAX_OUTPUT_BYTES: usize = 200 * 1024;
 /// Resolve the Python binary path in the jcowork venv.
 /// On Unix: ~/.jcowork/venv/bin/python
 /// On Windows: ~/.jcowork/venv/Scripts/python.exe
+/// Uses HOME with USERPROFILE fallback — on Windows the desktop app process
+/// may not have HOME set, so shellexpand::tilde cannot be relied upon.
 fn resolve_python_bin() -> String {
-    let base = shellexpand::tilde("~/.jcowork/venv").to_string();
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
     if cfg!(windows) {
-        format!("{}\\Scripts\\python.exe", base)
+        format!("{}\\.jcowork\\venv\\Scripts\\python.exe", home)
     } else {
-        format!("{}/bin/python", base)
+        format!("{}/.jcowork/venv/bin/python", home)
     }
 }
 
@@ -176,5 +180,34 @@ impl Tool for PdfParseTool {
         }
 
         Ok(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_python_bin_uses_home_not_tilde() {
+        // The old shellexpand::tilde approach returned an unusable path when
+        // HOME was unset (Windows desktop app process). The resolved path must
+        // never contain an unexpanded tilde and must point into the venv.
+        let bin = resolve_python_bin();
+        assert!(!bin.contains('~'), "unexpanded tilde in python path: {}", bin);
+
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default();
+        assert!(
+            bin.starts_with(&home),
+            "python path {} should be rooted in home dir {}",
+            bin,
+            home
+        );
+        if cfg!(windows) {
+            assert!(bin.ends_with(".jcowork\\venv\\Scripts\\python.exe"), "{}", bin);
+        } else {
+            assert!(bin.ends_with(".jcowork/venv/bin/python"), "{}", bin);
+        }
     }
 }

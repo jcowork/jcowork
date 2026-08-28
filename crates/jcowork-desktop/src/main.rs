@@ -131,10 +131,12 @@ fn set_scripts_dir_from_resources() {
         return;
     }
     if let Some(res_dir) = resolve_resource_dir() {
-        // Check for web_search.py in resources
+        // Check for web_search.py in resources (bundle root or scripts/ subdir)
         let candidates = [
             res_dir.join("web_search.py"),
+            res_dir.join("scripts").join("web_search.py"),
             res_dir.join("_up_").join("_up_").join("web_search.py"),
+            res_dir.join("_up_").join("_up_").join("scripts").join("web_search.py"),
         ];
         for script in &candidates {
             if script.exists() {

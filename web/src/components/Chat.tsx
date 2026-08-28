@@ -154,7 +154,7 @@ export default function Chat({ userId, token }: ChatProps) {
   const [alarmActive, setAlarmActive] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const alarmRef = useRef<{ ctx: AudioContext | null; timer: number | null; playing: boolean; beepInterval: number | null }>({ ctx: null, timer: null, playing: false, beepInterval: null });
+  const alarmRef = useRef<{ ctx: AudioContext | null; timer: number | null; playing: boolean }>({ ctx: null, timer: null, playing: false });
 
   // Document picker state
   const [showDocPicker, setShowDocPicker] = useState(false);
@@ -342,24 +342,15 @@ export default function Chat({ userId, token }: ChatProps) {
         }
       };
 
-      // Play beep immediately and every 1 second
+      // Play exactly 2 beeps (immediately and after 1 second), then finish
       playBeep();
-      const beepInterval = window.setInterval(() => {
-        if (!alarmRef.current.playing) {
-          clearInterval(beepInterval);
-          return;
-        }
-        playBeep();
-      }, 1000);
+      const secondBeepTimer = window.setTimeout(() => playBeep(), 1000);
 
-      // Auto-stop after 30 seconds
+      // Auto-stop shortly after the second beep ends
       alarmRef.current.timer = window.setTimeout(() => {
-        clearInterval(beepInterval);
+        clearTimeout(secondBeepTimer);
         stopAlarm();
-      }, 30000);
-
-      // Store interval for cleanup
-      alarmRef.current.beepInterval = beepInterval;
+      }, 2600);
     } catch (e) {
       console.error('Failed to play alarm:', e);
     }
@@ -367,10 +358,6 @@ export default function Chat({ userId, token }: ChatProps) {
 
   const stopAlarm = () => {
     alarmRef.current.playing = false;
-    if (alarmRef.current.beepInterval) {
-      clearInterval(alarmRef.current.beepInterval);
-      alarmRef.current.beepInterval = null;
-    }
     if (alarmRef.current.timer) {
       clearTimeout(alarmRef.current.timer);
       alarmRef.current.timer = null;
