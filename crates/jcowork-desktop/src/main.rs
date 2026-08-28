@@ -39,7 +39,7 @@ fn resolve_resource_dir() -> Option<std::path::PathBuf> {
     let exe_dir = exe.parent()?;
 
     // macOS: exe is in Contents/MacOS/, resources in Contents/Resources/
-    let macos_resources = exe_dir.parent()?.parent()?.join("Resources");
+    let macos_resources = exe_dir.parent()?.join("Resources");
     if macos_resources.is_dir() {
         return Some(macos_resources);
     }
@@ -377,7 +377,18 @@ async fn main() {
     });
 
     // ── 16. Wait for server to be ready ──
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // Poll until the Axum server actually accepts connections (not just bound).
+    for i in 0..40 {
+        if tokio::net::TcpStream::connect(addr).await.is_ok() {
+            break;
+        }
+        if i == 39 {
+            error!("Server did not become ready within 4 seconds");
+            show_error_and_exit("服务器启动超时，请重试。");
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
     info!("Server ready, launching Tauri window");
 
     // ── 17. Launch Tauri desktop app ─

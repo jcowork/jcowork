@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useT } from '../i18n';
+import { WS_BASE } from '../config';
 
 interface Message {
   role: 'user' | 'assistant' | 'system';
@@ -171,8 +172,16 @@ export default function Chat({ userId, token }: ChatProps) {
   const urlInputRef = useRef<HTMLDivElement>(null);
 
   const connect = useCallback(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${window.location.host}/api/ws?token=${encodeURIComponent(token)}`);
+    let wsUrl: string;
+    if (WS_BASE) {
+      // Tauri custom-protocol: use absolute WebSocket URL
+      wsUrl = `${WS_BASE}/api/ws?token=${encodeURIComponent(token)}`;
+    } else {
+      // Browser mode: derive from current page location
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      wsUrl = `${protocol}//${window.location.host}/api/ws?token=${encodeURIComponent(token)}`;
+    }
+    const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => setConnected(true);
     ws.onclose = () => {

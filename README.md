@@ -152,8 +152,7 @@ npm install
 npm run build    # outputs to web/dist/
 cd ..
 
-# 2. Build desktop app
-cd crates/jcowork-desktop
+# 2. Build desktop app (run from project root)
 cargo tauri build
 
 # Output:
@@ -164,6 +163,15 @@ cargo tauri build
 > **Important:** Always run `npm run build` in `web/` before `cargo tauri build`. The Tauri bundler copies `web/dist/` into the app bundle — if the dist is stale or missing, the desktop app will show a blank screen.
 
 > **Note:** The desktop app requires at least one LLM API key configured in `.env`. The Docling PDF parsing service is optional and runs separately if available.
+
+**Desktop app architecture:**
+
+The desktop app embeds the entire Axum backend into the same binary as the Tauri frontend. At launch:
+1. The Axum server starts on `127.0.0.1:3000` (with a TCP readiness check)
+2. The WebView loads the frontend via Tauri's `custom-protocol` (`tauri://localhost`)
+3. The frontend auto-detects the Tauri environment and routes all API/WebSocket calls to `http://localhost:3000`
+
+This means no separate server process is needed — everything runs in a single app bundle.
 
 ## Quick Start
 

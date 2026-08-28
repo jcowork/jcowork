@@ -150,8 +150,7 @@ npm install
 npm run build    # 输出到 web/dist/
 cd ..
 
-# 2. 构建桌面应用
-cd crates/jcowork-desktop
+# 2. 构建桌面应用（在项目根目录执行）
 cargo tauri build
 
 # 输出：
@@ -162,6 +161,15 @@ cargo tauri build
 > **重要：** 执行 `cargo tauri build` 前务必先在 `web/` 目录下运行 `npm run build`。Tauri 会将 `web/dist/` 复制到应用包中 — 如果 dist 目录过期或缺失，桌面应用将显示白屏。
 
 > **注意：** 桌面应用需要在 `.env` 中配置至少一个 LLM API Key。Docling PDF 解析服务为可选，如可用会自动连接。
+
+**桌面应用架构：**
+
+桌面应用将完整的 Axum 后端嵌入到 Tauri 前端同一个二进制文件中。启动流程：
+1. Axum 服务器在 `127.0.0.1:3000` 启动（带 TCP 就绪检查）
+2. WebView 通过 Tauri 的 `custom-protocol`（`tauri://localhost`）加载前端
+3. 前端自动检测 Tauri 环境，将所有 API/WebSocket 请求路由到 `http://localhost:3000`
+
+无需单独启动服务进程 — 所有功能集成在单一应用包中。
 
 ## 快速开始
 

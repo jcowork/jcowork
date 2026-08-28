@@ -3,7 +3,8 @@
   "version": "0.2.6",
   "identifier": "com.jcowork.desktop",
   "build": {
-    "devUrl": "http://localhost:3000"
+    "devUrl": "http://localhost:3000",
+    "frontendDist": "../../web/dist"
   },
   "app": {
     "withGlobalTauri": true,

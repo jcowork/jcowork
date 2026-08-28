@@ -7,8 +7,7 @@ import Sidebar from './components/Sidebar';
 import Settings from './components/Settings';
 import SkillsSquare from './components/SkillsSquare';
 import { I18nProvider, useT } from './i18n';
-
-const API_BASE = '';
+import { API_BASE } from './config';
 
 interface AuthState {
   token: string;
@@ -16,10 +15,16 @@ interface AuthState {
   username: string;
 }
 
-// Global 401 interceptor — wraps window.fetch to auto-logout on expired token.
+// Global fetch wrapper:
+// 1. Prepend API_BASE for relative URLs (Tauri custom-protocol → http://localhost:3000)
+// 2. 401 interceptor — auto-logout on expired token.
 // This runs once at module load and affects ALL fetch calls across the app.
 const _origFetch = window.fetch;
 window.fetch = async function(input: RequestInfo | URL, init?: RequestInit) {
+  // Prepend API_BASE for relative URL strings (e.g. "/api/auth/login")
+  if (API_BASE && typeof input === 'string' && input.startsWith('/')) {
+    input = API_BASE + input;
+  }
   const res = await _origFetch.call(window, input, init);
   if (res.status === 401) {
     localStorage.removeItem('jcowork_auth');

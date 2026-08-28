@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useT } from '../i18n';
+import { API_BASE } from '../config';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -108,18 +109,19 @@ function injectWorkspaceFetch(html: string, filePath: string, token: string): st
 (function() {
   var __dir = ${JSON.stringify(dir)};
   var __token = ${JSON.stringify(token)};
+  var __apiBase = ${JSON.stringify(API_BASE)};
   var __orig = window.fetch;
   function __resolve(u) { var c = u.split('?')[0].split('#')[0]; return __dir ? __dir + '/' + c : c; }
   window.fetch = function(u, o) {
     if (typeof u === 'string' && !u.startsWith('/') && !u.startsWith('http') && !u.startsWith('blob:') && !u.startsWith('data:')) {
-      u = '/api/workspace/download?path=' + encodeURIComponent(__resolve(u)) + '&token=' + encodeURIComponent(__token);
+      u = __apiBase + '/api/workspace/download?path=' + encodeURIComponent(__resolve(u)) + '&token=' + encodeURIComponent(__token);
     }
     return __orig.call(this, u, o);
   };
   var __xo = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function(m, u) {
     if (typeof u === 'string' && !u.startsWith('/') && !u.startsWith('http') && !u.startsWith('blob:') && !u.startsWith('data:')) {
-      u = '/api/workspace/download?path=' + encodeURIComponent(__resolve(u)) + '&token=' + encodeURIComponent(__token);
+      u = __apiBase + '/api/workspace/download?path=' + encodeURIComponent(__resolve(u)) + '&token=' + encodeURIComponent(__token);
     }
     return __xo.apply(this, arguments);
   };
@@ -611,16 +613,16 @@ export default function Documents({ token }: DocumentsProps) {
 
   const downloadFile = (filePath: string) => {
     const a = document.createElement('a');
-    a.href = `/api/workspace/download?path=${encodeURIComponent(filePath)}&token=${encodeURIComponent(token)}`;
+    a.href = `${API_BASE}/api/workspace/download?path=${encodeURIComponent(filePath)}&token=${encodeURIComponent(token)}`;
     a.download = filePath.split('/').pop() || 'file';
     a.click();
   };
 
   const openInNewTab = (filePath: string) => {
-    const url = `/api/workspace/download?path=${encodeURIComponent(filePath)}&token=${encodeURIComponent(token)}`;
+    const url = `${API_BASE}/api/workspace/download?path=${encodeURIComponent(filePath)}&token=${encodeURIComponent(token)}`;
     // In Tauri WebView, use native command to open in system browser
     if ((window as any).__TAURI__) {
-      (window as any).__TAURI__.core.invoke('open_in_browser', { url: `http://localhost:3000${url}` });
+      (window as any).__TAURI__.core.invoke('open_in_browser', { url });
     } else {
       window.open(url, '_blank');
     }
