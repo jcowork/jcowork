@@ -17,13 +17,44 @@ use jcowork_logs::{LogEntry, LogWriter};
 /// Resolve the Python binary path in the jcowork venv.
 /// On Unix: ~/.jcowork/venv/bin/python
 /// On Windows: ~/.jcowork/venv/Scripts/python.exe
+/// Falls back to system Python (`python3`/`python`) if the venv is missing,
+/// so the tool degrades gracefully instead of failing with OS error 3.
 fn resolve_python_bin() -> String {
     let base = shellexpand::tilde("~/.jcowork/venv").to_string();
-    if cfg!(windows) {
+    let venv_bin = if cfg!(windows) {
         format!("{}\\Scripts\\python.exe", base)
     } else {
         format!("{}/bin/python", base)
+    };
+    if std::path::Path::new(&venv_bin).exists() {
+        return venv_bin;
     }
+    // Venv not set up yet — try system Python from PATH
+    for candidate in ["python3", "python"] {
+        if which(candidate).is_some() {
+            return candidate.to_string();
+        }
+    }
+    venv_bin
+}
+
+/// Minimal `which` implementation using the PATH environment variable.
+fn which(cmd: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let exe_names: Vec<String> = if cfg!(windows) {
+        vec![format!("{}.exe", cmd), cmd.to_string()]
+    } else {
+        vec![cmd.to_string()]
+    };
+    for dir in std::env::split_paths(&path) {
+        for name in &exe_names {
+            let full = dir.join(name);
+            if full.is_file() {
+                return Some(full);
+            }
+        }
+    }
+    None
 }
 
 /// Path to the search script (relative to workspace root or absolute).

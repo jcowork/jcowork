@@ -163,6 +163,8 @@ cargo tauri build
 > **Important:** Always run `npm run build` in `web/` before `cargo tauri build`. The Tauri bundler copies `web/dist/` into the app bundle — if the dist is stale or missing, the desktop app will show a blank screen.
 
 > **Note:** The desktop app requires at least one LLM API key configured in `.env`. The Docling PDF parsing service is optional and runs separately if available.
+>
+> **Web search prerequisite:** The web search feature (including searches inside periodic tasks) depends on a local Python environment. Install Python 3.12+ and run the setup script first (see [Setup Python Environment](#3-setup-python-environment-for-web-search--document-parsing)). Web search is unavailable without it.
 
 **Desktop app architecture:**
 
@@ -229,6 +231,8 @@ cp .env.example .env
 
 ### 3. Setup Python Environment (for web search & document parsing)
 
+> **Required before first search:** the `web_search` tool depends on the Python venv at `~/.jcowork/venv`. **You must run this step before using web search for the first time**, otherwise the search tool cannot start and the Agent will report a "technical problem" with web search. Periodic tasks that involve web search depend on this environment as well.
+
 **Linux / macOS:**
 ```bash
 make setup-python
@@ -243,6 +247,19 @@ This creates a Python venv with:
 - **playwright** — headless browser for web search (Sogou WAP + Bing fallback)
 - **docling** — IBM's document understanding library for PDF to Markdown conversion
 - **sentence-transformers** — local embedding model for semantic document search
+
+The script also downloads the Chromium browser required by Playwright (~300MB). Keep a stable network connection during the first run; duration depends on your bandwidth.
+
+**Verify the installation:**
+```bash
+# Linux / macOS
+~/.jcowork/venv/bin/python scripts/web_search.py "test" 1
+# Windows (PowerShell)
+& "$env:USERPROFILE\.jcowork\venv\Scripts\python.exe" scripts\web_search.py "test" 1
+# Expected output: a JSON array with title/url fields
+```
+
+> **Troubleshooting:** if searches fail (the logs show `web_search: failed to spawn process`), the Python environment is missing or broken — re-run the setup script above and restart the app.
 
 ### 4. Start Docling Service (for document parsing & vector search)
 

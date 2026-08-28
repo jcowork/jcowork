@@ -161,6 +161,8 @@ cargo tauri build
 > **重要：** 执行 `cargo tauri build` 前务必先在 `web/` 目录下运行 `npm run build`。Tauri 会将 `web/dist/` 复制到应用包中 — 如果 dist 目录过期或缺失，桌面应用将显示白屏。
 
 > **注意：** 桌面应用需要在 `.env` 中配置至少一个 LLM API Key。Docling PDF 解析服务为可选，如可用会自动连接。
+>
+> **联网搜索前置安装：** 桌面应用的联网搜索功能（含周期任务中的搜索）依赖本机 Python 环境，需先安装 Python 3.12+ 并运行初始化脚本（见[配置 Python 环境](#3-配置-python-环境用于网页搜索和-pdf-解析)）。缺少该环境时搜索将不可用。
 
 **桌面应用架构：**
 
@@ -227,6 +229,8 @@ cp .env.example .env
 
 ### 3. 配置 Python 环境（用于网页搜索和 PDF 解析）
 
+> **前置必选：** `web_search`（联网搜索）工具依赖 `~/.jcowork/venv` 下的 Python 虚拟环境。**首次使用联网搜索前必须先运行本步骤**，否则搜索工具无法启动，Agent 会报错“网络搜索工具遇到技术问题”。周期任务中如果包含联网搜索需求，同样依赖此环境。
+
 **Linux / macOS：**
 ```bash
 make setup-python
@@ -240,6 +244,19 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-python.ps1
 此命令会创建 Python 虚拟环境，包含：
 - **playwright** — 无头浏览器，用于网页搜索（搜狗 WAP + Bing 备用）
 - **pdftext** — 离线 PDF 文本提取，用于报告解析
+
+脚本还会自动下载 Playwright 所需的 Chromium 浏览器（约 300MB），首次执行请保持网络畅通，耗时取决于网速。
+
+**验证安装：**
+```bash
+# Linux / macOS
+~/.jcowork/venv/bin/python scripts/web_search.py "测试" 1
+# Windows (PowerShell)
+& "$env:USERPROFILE\.jcowork\venv\Scripts\python.exe" scripts\web_search.py "测试" 1
+# 预期输出：包含 title/url 字段的 JSON 数组
+```
+
+> **故障排查：** 若 Agent 搜索时报错（日志中出现 `web_search: failed to spawn process`），说明 Python 环境缺失或损坏，重新运行上述安装脚本后重启应用即可。
 
 ### 4. 启动 Docling 服务（用于文档解析与语义搜索）
 

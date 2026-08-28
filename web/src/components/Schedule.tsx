@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useT } from '../i18n';
 import { formatFrequency, type TranslationFn } from '../utils/cron';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 interface Reminder {
   id: string;
@@ -72,9 +74,10 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
   const [submitting, setSubmitting] = useState(false);
   const [submitStatus, setSubmitStatus] = useState<'idle' | 'success' | 'error'>('idle');
 
-  // Collapsed results per job
+  // Expanded record list per job + currently selected record (right-side preview)
   const [expandedResults, setExpandedResults] = useState<Record<string, boolean>>({});
   const [taskResults, setTaskResults] = useState<Record<string, TaskResult[]>>({});
+  const [selected, setSelected] = useState<{ jobId: string; resultId: string } | null>(null);
 
   const fetchReminders = useCallback(async () => {
     try {
@@ -87,16 +90,47 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
     }
   }, [token]);
 
+  const fetchAllResults = useCallback(async (jobs: CronJob[]) => {
+    const entries = await Promise.all(jobs.map(async (job): Promise<[string, TaskResult[]]> => {
+      try {
+        const res = await fetch(`/api/cron-jobs/${job.id}/results`, {
+          headers: { 'Authorization': `Bearer ${token}` },
+        });
+        if (res.ok) return [job.id, await res.json()];
+      } catch (err) {
+        console.error('Failed to fetch task results:', err);
+      }
+      return [job.id, []];
+    }));
+    setTaskResults(Object.fromEntries(entries));
+    // Auto-expand jobs that have results (first time only)
+    setExpandedResults(prev => {
+      const next = { ...prev };
+      let changed = false;
+      for (const [jobId, results] of entries) {
+        if (next[jobId] === undefined && results.length > 0) {
+          next[jobId] = true;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [token]);
+
   const fetchCronJobs = useCallback(async () => {
     try {
       const res = await fetch('/api/cron-jobs', {
         headers: { 'Authorization': `Bearer ${token}` },
       });
-      if (res.ok) setCronJobs(await res.json());
+      if (res.ok) {
+        const jobs: CronJob[] = await res.json();
+        setCronJobs(jobs);
+        fetchAllResults(jobs);
+      }
     } catch (err) {
       console.error('Failed to fetch cron jobs:', err);
     }
-  }, [token]);
+  }, [token, fetchAllResults]);
 
   const fetchProviders = useCallback(async () => {
     try {
@@ -125,25 +159,7 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
     return () => clearInterval(interval);
   }, [fetchReminders, fetchCronJobs, fetchProviders]);
 
-  const fetchTaskResults = async (jobId: string) => {
-    try {
-      const res = await fetch(`/api/cron-jobs/${jobId}/results`, {
-        headers: { 'Authorization': `Bearer ${token}` },
-      });
-      if (res.ok) {
-        const results = await res.json();
-        setTaskResults(prev => ({ ...prev, [jobId]: results }));
-      }
-    } catch (err) {
-      console.error('Failed to fetch task results:', err);
-    }
-  };
-
   const toggleResults = (jobId: string) => {
-    const isExpanded = expandedResults[jobId];
-    if (!isExpanded) {
-      fetchTaskResults(jobId);
-    }
     setExpandedResults(prev => ({ ...prev, [jobId]: !prev[jobId] }));
   };
 
@@ -159,7 +175,14 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
   const removeCronJob = async (id: string) => {
     try {
       const res = await fetch(`/api/cron-jobs/${id}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${token}` } });
-      if (res.ok) setCronJobs(prev => prev.filter(j => j.id !== id));
+      if (res.ok) {
+        setCronJobs(prev => prev.filter(j => j.id !== id));
+        setTaskResults(prev => {
+          const { [id]: _removed, ...rest } = prev;
+          return rest;
+        });
+        setSelected(prev => prev?.jobId === id ? null : prev);
+      }
     } catch (err) {
       console.error('Failed to remove cron job:', err);
     }
@@ -217,6 +240,15 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
     } catch { return isoStr; }
   };
 
+  // Full date+time for record names, e.g. "2026-08-29 00:00:05"
+  const formatFullTime = (isoStr: string) => {
+    try {
+      const d = new Date(isoStr);
+      const pad = (n: number) => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    } catch { return isoStr; }
+  };
+
   const timeUntil = (isoStr: string) => {
     const diff = new Date(isoStr).getTime() - Date.now();
     if (diff <= 0) return '已到期';
@@ -259,8 +291,19 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
     background: 'transparent', color: '#ccc', cursor: 'pointer', fontSize: 13,
   };
 
+  const selectedJob = selected ? cronJobs.find(j => j.id === selected.jobId) : undefined;
+  const selectedResult = selected ? taskResults[selected.jobId]?.find(r => r.id === selected.resultId) : undefined;
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+    <div style={{ display: 'flex', height: '100%' }}>
+      <style>{`
+        .record-row:hover { background: #262626; }
+      `}</style>
+      {/* Left panel: task form + task/record list + reminders */}
+      <div style={{
+        width: 380, flexShrink: 0, borderRight: '1px solid #333',
+        display: 'flex', flexDirection: 'column', overflow: 'hidden',
+      }}>
       {/* Header */}
       <div style={{
         padding: '12px 16px', borderBottom: '1px solid #333',
@@ -557,7 +600,10 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {cronJobs.map(job => (
+              {cronJobs.map(job => {
+                const results = taskResults[job.id] || [];
+                const isExpanded = !!expandedResults[job.id];
+                return (
                 <div key={job.id} style={{
                   borderRadius: 8, background: '#2a2a2a', border: '1px solid #444',
                   overflow: 'hidden',
@@ -567,9 +613,20 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
                     padding: '12px 16px', display: 'flex', alignItems: 'center',
                     justifyContent: 'space-between',
                   }}>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontWeight: 500, marginBottom: 4, fontSize: 14 }}>
-                        {job.name || job.prompt}
+                    <div style={{ flex: 1, cursor: 'pointer', minWidth: 0 }} onClick={() => toggleResults(job.id)}>
+                      <div style={{ fontWeight: 500, marginBottom: 4, fontSize: 14, display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ fontSize: 10, color: '#888', flexShrink: 0 }}>{isExpanded ? '▼' : '▶'}</span>
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {job.name || job.prompt}
+                        </span>
+                        {results.length > 0 && (
+                          <span style={{
+                            fontSize: 10, color: '#aaa', background: '#383838',
+                            padding: '0 6px', borderRadius: 8, flexShrink: 0,
+                          }}>
+                            {results.length}
+                          </span>
+                        )}
                       </div>
                       <div style={{ fontSize: 12, color: '#888', display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                         <span style={{
@@ -596,70 +653,69 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
                         </div>
                       )}
                     </div>
-                    <div style={{ display: 'flex', gap: 6, marginLeft: 12 }}>
-                      <button onClick={() => toggleResults(job.id)} style={{
-                        padding: '4px 10px', borderRadius: 4, border: '1px solid #555',
-                        background: 'transparent', color: '#aaa', cursor: 'pointer', fontSize: 11,
-                      }}>
-                        {expandedResults[job.id] ? '▼' : '▶'} {t('executionResults')}
-                      </button>
+                    <div style={{ display: 'flex', gap: 6, marginLeft: 12, flexShrink: 0 }}>
                       <button onClick={() => removeCronJob(job.id)} style={{
                         padding: '4px 10px', borderRadius: 4, border: '1px solid #555',
                         background: 'transparent', color: '#e57373', cursor: 'pointer', fontSize: 12,
                       }}>
-                        {t('cancel')}
+                        {t('delete')}
                       </button>
                     </div>
                   </div>
 
-                  {/* Collapsible execution results */}
-                  {expandedResults[job.id] && (
+                  {/* Execution records — click a record to preview on the right */}
+                  {isExpanded && (
                     <div style={{
-                      borderTop: '1px solid #333', padding: '10px 16px',
-                      background: '#1e1e1e', maxHeight: 300, overflowY: 'auto',
+                      borderTop: '1px solid #333', background: '#1e1e1e',
+                      padding: '6px 8px', display: 'flex', flexDirection: 'column', gap: 2,
+                      maxHeight: 280, overflowY: 'auto',
                     }}>
-                      {!taskResults[job.id] || taskResults[job.id].length === 0 ? (
-                        <div style={{ color: '#555', fontSize: 12, textAlign: 'center', padding: 12 }}>
+                      {results.length === 0 ? (
+                        <div style={{ color: '#555', fontSize: 12, textAlign: 'center', padding: 10 }}>
                           {t('noResults')}
                         </div>
                       ) : (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                          {taskResults[job.id].map(result => (
-                            <div key={result.id} style={{
-                              padding: '8px 12px', borderRadius: 6,
-                              background: '#2a2a2a', border: '1px solid #383838',
-                            }}>
-                              <div style={{
-                                display: 'flex', justifyContent: 'space-between',
-                                alignItems: 'center', marginBottom: 6,
+                        results.map(result => {
+                          const isSelected = selected?.jobId === job.id && selected?.resultId === result.id;
+                          return (
+                            <div
+                              key={result.id}
+                              className="record-row"
+                              onClick={() => setSelected({ jobId: job.id, resultId: result.id })}
+                              style={{
+                                display: 'flex', alignItems: 'center', gap: 8,
+                                padding: '7px 10px', borderRadius: 6, cursor: 'pointer',
+                                background: isSelected ? '#1a3a5a' : 'transparent',
+                                border: isSelected ? '1px solid #1f6feb' : '1px solid transparent',
+                              }}
+                            >
+                              <span style={{
+                                width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+                                background: result.status === 'success' ? '#81c784' : '#e57373',
+                              }} />
+                              <span style={{
+                                flex: 1, fontSize: 12, minWidth: 0,
+                                color: isSelected ? '#e6edf3' : '#ccc',
+                                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                               }}>
-                                <span style={{
-                                  fontSize: 11, fontWeight: 600, padding: '1px 6px', borderRadius: 4,
-                                  color: result.status === 'success' ? '#81c784' : '#e57373',
-                                  background: result.status === 'success' ? '#81c78420' : '#e5737320',
-                                }}>
-                                  {result.status === 'success' ? t('success') : t('failed')}
-                                </span>
-                                <span style={{ fontSize: 11, color: '#666' }}>
-                                  {formatTime(result.executed_at)}
-                                </span>
-                              </div>
-                              <div style={{
-                                fontSize: 12, color: '#bbb', lineHeight: 1.5,
-                                whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                                {formatFullTime(result.executed_at)}
+                              </span>
+                              <span style={{
+                                fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 4, flexShrink: 0,
+                                color: result.status === 'success' ? '#81c784' : '#e57373',
+                                background: result.status === 'success' ? '#81c78420' : '#e5737320',
                               }}>
-                                {result.output.length > 500
-                                  ? result.output.slice(0, 500) + '...'
-                                  : result.output}
-                              </div>
+                                {result.status === 'success' ? t('success') : t('failed')}
+                              </span>
                             </div>
-                          ))}
-                        </div>
+                          );
+                        })
                       )}
                     </div>
                   )}
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
@@ -709,6 +765,123 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
           )}
         </div>
       </div>
+      </div>
+
+      {/* Right panel: execution record preview */}
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+        {selectedJob && selectedResult ? (
+          <>
+            {/* Preview header: record name = task name + datetime */}
+            <div style={{
+              padding: '12px 20px', borderBottom: '1px solid #333', flexShrink: 0,
+              display: 'flex', alignItems: 'center', gap: 10,
+            }}>
+              <span style={{ fontSize: 16, flexShrink: 0 }}>📄</span>
+              <span style={{
+                flex: 1, minWidth: 0, fontWeight: 600, fontSize: 14, color: '#e6edf3',
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>
+                {selectedJob.name || selectedJob.prompt} · {formatFullTime(selectedResult.executed_at)}
+              </span>
+              <span style={{
+                fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 4, flexShrink: 0,
+                color: selectedResult.status === 'success' ? '#81c784' : '#e57373',
+                background: selectedResult.status === 'success' ? '#81c78420' : '#e5737320',
+              }}>
+                {selectedResult.status === 'success' ? t('success') : t('failed')}
+              </span>
+              <button onClick={() => setSelected(null)} style={{
+                padding: '4px 10px', borderRadius: 4, border: '1px solid #555',
+                background: 'transparent', color: '#aaa', cursor: 'pointer', fontSize: 12, flexShrink: 0,
+              }}>
+                {t('close')}
+              </button>
+            </div>
+            {/* Preview content rendered as Markdown */}
+            <div style={{ flex: 1, overflowY: 'auto', padding: '20px 28px' }}>
+              <ResultMarkdown content={selectedResult.output} />
+            </div>
+          </>
+        ) : (
+          <div style={{
+            flex: 1, display: 'flex', flexDirection: 'column',
+            alignItems: 'center', justifyContent: 'center', gap: 12, color: '#555',
+          }}>
+            <span style={{ fontSize: 48 }}>📋</span>
+            <span style={{ fontSize: 13 }}>{t('selectResultPreview')}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Renders an execution record's output as Markdown (GFM tables supported). */
+function ResultMarkdown({ content }: { content: string }) {
+  return (
+    <div style={{ fontSize: 14, lineHeight: 1.7, color: '#c9d1d9' }}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          table: ({ children, ...props }) => (
+            <div style={{ overflow: 'auto', border: '1px solid #333', borderRadius: 6, margin: '12px 0' }}>
+              <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 13 }} {...props}>
+                {children}
+              </table>
+            </div>
+          ),
+          th: ({ children, ...props }) => (
+            <th style={{
+              padding: '6px 12px', borderBottom: '1px solid #333',
+              background: '#161b22', textAlign: 'left', color: '#c9d1d9', fontWeight: 600,
+            }} {...props}>
+              {children}
+            </th>
+          ),
+          td: ({ children, ...props }) => (
+            <td style={{ padding: '4px 12px', borderTop: '1px solid #21262d', color: '#c9d1d9' }} {...props}>
+              {children}
+            </td>
+          ),
+          h1: ({ children, ...props }) => (
+            <h1 style={{ fontSize: 24, fontWeight: 700, color: '#e6edf3', borderBottom: '1px solid #333', paddingBottom: 8, marginTop: 24 }} {...props}>
+              {children}
+            </h1>
+          ),
+          h2: ({ children, ...props }) => (
+            <h2 style={{ fontSize: 20, fontWeight: 600, color: '#e6edf3', borderBottom: '1px solid #333', paddingBottom: 6, marginTop: 20 }} {...props}>
+              {children}
+            </h2>
+          ),
+          h3: ({ children, ...props }) => (
+            <h3 style={{ fontSize: 16, fontWeight: 600, color: '#e6edf3', marginTop: 16 }} {...props}>
+              {children}
+            </h3>
+          ),
+          code: ({ children, ...props }) => (
+            <code style={{ background: '#161b22', padding: '2px 6px', borderRadius: 4, fontSize: '0.9em', color: '#f0883e' }} {...props}>
+              {children}
+            </code>
+          ),
+          pre: ({ children, ...props }) => (
+            <pre style={{ background: '#161b22', padding: 12, borderRadius: 6, overflow: 'auto', fontSize: 13 }} {...props}>
+              {children}
+            </pre>
+          ),
+          blockquote: ({ children, ...props }) => (
+            <blockquote style={{ borderLeft: '3px solid #1f6feb', paddingLeft: 16, margin: '12px 0', color: '#8b949e' }} {...props}>
+              {children}
+            </blockquote>
+          ),
+          a: ({ children, ...props }) => (
+            <a style={{ color: '#58a6ff', textDecoration: 'none' }} target="_blank" rel="noreferrer" {...props}>
+              {children}
+            </a>
+          ),
+        }}
+      >
+        {content}
+      </ReactMarkdown>
     </div>
   );
 }

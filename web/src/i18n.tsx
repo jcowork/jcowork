@@ -149,6 +149,7 @@ const translations = {
     success: '成功',
     failed: '失败',
     selectFrequency: '选择频次',
+    selectResultPreview: '请选择左侧的执行记录查看详情',
 
     // Memory
     searchMemories: '搜索记忆...',
@@ -397,6 +398,7 @@ const translations = {
     success: 'Success',
     failed: 'Failed',
     selectFrequency: 'Select frequency',
+    selectResultPreview: 'Select an execution record on the left to view details',
 
     // Memory
     searchMemories: 'Search memories...',
