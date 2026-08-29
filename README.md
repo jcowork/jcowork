@@ -121,7 +121,8 @@ A native desktop application is available for macOS and Windows, powered by [Tau
 
 | Platform | Format | Download |
 |----------|--------|------|
-| macOS (Apple Silicon) | `.dmg` | [Jcowork_0.2.6_aarch64.dmg](https://github.com/jcowork/jcowork/releases/download/v0.2.6/Jcowork_0.2.6_aarch64.dmg) |
+| macOS (Apple Silicon) | `.dmg` | [Jcowork_0.2.7_aarch64.dmg](https://github.com/jcowork/jcowork/releases/download/v0.2.7/Jcowork_0.2.7_aarch64.dmg) |
+| Windows (x64) | `.msi` | [Jcowork_0.2.7_x64_en-US.msi](https://github.com/jcowork/jcowork/releases/download/v0.2.7/Jcowork_0.2.7_x64_en-US.msi) |
 
 **macOS installation:**
 1. Download and open the `.dmg` file
@@ -156,8 +157,8 @@ cd ..
 cargo tauri build
 
 # Output:
-#   target/release/bundle/dmg/Jcowork_0.2.6_aarch64.dmg   (macOS)
-#   target/release/bundle/msi/Jcowork_0.2.6_x64.msi        (Windows)
+#   target/release/bundle/dmg/Jcowork_0.2.7_aarch64.dmg       (macOS)
+#   target/release/bundle/msi/Jcowork_0.2.7_x64_en-US.msi     (Windows)
 ```
 
 > **Important:** Always run `npm run build` in `web/` before `cargo tauri build`. The Tauri bundler copies `web/dist/` into the app bundle — if the dist is stale or missing, the desktop app will show a blank screen.

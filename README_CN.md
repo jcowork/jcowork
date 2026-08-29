@@ -119,7 +119,8 @@ jcowork-server
 
 | 平台 | 格式 | 下载 |
 |------|------|------|
-| macOS (Apple Silicon) | `.dmg` | [Jcowork_0.2.6_aarch64.dmg](https://github.com/jcowork/jcowork/releases/download/v0.2.6/Jcowork_0.2.6_aarch64.dmg) |
+| macOS (Apple Silicon) | `.dmg` | [Jcowork_0.2.7_aarch64.dmg](https://github.com/jcowork/jcowork/releases/download/v0.2.7/Jcowork_0.2.7_aarch64.dmg) |
+| Windows (x64) | `.msi` | [Jcowork_0.2.7_x64_en-US.msi](https://github.com/jcowork/jcowork/releases/download/v0.2.7/Jcowork_0.2.7_x64_en-US.msi) |
 
 **macOS 安装：**
 1. 下载并打开 `.dmg` 文件
@@ -154,8 +155,8 @@ cd ..
 cargo tauri build
 
 # 输出：
-#   target/release/bundle/dmg/Jcowork_0.2.6_aarch64.dmg   (macOS)
-#   target/release/bundle/msi/Jcowork_0.2.6_x64.msi        (Windows)
+#   target/release/bundle/dmg/Jcowork_0.2.7_aarch64.dmg       (macOS)
+#   target/release/bundle/msi/Jcowork_0.2.7_x64_en-US.msi     (Windows)
 ```
 
 > **重要：** 执行 `cargo tauri build` 前务必先在 `web/` 目录下运行 `npm run build`。Tauri 会将 `web/dist/` 复制到应用包中 — 如果 dist 目录过期或缺失，桌面应用将显示白屏。
