@@ -1,4 +1,6 @@
+import { useState } from 'react';
 import { useLang, useT } from '../i18n';
+import { type Conversation, isHistory } from '../chatStore';
 
 interface SidebarProps {
   username: string;
@@ -9,27 +11,35 @@ interface SidebarProps {
   onMemory: () => void;
   onSkills: () => void;
   onDocuments: () => void;
-  onConnectors: () => void;
   currentView: string;
+  conversations: Conversation[];
+  activeConvId: string;
+  onNewChat: () => void;
+  onSelectConversation: (id: string) => void;
+  onDeleteConversation: (id: string) => void;
   mobileOpen?: boolean;
   onClose?: () => void;
 }
 
-export default function Sidebar({ username, onLogout, onChat, onSettings, onSchedule, onMemory, onSkills, onDocuments, onConnectors, currentView, mobileOpen, onClose }: SidebarProps) {
+export default function Sidebar({ username, onLogout, onChat, onSettings, onSchedule, onMemory, onSkills, onDocuments, currentView, conversations, activeConvId, onNewChat, onSelectConversation, onDeleteConversation, mobileOpen, onClose }: SidebarProps) {
   const t = useT();
   const { lang, setLang } = useLang();
+  const [historyOpen, setHistoryOpen] = useState(true);
+
+  const historyConvs = conversations
+    .filter((c) => isHistory(c))
+    .sort((a, b) => b.lastInputAt - a.lastInputAt);
 
   const NAV_ITEMS = [
     { key: 'chat', label: t('chat') },
     { key: 'documents', label: t('documents') },
     { key: 'schedule', label: t('schedule') },
-    { key: 'memory', label: t('memory') },
-    { key: 'skills', label: t('skills') },
-    { key: 'connectors', label: t('connectors') },
+    { key: 'memory', label: t('navMemo') },
+    { key: 'skills', label: t('navSkillsConnectors') },
     { key: 'settings', label: t('settings') },
   ];
 
-  const navHandlers: Record<string, () => void> = { chat: onChat, documents: onDocuments, schedule: onSchedule, memory: onMemory, skills: onSkills, connectors: onConnectors, settings: onSettings };
+  const navHandlers: Record<string, () => void> = { chat: onChat, documents: onDocuments, schedule: onSchedule, memory: onMemory, skills: onSkills, settings: onSettings };
 
   const handleNav = (key: string) => {
     navHandlers[key]?.();
@@ -78,27 +88,131 @@ export default function Sidebar({ username, onLogout, onChat, onSettings, onSche
           <div style={{ color: '#888', fontSize: 12, marginBottom: 8, textTransform: 'uppercase' }}>
             {t('navigation')}
           </div>
-          {NAV_ITEMS.map(item => (
-            <button
-              key={item.key}
-              onClick={() => handleNav(item.key)}
-              style={{
-                display: 'block',
-                width: '100%',
-                padding: '8px 12px',
-                borderRadius: 6,
-                border: 'none',
-                background: currentView === item.key ? '#2a2a2a' : 'transparent',
-                color: '#eee',
-                textAlign: 'left' as const,
-                cursor: 'pointer',
-                fontSize: 14,
-                marginBottom: 4,
-              }}
-            >
-              {item.label}
-            </button>
-          ))}
+          {NAV_ITEMS.map(item => {
+            const isChat = item.key === 'chat';
+            return (
+              <div key={item.key}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <button
+                    onClick={() => handleNav(item.key)}
+                    style={{
+                      flex: 1,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '8px 12px',
+                      borderRadius: 6,
+                      border: 'none',
+                      background: currentView === item.key ? '#2a2a2a' : 'transparent',
+                      color: '#eee',
+                      textAlign: 'left' as const,
+                      cursor: 'pointer',
+                      fontSize: 14,
+                      marginBottom: 4,
+                    }}
+                  >
+                    <span>{item.label}</span>
+                    {isChat && (
+                      <span
+                        onClick={(e) => { e.stopPropagation(); setHistoryOpen((o) => !o); }}
+                        style={{ color: '#888', fontSize: 10, cursor: 'pointer' }}
+                        title={t('historyChat')}
+                      >
+                        {historyOpen ? '▲' : '▼'}
+                      </span>
+                    )}
+                  </button>
+                  {isChat && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); onNewChat(); }}
+                      title={t('newChat')}
+                      style={{
+                        width: 30,
+                        height: 30,
+                        flexShrink: 0,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        borderRadius: 6,
+                        border: '1px solid #444',
+                        background: 'transparent',
+                        color: '#aaa',
+                        cursor: 'pointer',
+                        fontSize: 16,
+                        marginBottom: 4,
+                      }}
+                    >
+                      +
+                    </button>
+                  )}
+                </div>
+                {/* History task chats dropdown */}
+                {isChat && historyOpen && (
+                  <div style={{ marginBottom: 6 }}>
+                    {historyConvs.length === 0 ? (
+                      <div style={{ padding: '4px 12px 4px 24px', fontSize: 12, color: '#666' }}>
+                        {t('noHistoryChat')}
+                      </div>
+                    ) : (
+                      historyConvs.map((c) => (
+                        <div
+                          key={c.id}
+                          className={`hist-item${c.id === activeConvId ? ' hist-active' : ''}`}
+                          onClick={() => { onSelectConversation(c.id); onClose?.(); }}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            padding: '6px 8px 6px 20px',
+                            borderRadius: 6,
+                            cursor: 'pointer',
+                            background: c.id === activeConvId ? '#2a2a2a' : 'transparent',
+                            marginBottom: 2,
+                          }}
+                        >
+                          <span
+                            style={{
+                              flex: 1,
+                              fontSize: 13,
+                              color: '#ccc',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                            }}
+                            title={c.title}
+                          >
+                            {c.title || t('newChat')}
+                          </span>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (window.confirm(t('confirmDeleteChat'))) {
+                                onDeleteConversation(c.id);
+                              }
+                            }}
+                            title={t('delete')}
+                            style={{
+                              background: 'none',
+                              border: 'none',
+                              color: '#777',
+                              cursor: 'pointer',
+                              fontSize: 12,
+                              padding: '0 2px',
+                              flexShrink: 0,
+                            }}
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ))
+                    )}
+                    <div style={{ padding: '4px 12px 0 24px', fontSize: 11, color: '#555' }}>
+                      {t('historyHint')}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
 
         {/* Language toggle */}

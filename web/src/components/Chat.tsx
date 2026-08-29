@@ -3,14 +3,13 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useT } from '../i18n';
 import { WS_BASE } from '../config';
-
-interface Message {
-  role: 'user' | 'assistant' | 'system';
-  content: string;
-  timestamp: number;
-  streaming?: boolean;
-  details?: string;
-}
+import {
+  type Message,
+  type Conversation,
+  loadConversations,
+  updateConvMessages,
+  touchConversation,
+} from '../chatStore';
 
 interface ContextDoc {
   name: string;
@@ -21,6 +20,8 @@ interface ContextDoc {
 interface ChatProps {
   userId: string;
   token: string;
+  conversationId: string;
+  onConversationsSync?: (convs: Conversation[]) => void;
 }
 
 // Copy button for message bubbles
@@ -102,8 +103,6 @@ function DownloadButton({ text, filename }: { text: string; filename?: string })
   );
 }
 
-const STORAGE_KEY = (userId: string) => `jcowork_chat_${userId}`;
-
 function getFileIcon(name: string): string {
   const ext = name.split('.').pop()?.toLowerCase() || '';
   switch (ext) {
@@ -122,31 +121,15 @@ function getFileIcon(name: string): string {
   }
 }
 
-function loadMessages(userId: string): Message[] {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY(userId));
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      // Filter out streaming messages from previous sessions
-      return parsed.filter((m: Message) => !m.streaming);
-    }
-  } catch {}
-  return [];
+function loadMessages(userId: string, conversationId: string): Message[] {
+  const conv = loadConversations(userId).find((c) => c.id === conversationId);
+  // Filter out streaming messages from previous sessions
+  return (conv?.messages ?? []).filter((m) => !m.streaming);
 }
 
-function saveMessages(userId: string, messages: Message[]) {
-  try {
-    // Don't save streaming or system tool messages
-    const toSave = messages.filter(
-      (m) => !m.streaming && m.role !== 'system'
-    );
-    localStorage.setItem(STORAGE_KEY(userId), JSON.stringify(toSave));
-  } catch {}
-}
-
-export default function Chat({ userId, token }: ChatProps) {
+export default function Chat({ userId, token, conversationId, onConversationsSync }: ChatProps) {
   const t = useT();
-  const [messages, setMessages] = useState<Message[]>(() => loadMessages(userId));
+  const [messages, setMessages] = useState<Message[]>(() => loadMessages(userId, conversationId));
   const [input, setInput] = useState('');
   const [connected, setConnected] = useState(false);
   const [streaming, setStreaming] = useState(false);
@@ -296,14 +279,16 @@ export default function Chat({ userId, token }: ChatProps) {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // Persist messages to localStorage when they change
+  // Persist messages into the conversation store when they change
   useEffect(() => {
-    saveMessages(userId, messages);
-  }, [userId, messages]);
+    // Don't save streaming or system tool messages
+    const toSave = messages.filter((m) => !m.streaming && m.role !== 'system');
+    updateConvMessages(userId, conversationId, toSave);
+  }, [userId, conversationId, messages]);
 
   const clearHistory = () => {
     setMessages([]);
-    localStorage.removeItem(STORAGE_KEY(userId));
+    updateConvMessages(userId, conversationId, []);
   };
 
   const playAlarm = () => {
@@ -380,6 +365,11 @@ export default function Chat({ userId, token }: ChatProps) {
     const msg: Message = { role: 'user', content: input, timestamp: Date.now() };
     setMessages((prev) => [...prev, msg]);
     setStreaming(true);
+
+    // Record the user input (drives title + 1h history rule)
+    const updated = [...messages, msg].filter((m) => !m.streaming && m.role !== 'system');
+    onConversationsSync?.(updateConvMessages(userId, conversationId, updated));
+    onConversationsSync?.(touchConversation(userId, conversationId));
 
     // Read model from localStorage (set by Settings page)
     let model: string | undefined;

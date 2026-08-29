@@ -6,9 +6,16 @@ import Schedule from './components/Schedule';
 import Sidebar from './components/Sidebar';
 import Settings from './components/Settings';
 import SkillsSquare from './components/SkillsSquare';
-import Connectors from './components/Connectors';
 import { I18nProvider, useT } from './i18n';
 import { API_BASE } from './config';
+import {
+  type Conversation,
+  loadConversations,
+  getActiveConvId,
+  setActiveConvId,
+  createConversation,
+  deleteConversation,
+} from './chatStore';
 
 interface AuthState {
   token: string;
@@ -55,9 +62,11 @@ function AppInner() {
   const [showSchedule, setShowSchedule] = useState(false);
   const [showMemory, setShowMemory] = useState(false);
   const [showSkills, setShowSkills] = useState(false);
-  const [showConnectors, setShowConnectors] = useState(false);
   const [showDocuments, setShowDocuments] = useState(false);
   const [mobileSidebar, setMobileSidebar] = useState(false);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeConvId, setActiveConvIdState] = useState<string>('');
+  const [, setTick] = useState(0); // periodic re-render for 1h history threshold
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [isRegister, setIsRegister] = useState(false);
   const hiddenTimeRef = useRef(0);
@@ -87,6 +96,64 @@ function AppInner() {
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
   }, [handleVisibilityChange]);
+
+  // Load conversations once authenticated; create one if none exists
+  useEffect(() => {
+    if (!auth) return;
+    const convs = loadConversations(auth.userId);
+    const savedId = getActiveConvId(auth.userId);
+    if (savedId && convs.some((c) => c.id === savedId)) {
+      setConversations(convs);
+      setActiveConvIdState(savedId);
+    } else {
+      const res = createConversation(auth.userId);
+      setConversations(res.convs);
+      setActiveConvIdState(res.id);
+    }
+  }, [auth]);
+
+  // Re-evaluate the 1h history threshold every minute
+  useEffect(() => {
+    const iv = window.setInterval(() => setTick((v) => v + 1), 60_000);
+    return () => window.clearInterval(iv);
+  }, []);
+
+  const switchToChatView = () => {
+    setShowSettings(false); setShowSchedule(false); setShowMemory(false);
+    setShowSkills(false); setShowDocuments(false);
+  };
+
+  const handleNewChat = useCallback(() => {
+    if (!auth) return;
+    // Reuse the active conversation if it's still empty
+    const active = conversations.find((c) => c.id === activeConvId);
+    if (active && active.messages.length === 0) {
+      switchToChatView();
+      return;
+    }
+    const res = createConversation(auth.userId);
+    setConversations(res.convs);
+    setActiveConvIdState(res.id);
+    switchToChatView();
+  }, [auth, conversations, activeConvId]);
+
+  const handleSelectConversation = useCallback((id: string) => {
+    if (!auth) return;
+    setActiveConvId(auth.userId, id);
+    setActiveConvIdState(id);
+    switchToChatView();
+  }, [auth]);
+
+  const handleDeleteConversation = useCallback((id: string) => {
+    if (!auth) return;
+    const convs = deleteConversation(auth.userId, id);
+    setConversations(convs);
+    if (activeConvId === id) {
+      const res = createConversation(auth.userId);
+      setConversations(res.convs);
+      setActiveConvIdState(res.id);
+    }
+  }, [auth, activeConvId]);
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -161,14 +228,18 @@ function AppInner() {
   return (
     <div style={{ display: 'flex', height: '100vh', background: '#111', color: '#eee' }}>
       <Sidebar username={auth.username} onLogout={logout}
-        onChat={() => { setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowConnectors(false); setShowDocuments(false); }}
-        onDocuments={() => { setShowDocuments(true); setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowConnectors(false); }}
-        onSettings={() => { setShowSettings(true); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowConnectors(false); setShowDocuments(false); }}
-        onSchedule={() => { setShowSchedule(true); setShowSettings(false); setShowMemory(false); setShowSkills(false); setShowConnectors(false); setShowDocuments(false); }}
-        onMemory={() => { setShowMemory(true); setShowSchedule(false); setShowSettings(false); setShowSkills(false); setShowConnectors(false); setShowDocuments(false); }}
-        onSkills={() => { setShowSkills(true); setShowMemory(false); setShowSchedule(false); setShowSettings(false); setShowConnectors(false); setShowDocuments(false); }}
-        onConnectors={() => { setShowConnectors(true); setShowSkills(false); setShowMemory(false); setShowSchedule(false); setShowSettings(false); setShowDocuments(false); }}
-        currentView={showSettings ? 'settings' : showSchedule ? 'schedule' : showMemory ? 'memory' : showSkills ? 'skills' : showConnectors ? 'connectors' : showDocuments ? 'documents' : 'chat'}
+        onChat={() => { setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); }}
+        onDocuments={() => { setShowDocuments(true); setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); }}
+        onSettings={() => { setShowSettings(true); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); }}
+        onSchedule={() => { setShowSchedule(true); setShowSettings(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); }}
+        onMemory={() => { setShowMemory(true); setShowSchedule(false); setShowSettings(false); setShowSkills(false); setShowDocuments(false); }}
+        onSkills={() => { setShowSkills(true); setShowMemory(false); setShowSchedule(false); setShowSettings(false); setShowDocuments(false); }}
+        currentView={showSettings ? 'settings' : showSchedule ? 'schedule' : showMemory ? 'memory' : showSkills ? 'skills' : showDocuments ? 'documents' : 'chat'}
+        conversations={conversations}
+        activeConvId={activeConvId}
+        onNewChat={handleNewChat}
+        onSelectConversation={handleSelectConversation}
+        onDeleteConversation={handleDeleteConversation}
         mobileOpen={mobileSidebar}
         onClose={() => setMobileSidebar(false)}
       />
@@ -196,11 +267,9 @@ function AppInner() {
             <Memory userId={auth.userId} token={auth.token} />
           ) : showSkills ? (
             <SkillsSquare userId={auth.userId} token={auth.token} />
-          ) : showConnectors ? (
-            <Connectors userId={auth.userId} token={auth.token} />
-          ) : (
-            <Chat userId={auth.userId} token={auth.token} />
-          )}
+          ) : activeConvId ? (
+            <Chat key={activeConvId} userId={auth.userId} token={auth.token} conversationId={activeConvId} onConversationsSync={setConversations} />
+          ) : null}
         </div>
       </div>
     </div>

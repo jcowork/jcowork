@@ -6,12 +6,19 @@ type Lang = 'zh' | 'en';
 const translations = {
   zh: {
     // Sidebar
-    chat: '对话',
-    documents: '文档',
+    chat: '任务对话',
+    documents: '本地文档',
     schedule: '周期任务',
     memory: '记忆',
+    navMemo: '备忘录',
     skills: '技能',
+    navSkillsConnectors: '技能与连接器',
     connectors: '连接器',
+    newChat: '新建任务对话',
+    historyChat: '历史任务对话',
+    noHistoryChat: '暂无历史对话',
+    historyHint: '超过 1 小时无输入的对话自动归入历史',
+    confirmDeleteChat: '删除该历史对话？删除后不可恢复。',
     settings: '设置',
     signedInAs: '已登录',
     navigation: '导航',
@@ -250,6 +257,7 @@ const translations = {
     localProviderDesc: '无需 API 密钥（如 Ollama、llama.cpp）',
 
     // Connectors
+    connectorsSubtitle: '接入外部 API 与 MCP 工具，启用后模型可按描述调用',
     addConnector: '新增连接器',
     editConnector: '编辑连接器',
     connectorName: '名称',
@@ -301,12 +309,19 @@ const translations = {
   },
   en: {
     // Sidebar
-    chat: 'Chat',
-    documents: 'Documents',
+    chat: 'Task Chat',
+    documents: 'Local Documents',
     schedule: 'Periodic Tasks',
     memory: 'Memory',
+    navMemo: 'Memo',
     skills: 'Skills',
+    navSkillsConnectors: 'Skills & Connectors',
     connectors: 'Connectors',
+    newChat: 'New Task Chat',
+    historyChat: 'Historical Task Chats',
+    noHistoryChat: 'No historical chats',
+    historyHint: 'Chats idle for over 1 hour become history',
+    confirmDeleteChat: 'Delete this historical chat? This cannot be undone.',
     settings: 'Settings',
     signedInAs: 'Signed in as',
     navigation: 'Navigation',
@@ -545,6 +560,7 @@ const translations = {
     localProviderDesc: 'No API key needed (e.g. Ollama, llama.cpp)',
 
     // Connectors
+    connectorsSubtitle: 'Connect external API & MCP tools; the model calls them by description',
     addConnector: 'Add Connector',
     editConnector: 'Edit Connector',
     connectorName: 'Name',
