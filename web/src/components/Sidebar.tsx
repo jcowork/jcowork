@@ -9,12 +9,13 @@ interface SidebarProps {
   onMemory: () => void;
   onSkills: () => void;
   onDocuments: () => void;
+  onConnectors: () => void;
   currentView: string;
   mobileOpen?: boolean;
   onClose?: () => void;
 }
 
-export default function Sidebar({ username, onLogout, onChat, onSettings, onSchedule, onMemory, onSkills, onDocuments, currentView, mobileOpen, onClose }: SidebarProps) {
+export default function Sidebar({ username, onLogout, onChat, onSettings, onSchedule, onMemory, onSkills, onDocuments, onConnectors, currentView, mobileOpen, onClose }: SidebarProps) {
   const t = useT();
   const { lang, setLang } = useLang();
 
@@ -24,10 +25,11 @@ export default function Sidebar({ username, onLogout, onChat, onSettings, onSche
     { key: 'schedule', label: t('schedule') },
     { key: 'memory', label: t('memory') },
     { key: 'skills', label: t('skills') },
+    { key: 'connectors', label: t('connectors') },
     { key: 'settings', label: t('settings') },
   ];
 
-  const navHandlers: Record<string, () => void> = { chat: onChat, documents: onDocuments, schedule: onSchedule, memory: onMemory, skills: onSkills, settings: onSettings };
+  const navHandlers: Record<string, () => void> = { chat: onChat, documents: onDocuments, schedule: onSchedule, memory: onMemory, skills: onSkills, connectors: onConnectors, settings: onSettings };
 
   const handleNav = (key: string) => {
     navHandlers[key]?.();

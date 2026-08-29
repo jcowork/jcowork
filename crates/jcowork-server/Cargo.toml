@@ -13,6 +13,7 @@ jcowork-agent = { workspace = true }
 jcowork-memory = { workspace = true }
 jcowork-skills = { workspace = true }
 jcowork-tools = { workspace = true }
+jcowork-connectors = { workspace = true }
 jcowork-storage = { workspace = true }
 jcowork-llm = { workspace = true }
 jcowork-cron = { workspace = true }

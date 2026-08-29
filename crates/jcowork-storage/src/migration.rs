@@ -184,6 +184,30 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         .execute(pool)
         .await?;
 
+    // Connectors table (user-managed API / MCP tool integrations)
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS connectors (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            ctype TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            config_json TEXT NOT NULL DEFAULT '{}',
+            tool_states_json TEXT NOT NULL DEFAULT '{}',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_connectors_user ON connectors(user_id)")
+        .execute(pool)
+        .await?;
+
     // Feishu configs table (per-user Feishu app configuration)
     sqlx::query(
         r#"

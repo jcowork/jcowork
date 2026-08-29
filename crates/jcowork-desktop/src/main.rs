@@ -336,6 +336,16 @@ async fn main() {
         log_writer.clone(),
     );
 
+    // ── 11b. Initialize connector manager (user-managed API/MCP tools) ──
+    let connector_manager = jcowork_connectors::ConnectorManager::new(pool.clone());
+    connector_manager
+        .attach_registry(tool_registry.clone())
+        .await;
+    if let Err(e) = connector_manager.sync_registry().await {
+        warn!(error = %e, "Initial connector sync failed");
+    }
+    info!("Connector manager initialized");
+
     // ── 12. Initialize session manager ──
     let session_manager = Arc::new(SessionManager::new());
 
@@ -354,6 +364,7 @@ async fn main() {
         memory_manager,
         skill_manager,
         tool_registry,
+        connector_manager,
         user_store,
         log_writer,
         feishu_config_store: Arc::new(FeishuConfigStore::new(pool)),

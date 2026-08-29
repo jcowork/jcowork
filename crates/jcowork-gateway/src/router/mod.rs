@@ -11,8 +11,10 @@
 //! - [`upload`] — file/PDF uploads and PDF parsing
 //! - [`fetch_url`] — URL fetching and HTML-to-text conversion
 //! - [`doc_index`] — workspace index, vector search, excel preview, docling
+//! - [`connectors`] — user-managed API / MCP connector configuration
 
 pub(crate) mod auth_api;
+pub(crate) mod connectors;
 pub(crate) mod cron;
 pub(crate) mod doc_index;
 pub(crate) mod feishu;
@@ -45,6 +47,7 @@ use crate::session::SessionManager;
 use crate::ws;
 use dashmap::DashMap;
 use jcowork_cron::CronScheduler;
+use jcowork_connectors::ConnectorManager;
 use jcowork_feishu::client::FeishuClient;
 use jcowork_llm::LlmRouter;
 use jcowork_logs::LogWriter;
@@ -64,6 +67,7 @@ pub struct AppState {
     pub memory_manager: Arc<MemoryManager>,
     pub skill_manager: Arc<SkillManager>,
     pub tool_registry: Arc<ToolRegistry>,
+    pub connector_manager: Arc<ConnectorManager>,
     pub user_store: Arc<UserStore>,
     pub log_writer: Arc<LogWriter>,
     /// Per-user Feishu config store (database-backed).
@@ -217,6 +221,15 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/docling/status", get(doc_index::get_docling_status))
         .route("/api/docling/start", post(doc_index::start_docling_service))
         .route("/api/fetch-url", post(fetch_url::fetch_url))
+        .route("/api/connectors", get(connectors::list_connectors))
+        .route("/api/connectors", post(connectors::create_connector))
+        .route("/api/connectors/test", post(connectors::test_connector))
+        .route("/api/connectors/{id}", get(connectors::get_connector))
+        .route("/api/connectors/{id}", put(connectors::update_connector))
+        .route("/api/connectors/{id}", delete(connectors::delete_connector))
+        .route("/api/connectors/{id}/toggle", post(connectors::toggle_connector))
+        .route("/api/connectors/{id}/tools", get(connectors::list_connector_tools))
+        .route("/api/connectors/{id}/tools/{tool}/toggle", post(connectors::toggle_connector_tool))
         .route("/api/ws", get(ws_upgrade))
         .layer(auth_mw)
         // Allow up to 50MB for file uploads (default axum limit is only 2MB)

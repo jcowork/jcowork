@@ -7,6 +7,7 @@ members = [
     "crates/jcowork-memory",
     "crates/jcowork-skills",
     "crates/jcowork-tools",
+    "crates/jcowork-connectors",
     "crates/jcowork-llm",
     "crates/jcowork-storage",
     "crates/jcowork-cron",
@@ -28,6 +29,7 @@ jcowork-agent = { path = "crates/jcowork-agent" }
 jcowork-memory = { path = "crates/jcowork-memory" }
 jcowork-skills = { path = "crates/jcowork-skills" }
 jcowork-tools = { path = "crates/jcowork-tools" }
+jcowork-connectors = { path = "crates/jcowork-connectors" }
 jcowork-llm = { path = "crates/jcowork-llm" }
 jcowork-storage = { path = "crates/jcowork-storage" }
 jcowork-cron = { path = "crates/jcowork-cron" }

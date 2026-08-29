@@ -152,6 +152,15 @@ async fn main() -> Result<()> {
     // Initialize tool registry
     let tool_registry = jcowork_gateway::ws::build_tool_registry(cron_scheduler.clone(), memory_manager.clone(), log_writer.clone());
 
+    // Initialize connector manager (user-managed API/MCP tool integrations).
+    // Enabled connector tools are synced into the registry's dynamic area.
+    let connector_manager = jcowork_connectors::ConnectorManager::new(pool.clone());
+    connector_manager.attach_registry(tool_registry.clone()).await;
+    if let Err(e) = connector_manager.sync_registry().await {
+        tracing::warn!(err = %e, "Initial connector sync failed");
+    }
+    info!("Connector manager initialized");
+
     // Initialize session manager
     let session_manager = Arc::new(SessionManager::new());
 
@@ -170,6 +179,7 @@ async fn main() -> Result<()> {
         memory_manager,
         skill_manager,
         tool_registry,
+        connector_manager,
         user_store,
         log_writer,
         feishu_config_store: Arc::new(FeishuConfigStore::new(pool)),

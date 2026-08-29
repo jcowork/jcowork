@@ -65,6 +65,10 @@ impl TestApp {
         let session_manager = Arc::new(SessionManager::new());
         let feishu_config_store = Arc::new(FeishuConfigStore::new(pool.clone()));
 
+        // Connector manager (user-managed API/MCP tools)
+        let connector_manager = jcowork_connectors::ConnectorManager::new(pool.clone());
+        connector_manager.attach_registry(tool_registry.clone()).await;
+
         // Create mock LLM router
         let mock_provider = Arc::new(MockLlmProvider::new());
         let llm_router = LlmRouter::from_mock(mock_provider);
@@ -81,6 +85,7 @@ impl TestApp {
             memory_manager,
             skill_manager,
             tool_registry,
+            connector_manager,
             user_store,
             log_writer,
             feishu_config_store,
@@ -291,4 +296,190 @@ async fn test_401_triggers_frontend_logout() {
     
     // Verify error message
     assert!(resp.get("error").is_some());
+}
+
+// ─── Connector API tests ────────────────────────────────────────────
+
+fn api_connector_body() -> serde_json::Value {
+    json!({
+        "name": "weather",
+        "ctype": "api",
+        "description": "Weather service",
+        "config": {
+            "tools": [{
+                "name": "get_weather",
+                "description": "Get current weather for a city",
+                "method": "GET",
+                "url": "https://api.example.com/weather?city={{city}}",
+                "params": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"]
+                }
+            }]
+        }
+    })
+}
+
+#[tokio::test]
+async fn test_connectors_require_auth() {
+    use tower::ServiceExt;
+
+    let app = TestApp::new().await;
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/connectors")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.router.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_connector_crud_flow() {
+    let mut app = TestApp::new().await;
+    app.register_and_login("connectoruser", "pass123").await;
+
+    // Create
+    let res = app
+        .make_request("POST", "/api/connectors", Some(api_connector_body()))
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    let id = body["id"].as_str().unwrap().to_string();
+    assert!(body["enabled"].as_bool().unwrap());
+
+    // List
+    let res = app.make_request("GET", "/api/connectors", None).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(body.as_array().unwrap().len(), 1);
+
+    // Tools list
+    let res = app
+        .make_request("GET", &format!("/api/connectors/{}/tools", id), None)
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(body[0]["name"], "get_weather");
+    assert_eq!(body[0]["enabled"], true);
+
+    // Tool-level toggle (disable)
+    let res = app
+        .make_request(
+            "POST",
+            &format!("/api/connectors/{}/tools/get_weather/toggle", id),
+            Some(json!({"enabled": false})),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app
+        .make_request("GET", &format!("/api/connectors/{}/tools", id), None)
+        .await;
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(body[0]["enabled"], false);
+
+    // Connector-level toggle (disable)
+    let res = app
+        .make_request(
+            "POST",
+            &format!("/api/connectors/{}/toggle", id),
+            Some(json!({"enabled": false})),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app
+        .make_request("GET", &format!("/api/connectors/{}", id), None)
+        .await;
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(body["enabled"], false);
+
+    // Update preserves enabled state
+    let mut update_body = api_connector_body();
+    update_body["name"] = json!("weather-v2");
+    let res = app
+        .make_request("PUT", &format!("/api/connectors/{}", id), Some(update_body))
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(body["name"], "weather-v2");
+    assert_eq!(body["enabled"], false, "update must preserve enabled state");
+
+    // Delete
+    let res = app
+        .make_request("DELETE", &format!("/api/connectors/{}", id), None)
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app.make_request("GET", "/api/connectors", None).await;
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(body.as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn test_connector_validation_errors() {
+    let mut app = TestApp::new().await;
+    app.register_and_login("connvalidator", "pass123").await;
+
+    // Empty name -> 400
+    let mut body = api_connector_body();
+    body["name"] = json!("  ");
+    let res = app.make_request("POST", "/api/connectors", Some(body)).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // Undeclared placeholder -> 400
+    let mut body = api_connector_body();
+    body["config"]["tools"][0]["url"] = json!("https://x.com/{{undeclared}}");
+    let res = app.make_request("POST", "/api/connectors", Some(body)).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // Unknown connector type -> 400
+    let mut body = api_connector_body();
+    body["ctype"] = json!("carrier-pigeon");
+    let res = app.make_request("POST", "/api/connectors", Some(body)).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // MCP with invalid transport config -> 400
+    let res = app
+        .make_request(
+            "POST",
+            "/api/connectors",
+            Some(json!({
+                "name": "bad-mcp",
+                "ctype": "mcp",
+                "config": {"transport": "http", "url": "not-a-url"}
+            })),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // API connector test endpoint validates without saving
+    let res = app
+        .make_request("POST", "/api/connectors/test", Some(api_connector_body()))
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(body["status"], "ok");
+
+    // Nothing was persisted
+    let res = app.make_request("GET", "/api/connectors", None).await;
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(body.as_array().unwrap().len(), 0);
 }

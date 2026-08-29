@@ -6,6 +6,7 @@ import Schedule from './components/Schedule';
 import Sidebar from './components/Sidebar';
 import Settings from './components/Settings';
 import SkillsSquare from './components/SkillsSquare';
+import Connectors from './components/Connectors';
 import { I18nProvider, useT } from './i18n';
 import { API_BASE } from './config';
 
@@ -54,6 +55,7 @@ function AppInner() {
   const [showSchedule, setShowSchedule] = useState(false);
   const [showMemory, setShowMemory] = useState(false);
   const [showSkills, setShowSkills] = useState(false);
+  const [showConnectors, setShowConnectors] = useState(false);
   const [showDocuments, setShowDocuments] = useState(false);
   const [mobileSidebar, setMobileSidebar] = useState(false);
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
@@ -159,13 +161,14 @@ function AppInner() {
   return (
     <div style={{ display: 'flex', height: '100vh', background: '#111', color: '#eee' }}>
       <Sidebar username={auth.username} onLogout={logout}
-        onChat={() => { setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); }}
-        onDocuments={() => { setShowDocuments(true); setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); }}
-        onSettings={() => { setShowSettings(true); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); }}
-        onSchedule={() => { setShowSchedule(true); setShowSettings(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); }}
-        onMemory={() => { setShowMemory(true); setShowSchedule(false); setShowSettings(false); setShowSkills(false); setShowDocuments(false); }}
-        onSkills={() => { setShowSkills(true); setShowMemory(false); setShowSchedule(false); setShowSettings(false); setShowDocuments(false); }}
-        currentView={showSettings ? 'settings' : showSchedule ? 'schedule' : showMemory ? 'memory' : showSkills ? 'skills' : showDocuments ? 'documents' : 'chat'}
+        onChat={() => { setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowConnectors(false); setShowDocuments(false); }}
+        onDocuments={() => { setShowDocuments(true); setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowConnectors(false); }}
+        onSettings={() => { setShowSettings(true); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowConnectors(false); setShowDocuments(false); }}
+        onSchedule={() => { setShowSchedule(true); setShowSettings(false); setShowMemory(false); setShowSkills(false); setShowConnectors(false); setShowDocuments(false); }}
+        onMemory={() => { setShowMemory(true); setShowSchedule(false); setShowSettings(false); setShowSkills(false); setShowConnectors(false); setShowDocuments(false); }}
+        onSkills={() => { setShowSkills(true); setShowMemory(false); setShowSchedule(false); setShowSettings(false); setShowConnectors(false); setShowDocuments(false); }}
+        onConnectors={() => { setShowConnectors(true); setShowSkills(false); setShowMemory(false); setShowSchedule(false); setShowSettings(false); setShowDocuments(false); }}
+        currentView={showSettings ? 'settings' : showSchedule ? 'schedule' : showMemory ? 'memory' : showSkills ? 'skills' : showConnectors ? 'connectors' : showDocuments ? 'documents' : 'chat'}
         mobileOpen={mobileSidebar}
         onClose={() => setMobileSidebar(false)}
       />
@@ -193,6 +196,8 @@ function AppInner() {
             <Memory userId={auth.userId} token={auth.token} />
           ) : showSkills ? (
             <SkillsSquare userId={auth.userId} token={auth.token} />
+          ) : showConnectors ? (
+            <Connectors userId={auth.userId} token={auth.token} />
           ) : (
             <Chat userId={auth.userId} token={auth.token} />
           )}
