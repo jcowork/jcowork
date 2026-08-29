@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useLang, useT } from '../i18n';
-import { type Conversation, isHistory } from '../chatStore';
+import { type Conversation } from '../chatStore';
 
 interface SidebarProps {
   username: string;
@@ -25,9 +25,12 @@ export default function Sidebar({ username, onLogout, onChat, onSettings, onSche
   const t = useT();
   const { lang, setLang } = useLang();
   const [historyOpen, setHistoryOpen] = useState(true);
+  // window.confirm is unsupported in Tauri's WKWebView, use a custom modal
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
+  // Show all conversations with messages (except the currently active one)
   const historyConvs = conversations
-    .filter((c) => isHistory(c))
+    .filter((c) => c.messages.length > 0 && c.id !== activeConvId)
     .sort((a, b) => b.lastInputAt - a.lastInputAt);
 
   const NAV_ITEMS = [
@@ -185,9 +188,7 @@ export default function Sidebar({ username, onLogout, onChat, onSettings, onSche
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
-                              if (window.confirm(t('confirmDeleteChat'))) {
-                                onDeleteConversation(c.id);
-                              }
+                              setConfirmDeleteId(c.id);
                             }}
                             title={t('delete')}
                             style={{
@@ -250,6 +251,71 @@ export default function Sidebar({ username, onLogout, onChat, onSettings, onSche
           {t('logout')}
         </button>
       </div>
+
+      {/* Delete confirmation modal */}
+      {confirmDeleteId && (
+        <div
+          onClick={() => setConfirmDeleteId(null)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.6)',
+            zIndex: 999,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: '#1f1f1f',
+              border: '1px solid #333',
+              borderRadius: 10,
+              padding: 20,
+              width: 320,
+              boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
+            }}
+          >
+            <div style={{ color: '#eee', fontSize: 14, lineHeight: 1.6, marginBottom: 16 }}>
+              {t('confirmDeleteChat')}
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button
+                onClick={() => setConfirmDeleteId(null)}
+                style={{
+                  padding: '6px 16px',
+                  borderRadius: 6,
+                  border: '1px solid #555',
+                  background: 'transparent',
+                  color: '#ccc',
+                  cursor: 'pointer',
+                  fontSize: 13,
+                }}
+              >
+                {t('cancel')}
+              </button>
+              <button
+                onClick={() => {
+                  onDeleteConversation(confirmDeleteId);
+                  setConfirmDeleteId(null);
+                }}
+                style={{
+                  padding: '6px 16px',
+                  borderRadius: 6,
+                  border: 'none',
+                  background: '#e53935',
+                  color: '#fff',
+                  cursor: 'pointer',
+                  fontSize: 13,
+                }}
+              >
+                {t('delete')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

@@ -44,6 +44,7 @@ pub struct WsInput {
     pub content: Option<String>,
     pub model: Option<String>,
     pub context_documents: Option<Vec<ContextDocument>>,
+    pub history: Option<Vec<HistoryMessage>>,
 }
 
 /// A reference document provided as context for a chat message.
@@ -51,6 +52,13 @@ pub struct WsInput {
 pub struct ContextDocument {
     pub name: String,
     pub path: Option<String>,
+    pub content: String,
+}
+
+/// A historical message sent by the client to restore conversation context.
+#[derive(Debug, Deserialize)]
+pub struct HistoryMessage {
+    pub role: String,
     pub content: String,
 }
 
@@ -258,6 +266,35 @@ pub async fn ws_handler(
                             let _ = ws_sender.send(Message::Text(
                                 serde_json::json!({"type": "stopped"}).to_string().into(),
                             )).await;
+                            continue;
+                        }
+
+                        // Handle history restore: replace connection history with
+                        // the client's persisted conversation (keep system prompt)
+                        if input.msg_type.as_deref() == Some("load_history") {
+                            let system = history.first().cloned();
+                            history.clear();
+                            if let Some(sys) = system {
+                                history.push(sys);
+                            }
+                            if let Some(msgs) = input.history {
+                                for m in msgs {
+                                    if m.role != "user" && m.role != "assistant" {
+                                        continue;
+                                    }
+                                    if m.content.trim().is_empty() {
+                                        continue;
+                                    }
+                                    history.push(jcowork_llm::provider::ChatMessage {
+                                        role: m.role,
+                                        content: m.content,
+                                        tool_calls: None,
+                                        tool_call_id: None,
+                                        reasoning_content: None,
+                                    });
+                                }
+                            }
+                            tracing::info!(user_id = %user_id, history_len = history.len(), "Conversation history restored");
                             continue;
                         }
 

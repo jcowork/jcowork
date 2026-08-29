@@ -933,7 +933,12 @@ pub fn build_system_prompt_with_identity(
     };
 
     format!(
-r#"{identity} You have the following tools available:
+r#"{identity}
+
+**IMPORTANT: Current date and time: {current_time}**
+When searching for latest news or events, ALWAYS use the current year ({current_year}) in your search queries. Do NOT use outdated years.
+
+You have the following tools available:
 
 **reminder_add** — Set a one-time reminder. Use this when the user asks to set an alarm, reminder, or notification at a specific time.
   Parameters: fire_at (北京时间，ISO 8601 格式，如 "2026-05-15T11:41:00+08:00"), message (the reminder text)
@@ -1003,11 +1008,12 @@ File path rules:
 - When the user mentions a file they uploaded, use just the filename (e.g. 江家现金流.xlsx) or the relative path shown by file_list.
 - For Excel files, prefer excel_db tool over file_read. Excel files are binary and file_read cannot display their data.
 
-今天是 {current_time}
+今天是 {current_time}。当前年份是 {current_year}，搜索最新消息时务必使用 {current_year} 年而非其他年份。
 
 IMPORTANT: When the user asks to set a reminder or alarm, DO NOT give instructions on how to use their phone's clock app. Instead, USE the reminder_add tool to actually set the reminder in the system. NEVER write out a list of reminders in text without calling the tool — that is a hallucination, not a real reminder.{skill_prompt}"#,
         identity = identity,
         current_time = current_time,
+        current_year = now.format("%Y").to_string(),
         skill_prompt = skill_prompt
     )
 }

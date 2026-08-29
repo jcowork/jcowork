@@ -166,7 +166,17 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
     }
     const ws = new WebSocket(wsUrl);
 
-    ws.onopen = () => setConnected(true);
+    ws.onopen = () => {
+      setConnected(true);
+      // Restore conversation context: send persisted messages to the backend so
+      // the model inherits the historical topic when continuing a chat.
+      const hist = loadMessages(userId, conversationId)
+        .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content.trim())
+        .map((m) => ({ role: m.role, content: m.content }));
+      if (hist.length > 0) {
+        ws.send(JSON.stringify({ type: 'load_history', history: hist }));
+      }
+    };
     ws.onclose = () => {
       setConnected(false);
       setTimeout(connect, 3000);
@@ -254,7 +264,7 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
     };
 
     wsRef.current = ws;
-  }, [userId, token]);
+  }, [userId, token, conversationId]);
 
   useEffect(() => {
     connect();
