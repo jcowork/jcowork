@@ -436,11 +436,13 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
     const ext = name.split('.').pop()?.toLowerCase() || '';
 
     // Binary file types that can't be read as text
-    const binaryExtensions = ['xlsx', 'xls', 'docx', 'doc', 'pptx', 'ppt'];
+    const binaryExtensions = ['xlsx', 'xls', 'pptx', 'ppt'];
+    // Formats parsed into Markdown by the index service during upload
+    const indexedDocExtensions = ['pdf', 'doc', 'docx'];
 
     try {
-      if (ext === 'pdf') {
-        // PDF: get extracted text from workspace index (parsed during upload)
+      if (indexedDocExtensions.includes(ext)) {
+        // PDF / Word: get extracted text from workspace index (parsed during upload)
         const res = await fetch(`/api/workspace/index/content?path=${encodeURIComponent(filePath)}`, {
           headers: { Authorization: `Bearer ${token}` },
         });
@@ -449,7 +451,8 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
           const text = data.content || '[No indexed content found]';
           setSelectedDocs(prev => [...prev, { name, path: filePath, content: text }]);
         } else {
-          setSelectedDocs(prev => [...prev, { name, path: filePath, content: '[PDF not indexed. Please re-upload or re-index the directory.]' }]);
+          const docType = ext === 'pdf' ? 'PDF' : 'Word document';
+          setSelectedDocs(prev => [...prev, { name, path: filePath, content: `[${docType} not indexed. Please re-upload or re-index the directory.]` }]);
         }
       } else if (binaryExtensions.includes(ext)) {
         // Binary files: add with placeholder content

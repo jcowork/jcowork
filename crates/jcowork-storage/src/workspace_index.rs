@@ -369,16 +369,17 @@ impl WorkspaceIndex {
 
         // Extract text content based on file type
         let mut doc_hash = String::new();
-        let content_text = if ext == "pdf" {
-            // Parse PDF using Docling service
+        let content_text = if matches!(ext.as_str(), "pdf" | "doc" | "docx") {
+            // Parse PDF / Word documents using Docling service (returns Markdown).
+            // Legacy .doc binaries are converted to .docx inside the service.
             match self.parse_with_docling(&full_path.to_string_lossy(), file_path, workspace_root).await {
                 Ok((markdown, hash)) => {
                     doc_hash = hash;
                     markdown
                 }
                 Err(e) => {
-                    warn!(file = %file_path, err = %e, "Failed to parse PDF with Docling");
-                    format!("[PDF parse error: {}]", e)
+                    warn!(file = %file_path, err = %e, "Failed to parse document with Docling");
+                    format!("[Document parse error: {}]", e)
                 }
             }
         } else if matches!(ext.as_str(), "md" | "markdown" | "html" | "htm" | "txt" | "csv" | "json" | "xml" | "yaml" | "yml" | "toml" | "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "css" | "sh" | "bash") {
@@ -447,8 +448,8 @@ impl WorkspaceIndex {
         .execute(&self.pool)
         .await?;
 
-        // For PDF and Markdown files, also store chunks for vector search
-        if matches!(ext.as_str(), "pdf" | "md" | "markdown") && !content_text.is_empty() {
+        // For PDF, Word and Markdown files, also store chunks for vector search
+        if matches!(ext.as_str(), "pdf" | "doc" | "docx" | "md" | "markdown") && !content_text.is_empty() {
             // Delete existing chunks first (in case of re-index)
             self.delete_file_chunks(file_path).await?;
             
@@ -767,7 +768,7 @@ impl WorkspaceIndex {
 
     // ========== Docling Integration ==========
 
-    /// Parse a PDF file using the Docling HTTP service.
+    /// Parse a PDF or Word file using the Docling HTTP service.
     ///
     /// If the service is not running, attempts to auto-start it (useful for
     /// the desktop app where the service is not started alongside the server).
@@ -791,10 +792,15 @@ impl WorkspaceIndex {
         let file_content = tokio::fs::read(pdf_path).await?;
         
         // Send to Docling service
+        let mime = match Path::new(pdf_path).extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref() {
+            Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            Some("doc") => "application/msword",
+            _ => "application/pdf",
+        };
         let form = reqwest::multipart::Form::new()
             .part("file", reqwest::multipart::Part::bytes(file_content)
                 .file_name(Path::new(pdf_path).file_name().unwrap_or_default().to_string_lossy().to_string())
-                .mime_str("application/pdf")?);
+                .mime_str(mime)?);
         
         let response = client
             .post(format!("{}/convert", service_url))
@@ -831,7 +837,7 @@ impl WorkspaceIndex {
             tables = result.tables.len(),
             images = result.images.len(),
             doc_hash = %doc_hash,
-            "PDF parsed with Docling"
+            "Document parsed with Docling"
         );
         
         Ok((result.markdown, doc_hash))
@@ -1498,6 +1504,36 @@ mod tests {
 
         index.remove_directory("docs").await.unwrap();
         assert_eq!(index.count().await.unwrap(), 0);
+    }
+
+    /// End-to-end Word indexing through the live Docling service.
+    /// Requires: Docling service running on DOCLING_SERVICE_URL and the test
+    /// fixture at the path in the JCOWORK_TEST_DOC env var (a legacy .doc).
+    #[tokio::test]
+    #[ignore]
+    async fn test_add_word_document_via_docling() {
+        let doc_path = std::env::var("JCOWORK_TEST_DOC")
+            .expect("Set JCOWORK_TEST_DOC to a legacy .doc file to run this test");
+
+        let (index, dir) = setup_test_index().await;
+        let workspace = dir.path().join("test-workspace");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        tokio::fs::copy(&doc_path, workspace.join("course.doc")).await.unwrap();
+
+        let ws_str = workspace.to_string_lossy().to_string();
+        index.add_document("course.doc", &ws_str).await.unwrap();
+
+        let content = index.get_content("course.doc").await.unwrap().unwrap();
+        assert!(
+            !content.starts_with("[Document parse error"),
+            "Docling parsing failed: {}",
+            content.chars().take(200).collect::<String>()
+        );
+        assert!(content.len() > 100, "expected real markdown content, got {} chars", content.len());
+
+        // Word documents also get chunked for vector search
+        let chunks = index.get_file_chunks("course.doc").await.unwrap();
+        assert!(!chunks.is_empty(), "expected chunks for the Word document");
     }
 
     #[tokio::test]

@@ -16,6 +16,9 @@ import os
 import re
 import base64
 import hashlib
+import platform
+import shutil
+import subprocess
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -119,6 +122,70 @@ class EmbedResponse(BaseModel):
     dimension: int
 
 
+# --- Legacy Office format conversion (.doc -> .docx) ---
+
+# OLE2 Compound File magic bytes (genuine Word 97-2003 binary)
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0"
+
+
+def _find_soffice() -> Optional[str]:
+    """Locate the LibreOffice headless binary, if installed."""
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if soffice:
+        return soffice
+    if platform.system() == "Darwin":
+        mac_path = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+        if Path(mac_path).exists():
+            return mac_path
+    return None
+
+
+def convert_legacy_doc_to_docx(src_path: Path) -> Optional[Path]:
+    """Convert a legacy binary .doc file to .docx.
+
+    Docling parses .docx natively but needs an external converter for the
+    binary Word 97-2003 format. Tries LibreOffice first (cross-platform,
+    best fidelity), then falls back to macOS's built-in ``textutil``.
+
+    Returns the path of the converted .docx, or None when no converter is
+    available or the conversion failed.
+    """
+    out_dir = Path(tempfile.mkdtemp(prefix="docling_doc_conv_"))
+    out_path = out_dir / (src_path.stem + ".docx")
+
+    soffice = _find_soffice()
+    if soffice:
+        try:
+            subprocess.run(
+                [soffice, "--headless", "--convert-to", "docx",
+                 "--outdir", str(out_dir), str(src_path)],
+                check=True,
+                capture_output=True,
+                timeout=120,
+            )
+            if out_path.exists():
+                return out_path
+        except (subprocess.SubprocessError, OSError) as e:
+            print(f"LibreOffice .doc conversion failed: {e}")
+
+    # Fallback: macOS built-in textutil (no extra install required)
+    if platform.system() == "Darwin" and shutil.which("textutil"):
+        try:
+            subprocess.run(
+                ["textutil", "-convert", "docx", str(src_path),
+                 "-output", str(out_path)],
+                check=True,
+                capture_output=True,
+                timeout=120,
+            )
+            if out_path.exists():
+                return out_path
+        except (subprocess.SubprocessError, OSError) as e:
+            print(f"textutil .doc conversion failed: {e}")
+
+    return None
+
+
 @app.get("/health")
 async def health():
     """Health check endpoint."""
@@ -153,9 +220,33 @@ async def convert_document(file: UploadFile = File(...)):
     if suffix not in [".pdf", ".docx", ".doc"]:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix}")
     
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp.write(content)
-        tmp_path = tmp.name
+    # Legacy binary .doc (Word 97-2003): Docling needs LibreOffice for this
+    # format, so pre-convert to .docx ourselves (LibreOffice or macOS textutil)
+    # before handing the file to Docling.
+    converted_path: Optional[Path] = None
+    if suffix == ".doc" and content[:4] == _OLE_MAGIC:
+        with tempfile.NamedTemporaryFile(suffix=".doc", delete=False) as tmp:
+            tmp.write(content)
+            legacy_path = Path(tmp.name)
+        try:
+            conversion = await run_in_threadpool(convert_legacy_doc_to_docx, legacy_path)
+        finally:
+            legacy_path.unlink(missing_ok=True)
+        if conversion is None:
+            raise HTTPException(
+                status_code=501,
+                detail=(
+                    "Legacy .doc conversion requires LibreOffice (not installed). "
+                    "Install LibreOffice, or save the file as .docx and re-upload."
+                ),
+            )
+        converted_path = conversion
+        tmp_path = str(conversion)
+        suffix = ".docx"
+    else:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
     
     try:
         # Convert document (blocking CPU work — run in threadpool so the
@@ -268,8 +359,11 @@ async def convert_document(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Conversion failed: {str(e)}")
     
     finally:
-        # Clean up temp file
+        # Clean up temp file (and the converted .docx when a legacy .doc was
+        # pre-converted; its parent dir holds only that file)
         Path(tmp_path).unlink(missing_ok=True)
+        if converted_path is not None:
+            shutil.rmtree(converted_path.parent, ignore_errors=True)
 
 
 @app.post("/embed", response_model=EmbedResponse)

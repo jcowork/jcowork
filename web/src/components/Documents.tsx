@@ -516,9 +516,9 @@ export default function Documents({ token }: DocumentsProps) {
       return;
     }
 
-    // PDF files: get extracted text from workspace index (parsed during upload),
+    // PDF & Word files: get extracted text from workspace index (parsed during upload),
     // first page only — more pages load automatically when scrolling down
-    if (ext === 'pdf') {
+    if (ext === 'pdf' || ext === 'doc' || ext === 'docx') {
       const res = await fetch(`/api/workspace/index/content?path=${encodeURIComponent(filePath)}&offset=0&limit=${PREVIEW_PAGE_SIZE}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -529,7 +529,8 @@ export default function Documents({ token }: DocumentsProps) {
           setPreviewPaging({ nextOffset: data.next_offset });
         }
       } else {
-        setPreviewContent('[PDF not indexed. Please re-upload or re-index the directory.]');
+        const docType = ext === 'pdf' ? 'PDF' : 'Word document';
+        setPreviewContent(`[${docType} not indexed. Please re-upload or re-index the directory.]`);
       }
       
       // Also load chunks for vector search preview
