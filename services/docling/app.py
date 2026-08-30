@@ -70,14 +70,15 @@ async def lifespan(app: FastAPI):
     print("Loading Docling converter...")
     
     # Configure Docling pipeline
+    # NOTE: OCR (do_ocr) is intentionally disabled — it slowed conversion
+    # ~3.6x (161s vs 44s for a 202-page PDF) while producing no better text
+    # for PDFs that already carry a text layer. Scanned/image-only PDFs will
+    # need text extraction to be added separately if ever required.
     pipeline_options = PdfPipelineOptions()
-    pipeline_options.do_ocr = True  # Enable OCR to handle embedded fonts correctly
+    pipeline_options.do_ocr = False
     pipeline_options.do_table_structure = True
     pipeline_options.generate_picture_images = True  # Extract embedded images from PDF
     pipeline_options.images_scale = 2.0  # Higher resolution images
-    # Configure OCR for Chinese text
-    from docling.datamodel.pipeline_options import OcrOptions, EasyOcrOptions
-    pipeline_options.ocr_options = EasyOcrOptions(lang=['ch_sim', 'en'])
     
     # Use proper FormatOption objects instead of plain dicts
     # Only configure PDF for now; other formats use defaults
