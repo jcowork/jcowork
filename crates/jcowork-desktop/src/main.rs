@@ -388,6 +388,31 @@ async fn main() {
     );
     info!("Background cron executor spawned");
 
+    // ── 14c. Pre-warm the Docling service (PDF/Word parsing & embeddings) ──
+    // Delay 10s so the app window opens first, then start the service in the
+    // background and wait (up to 180s — first run may download models) until
+    // it is healthy. By the time a user uploads a document the service is
+    // already ready instead of cold-starting inline.
+    tokio::spawn(async {
+        match jcowork_storage::DoclingManager::global()
+            .prewarm(
+                std::time::Duration::from_secs(10),
+                std::time::Duration::from_secs(180),
+            )
+            .await
+        {
+            jcowork_storage::PreWarmStatus::AlreadyRunning => {
+                tracing::info!("Docling service already running, skip pre-warm");
+            }
+            jcowork_storage::PreWarmStatus::Ready => {
+                tracing::info!("Docling service pre-warm complete, service is ready");
+            }
+            jcowork_storage::PreWarmStatus::Failed => {
+                tracing::warn!("Docling pre-warm unsuccessful; it will be retried on demand");
+            }
+        }
+    });
+
     // ── 15. Start Axum server on localhost:3000 in background ──
     let addr = "127.0.0.1:3000";
     let listener = match tokio::net::TcpListener::bind(addr).await {

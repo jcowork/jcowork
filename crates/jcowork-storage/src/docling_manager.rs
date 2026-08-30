@@ -24,6 +24,18 @@ pub struct DoclingStatus {
     pub message: String,
 }
 
+/// Outcome of a [`DoclingManager::prewarm`] attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreWarmStatus {
+    /// The service was already healthy before pre-warm started.
+    AlreadyRunning,
+    /// The service was started (or starting) and became healthy.
+    Ready,
+    /// The service could not be started or did not become healthy in time.
+    /// Callers may fall back to on-demand startup.
+    Failed,
+}
+
 /// Manages the Docling service process lifecycle.
 pub struct DoclingManager {
     /// Held while a start attempt is in progress so that concurrent callers
@@ -169,6 +181,26 @@ impl DoclingManager {
         false
     }
 
+    /// Pre-warm the service: after `delay`, ensure it is running and wait
+    /// until it reports healthy (up to `wait_timeout`).
+    ///
+    /// Designed to be spawned as a background task at desktop-app startup so
+    /// the service is ready before the first document upload. Never fails
+    /// hard — returns [`PreWarmStatus`] so on-demand startup can retry.
+    pub async fn prewarm(
+        &self,
+        delay: std::time::Duration,
+        wait_timeout: std::time::Duration,
+    ) -> PreWarmStatus {
+        self.prewarm_with_url(
+            &Self::service_url(),
+            delay,
+            wait_timeout,
+            std::time::Duration::from_secs(3),
+        )
+        .await
+    }
+
     /// Build a [`DoclingStatus`] snapshot for the API.
     pub async fn status(&self) -> DoclingStatus {
         let url = Self::service_url();
@@ -188,6 +220,66 @@ impl DoclingManager {
     // ------------------------------------------------------------------
     // Internals
     // ------------------------------------------------------------------
+
+    /// Pre-warm implementation against an explicit service URL (testable).
+    async fn prewarm_with_url(
+        &self,
+        service_url: &str,
+        delay: std::time::Duration,
+        wait_timeout: std::time::Duration,
+        poll_interval: std::time::Duration,
+    ) -> PreWarmStatus {
+        let start_fn = || {
+            let fut = self.start_background();
+            async move { fut.await }
+        };
+        Self::prewarm_core(service_url, delay, wait_timeout, poll_interval, start_fn).await
+    }
+
+    /// Core pre-warm state machine: delay → health check → start → wait.
+    ///
+    /// The start action is injected so unit tests can verify the polling
+    /// logic without spawning real processes.
+    async fn prewarm_core<F, Fut>(
+        service_url: &str,
+        delay: std::time::Duration,
+        wait_timeout: std::time::Duration,
+        poll_interval: std::time::Duration,
+        start_fn: F,
+    ) -> PreWarmStatus
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+    {
+        tokio::time::sleep(delay).await;
+
+        if Self::check_health(service_url).await {
+            info!(%service_url, "Docling pre-warm: service already running");
+            return PreWarmStatus::AlreadyRunning;
+        }
+
+        if let Err(e) = start_fn().await {
+            warn!(error = %e, "Docling pre-warm failed to start the service");
+            return PreWarmStatus::Failed;
+        }
+
+        // Poll until healthy — first run may download models, so callers
+        // should allow a generous `wait_timeout`.
+        let deadline = tokio::time::Instant::now() + wait_timeout;
+        while tokio::time::Instant::now() < deadline {
+            if Self::check_health(service_url).await {
+                info!(%service_url, "Docling pre-warm complete, service is ready");
+                return PreWarmStatus::Ready;
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+
+        warn!(
+            timeout_secs = wait_timeout.as_secs(),
+            "Docling service did not become healthy during pre-warm; it will be retried on demand"
+        );
+        PreWarmStatus::Failed
+    }
 
     /// Check if the Docling `/health` endpoint responds.
     async fn check_health(service_url: &str) -> bool {
@@ -345,5 +437,161 @@ impl DoclingManager {
             "Docling app.py not found in any expected location"
         );
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    fn ms(n: u64) -> std::time::Duration {
+        std::time::Duration::from_millis(n)
+    }
+
+    /// Spawn a minimal HTTP server on a random port. Every request gets
+    /// `200 OK` while `healthy` is true, `503` otherwise. Returns the base
+    /// URL and a connection counter.
+    async fn spawn_mock_health_server(
+        healthy: Arc<AtomicBool>,
+    ) -> (String, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let req_count = requests.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let healthy = healthy.clone();
+                let req_count = req_count.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 1024];
+                    let _ = stream.read(&mut buf).await;
+                    req_count.fetch_add(1, Ordering::SeqCst);
+                    let (status, body) = if healthy.load(Ordering::SeqCst) {
+                        ("200 OK", r#"{"status":"ok"}"#)
+                    } else {
+                        ("503 Service Unavailable", r#"{"status":"starting"}"#)
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        status,
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+
+        (url, requests)
+    }
+
+    #[tokio::test]
+    async fn prewarm_returns_already_running_when_healthy() {
+        let (url, requests) =
+            spawn_mock_health_server(Arc::new(AtomicBool::new(true))).await;
+        let started = Arc::new(AtomicUsize::new(0));
+        let s = started.clone();
+
+        let status = DoclingManager::prewarm_core(&url, ms(0), ms(500), ms(50), move || {
+            s.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        })
+        .await;
+
+        assert_eq!(status, PreWarmStatus::AlreadyRunning);
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            0,
+            "start must not be called when the service is already healthy"
+        );
+        assert!(requests.load(Ordering::SeqCst) >= 1);
+    }
+
+    #[tokio::test]
+    async fn prewarm_starts_service_and_waits_until_healthy() {
+        let healthy = Arc::new(AtomicBool::new(false));
+        let (url, requests) = spawn_mock_health_server(healthy.clone()).await;
+
+        // Simulate the start action flipping the service to healthy.
+        let h = healthy.clone();
+        let status = DoclingManager::prewarm_core(
+            &url,
+            ms(0),
+            std::time::Duration::from_secs(5),
+            ms(50),
+            move || {
+                h.store(true, Ordering::SeqCst);
+                async { Ok(()) }
+            },
+        )
+        .await;
+
+        assert_eq!(status, PreWarmStatus::Ready);
+        assert!(
+            requests.load(Ordering::SeqCst) >= 2,
+            "expected an initial unhealthy probe plus at least one poll"
+        );
+    }
+
+    #[tokio::test]
+    async fn prewarm_fails_when_service_never_becomes_healthy() {
+        let (url, _requests) =
+            spawn_mock_health_server(Arc::new(AtomicBool::new(false))).await;
+
+        let started_at = std::time::Instant::now();
+        let status = DoclingManager::prewarm_core(&url, ms(0), ms(300), ms(50), || async { Ok(()) }).await;
+
+        assert_eq!(status, PreWarmStatus::Failed);
+        assert!(
+            started_at.elapsed() >= ms(300),
+            "must poll until the wait timeout elapses"
+        );
+    }
+
+    #[tokio::test]
+    async fn prewarm_fails_fast_when_start_errors() {
+        let (url, _requests) =
+            spawn_mock_health_server(Arc::new(AtomicBool::new(false))).await;
+
+        let started_at = std::time::Instant::now();
+        let status = DoclingManager::prewarm_core(
+            &url,
+            ms(0),
+            std::time::Duration::from_secs(30),
+            ms(50),
+            || async { Err::<(), _>(anyhow::anyhow!("venv not found")) },
+        )
+        .await;
+
+        assert_eq!(status, PreWarmStatus::Failed);
+        assert!(
+            started_at.elapsed() < std::time::Duration::from_secs(5),
+            "a start error must fail immediately, not wait out the timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn prewarm_honours_initial_delay() {
+        let (url, _requests) =
+            spawn_mock_health_server(Arc::new(AtomicBool::new(true))).await;
+
+        let started_at = std::time::Instant::now();
+        let status = DoclingManager::prewarm_core(&url, ms(200), ms(500), ms(50), || async { Ok(()) }).await;
+
+        assert_eq!(status, PreWarmStatus::AlreadyRunning);
+        assert!(
+            started_at.elapsed() >= ms(200),
+            "the configured delay must elapse before the first health probe"
+        );
     }
 }
