@@ -1,9 +1,14 @@
 # Docling Service Dependencies
-# Document parsing
-docling>=2.0.0
+#
+# Versions are pinned to a known-good, performance-verified combination.
+# Fresh installs must be deterministic — unpinned upgrades have caused
+# severe regressions (sentence-transformers 6.0: embedding ~20x slower).
 
-# Embeddings
-sentence-transformers>=2.2.0
+# Document parsing
+docling==2.117.0
+
+# Embeddings (6.0 measured ~20x slower than 5.6.1 — do not upgrade blindly)
+sentence-transformers==5.6.1
 
 # Web framework
 fastapi>=0.109.0

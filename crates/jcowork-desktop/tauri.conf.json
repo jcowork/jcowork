@@ -45,7 +45,9 @@
       "web_search.py",
       "../../web/dist/**/*",
       "../../services/docling/app.py",
-      "../../services/docling/requirements.txt"
+      "../../services/docling/requirements.txt",
+      "../../scripts/setup-docling.sh",
+      "../../scripts/setup-docling.ps1"
     ]
   }
 }

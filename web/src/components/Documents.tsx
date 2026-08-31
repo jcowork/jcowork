@@ -273,12 +273,12 @@ export default function Documents({ token }: DocumentsProps) {
     setUploading(true);
     setStatusMessage('');
     try {
-      // Check if any PDF files are being uploaded
-      const hasPdf = Array.from(files).some(f =>
-        f.name.toLowerCase().endsWith('.pdf')
+      // Check if any files need Docling parsing (PDF / Word)
+      const needsDocling = Array.from(files).some(f =>
+        /\.(pdf|doc|docx)$/i.test(f.name)
       );
 
-      if (hasPdf) {
+      if (needsDocling) {
         // Check Docling service status
         setStatusMessage(t('doclingChecking'));
         try {
@@ -288,44 +288,63 @@ export default function Documents({ token }: DocumentsProps) {
           if (statusRes.ok) {
             const status = await statusRes.json();
             if (!status.running) {
-              // Start Docling service
-              setStatusMessage(t('doclingStarting'));
-              const startRes = await fetch('/api/docling/start', {
-                method: 'POST',
-                headers: { Authorization: `Bearer ${token}` },
-              });
-              if (startRes.ok) {
-                // Poll until service is ready
-                const maxWait = 180000; // 3 minutes
-                const pollInterval = 3000;
-                const start = Date.now();
-                let ready = false;
-                while (Date.now() - start < maxWait) {
-                  await new Promise(r => setTimeout(r, pollInterval));
-                  try {
-                    const pollRes = await fetch('/api/docling/status', {
-                      headers: { Authorization: `Bearer ${token}` },
-                    });
-                    if (pollRes.ok) {
-                      const pollStatus = await pollRes.json();
-                      if (pollStatus.running) {
-                        ready = true;
-                        break;
+              if (status.setup === 'installing') {
+                // Fresh install: dependencies are being installed in the
+                // background. Do not block — proceed with the upload; parsing
+                // will fail gracefully until installation completes.
+                setStatusMessage(t('doclingInstalling'));
+              } else if (status.setup === 'failed') {
+                setStatusMessage(t('doclingSetupFailed'));
+              } else {
+                // Start Docling service
+                setStatusMessage(t('doclingStarting'));
+                const startRes = await fetch('/api/docling/start', {
+                  method: 'POST',
+                  headers: { Authorization: `Bearer ${token}` },
+                });
+                if (startRes.ok) {
+                  // Poll until service is ready
+                  const maxWait = 180000; // 3 minutes
+                  const pollInterval = 3000;
+                  const start = Date.now();
+                  let ready = false;
+                  let installing = false;
+                  while (Date.now() - start < maxWait) {
+                    await new Promise(r => setTimeout(r, pollInterval));
+                    try {
+                      const pollRes = await fetch('/api/docling/status', {
+                        headers: { Authorization: `Bearer ${token}` },
+                      });
+                      if (pollRes.ok) {
+                        const pollStatus = await pollRes.json();
+                        if (pollStatus.running) {
+                          ready = true;
+                          break;
+                        }
+                        if (pollStatus.setup === 'installing') {
+                          // Dependency install takes longer than the wait
+                          // window — keep the upload flowing.
+                          installing = true;
+                          break;
+                        }
                       }
-                    }
-                  } catch { /* keep polling */ }
-                }
-                if (!ready) {
-                  setStatusMessage(t('doclingStartFailed'));
+                    } catch { /* keep polling */ }
+                  }
+                  if (installing) {
+                    setStatusMessage(t('doclingInstalling'));
+                  } else if (!ready) {
+                    setStatusMessage(t('doclingStartFailed'));
+                    setUploading(false);
+                    return;
+                  } else {
+                    setStatusMessage(t('doclingReady'));
+                  }
+                } else {
+                  const errData = await startRes.json().catch(() => null);
+                  setStatusMessage(`${t('doclingStartFailed')}: ${errData?.message || 'unknown error'}`);
                   setUploading(false);
                   return;
                 }
-                setStatusMessage(t('doclingReady'));
-              } else {
-                const errData = await startRes.json().catch(() => null);
-                setStatusMessage(`${t('doclingStartFailed')}: ${errData?.message || 'unknown error'}`);
-                setUploading(false);
-                return;
               }
             }
           }

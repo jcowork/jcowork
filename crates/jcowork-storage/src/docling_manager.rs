@@ -9,6 +9,7 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
@@ -22,6 +23,8 @@ pub struct DoclingStatus {
     pub starting: bool,
     pub service_url: String,
     pub message: String,
+    /// Python environment bootstrap state (fresh installs).
+    pub setup: SetupState,
 }
 
 /// Outcome of a [`DoclingManager::prewarm`] attempt.
@@ -36,11 +39,57 @@ pub enum PreWarmStatus {
     Failed,
 }
 
+/// State of the Python environment bootstrap (venv + dependencies).
+///
+/// On a fresh install the venv does not exist yet; the app runs
+/// `scripts/setup-docling.sh` in the background so that chat and the rest of
+/// the app keep working while dependencies are downloaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SetupState {
+    /// The venv and dependencies are already present.
+    NotNeeded,
+    /// Setup has not been triggered yet.
+    NotStarted,
+    /// Setup script is currently running.
+    Installing,
+    /// Setup finished successfully.
+    Done,
+    /// Setup failed; it will be retried on the next trigger.
+    Failed,
+}
+
+impl SetupState {
+    fn as_u8(self) -> u8 {
+        match self {
+            SetupState::NotNeeded => 0,
+            SetupState::NotStarted => 1,
+            SetupState::Installing => 2,
+            SetupState::Done => 3,
+            SetupState::Failed => 4,
+        }
+    }
+
+    fn from_u8(v: u8) -> Self {
+        match v {
+            0 => SetupState::NotNeeded,
+            2 => SetupState::Installing,
+            3 => SetupState::Done,
+            4 => SetupState::Failed,
+            _ => SetupState::NotStarted,
+        }
+    }
+}
+
 /// Manages the Docling service process lifecycle.
 pub struct DoclingManager {
     /// Held while a start attempt is in progress so that concurrent callers
     /// serialise instead of spawning duplicate processes.
     start_lock: Mutex<()>,
+    /// Held while the dependency setup script is running.
+    setup_lock: Mutex<()>,
+    /// Current [`SetupState`] (atomic so it can be read without a lock).
+    setup_state: AtomicU8,
 }
 
 impl DoclingManager {
@@ -48,6 +97,8 @@ impl DoclingManager {
     pub fn new() -> Self {
         Self {
             start_lock: Mutex::new(()),
+            setup_lock: Mutex::new(()),
+            setup_state: AtomicU8::new(SetupState::NotStarted.as_u8()),
         }
     }
 
@@ -88,6 +139,20 @@ impl DoclingManager {
         // Another caller may have started it while we waited for the lock.
         if Self::check_health(&Self::service_url()).await {
             return Ok(());
+        }
+
+        // Python environment missing? Kick off dependency setup in the
+        // background and fail fast instead of hanging the caller for minutes.
+        if self.setup_needed() {
+            if self.setup_state() == SetupState::Installing {
+                anyhow::bail!(
+                    "Docling dependencies are being installed in the background; document parsing will be available in a few minutes"
+                );
+            }
+            Self::global().spawn_setup_and_service();
+            anyhow::bail!(
+                "Docling dependencies are being installed in the background; document parsing will be available in a few minutes"
+            );
         }
 
         // Locate prerequisites.
@@ -165,6 +230,242 @@ impl DoclingManager {
         Ok(())
     }
 
+    // ------------------------------------------------------------------
+    // Python environment bootstrap (first-launch dependency install)
+    // ------------------------------------------------------------------
+
+    /// Current setup state. Returns [`SetupState::NotNeeded`] when the venv
+    /// and dependencies are already present, regardless of stored state.
+    pub fn setup_state(&self) -> SetupState {
+        if !self.setup_needed() {
+            return SetupState::NotNeeded;
+        }
+        SetupState::from_u8(self.setup_state.load(Ordering::SeqCst))
+    }
+
+    /// True when the Python venv or the setup marker is missing.
+    ///
+    /// Venvs created manually (before this bootstrap existed) have no marker;
+    /// a fast package check (~100ms) detects them and retro-fits the marker
+    /// so no redundant install is triggered.
+    pub fn setup_needed(&self) -> bool {
+        let Some(python) = self.find_python_venv() else {
+            return true;
+        };
+        // python lives at <venv>/bin/python (or <venv>/Scripts/python.exe),
+        // the marker sits in the venv root.
+        let Some(venv_dir) = python.parent().and_then(|p| p.parent()) else {
+            return true;
+        };
+        let marker = venv_dir.join(".docling-setup-ok");
+        if marker.exists() {
+            return false;
+        }
+
+        // No marker: check whether the required packages are already present
+        // (hand-built venv). If so, retro-fit the marker.
+        if Self::venv_has_docling_packages(&python) {
+            let _ = std::fs::write(&marker, "pre-existing environment");
+            info!("Detected pre-existing Docling Python environment; marker written");
+            return false;
+        }
+        true
+    }
+
+    /// Quick (~100ms) check that docling + sentence-transformers are
+    /// installed in the given interpreter.
+    fn venv_has_docling_packages(python: &std::path::Path) -> bool {
+        let check = r#"
+from importlib.metadata import distributions
+names = {d.metadata['Name'].lower().replace('-', '_') for d in distributions()}
+exit(0 if 'docling' in names and 'sentence_transformers' in names else 1)
+"#;
+        std::process::Command::new(python)
+            .args(["-c", check])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// Ensure the Python environment is set up, running the bootstrap
+    /// script if necessary. Serialised by `setup_lock`; concurrent callers
+    /// wait for the in-flight install instead of starting another one.
+    ///
+    /// NOTE: this can take several minutes on first run (pip downloads).
+    /// Only await it from background tasks; request handlers should use
+    /// [`spawn_setup_and_service`] and fail fast.
+    pub async fn ensure_setup(&self) -> Result<()> {
+        if !self.setup_needed() {
+            return Ok(());
+        }
+
+        let _guard = self.setup_lock.lock().await;
+        if !self.setup_needed() {
+            return Ok(());
+        }
+
+        self.setup_state
+            .store(SetupState::Installing.as_u8(), Ordering::SeqCst);
+        match self.run_setup().await {
+            Ok(()) => {
+                self.setup_state.store(SetupState::Done.as_u8(), Ordering::SeqCst);
+                info!("Docling dependency setup completed");
+                Ok(())
+            }
+            Err(e) => {
+                self.setup_state
+                    .store(SetupState::Failed.as_u8(), Ordering::SeqCst);
+                Err(e)
+            }
+        }
+    }
+
+    /// Start the service, installing dependencies first when missing.
+    /// Used by the startup pre-warm where waiting is acceptable.
+    pub async fn start_with_setup(&self) -> Result<()> {
+        if self.setup_needed() {
+            info!("Docling Python environment missing — installing dependencies first");
+            self.ensure_setup()
+                .await
+                .context("Docling dependency setup failed")?;
+        }
+        self.start_background().await
+    }
+
+    /// Spawn a background task that sets up dependencies (if needed) and
+    /// then starts the service. Returns immediately — safe for request
+    /// handlers and startup paths that must not block.
+    pub fn spawn_setup_and_service(&'static self) {
+        tokio::spawn(async move {
+            if let Err(e) = self.start_with_setup().await {
+                warn!(error = %e, "Docling background setup/start failed");
+            }
+        });
+    }
+
+    /// Run the bootstrap script and wait for it to finish.
+    /// Output is appended to `~/.jcowork/logs/docling-setup.log`.
+    async fn run_setup(&self) -> Result<()> {
+        let script = self
+            .find_setup_script()
+            .context("setup-docling script not found in any expected location")?;
+
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| "/tmp".to_string());
+        let log_dir = format!("{}/.jcowork/logs", home);
+        std::fs::create_dir_all(&log_dir).ok();
+        let log_path = format!("{}/docling-setup.log", log_dir);
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .context("Failed to open docling-setup log file")?;
+        let err_file = log_file.try_clone().context("Failed to clone log file")?;
+
+        let mut cmd = if script.extension().is_some_and(|e| e == "ps1") {
+            let mut c = std::process::Command::new("powershell");
+            c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
+            c.arg(&script);
+            c
+        } else {
+            let mut c = std::process::Command::new("bash");
+            c.arg(&script);
+            c
+        };
+
+        info!(script = %script.display(), "Running Docling dependency setup");
+        let mut child = cmd
+            .stdout(std::process::Stdio::from(log_file))
+            .stderr(std::process::Stdio::from(err_file))
+            .spawn()
+            .context("Failed to spawn setup script")?;
+
+        // Poll instead of blocking a runtime thread.
+        loop {
+            match child.try_wait().context("Failed to poll setup script")? {
+                Some(status) if status.success() => return Ok(()),
+                Some(status) => {
+                    anyhow::bail!(
+                        "Docling dependency setup failed (exit {}); see {}",
+                        status,
+                        log_path
+                    );
+                }
+                None => tokio::time::sleep(std::time::Duration::from_secs(2)).await,
+            }
+        }
+    }
+
+    /// Locate the bundled bootstrap script (`scripts/setup-docling.sh|ps1`).
+    fn find_setup_script(&self) -> Option<PathBuf> {
+        let name = if cfg!(windows) {
+            "scripts/setup-docling.ps1"
+        } else {
+            "scripts/setup-docling.sh"
+        };
+        self.find_resource_path(name)
+    }
+
+    /// Find a project-relative resource file, checking Tauri bundle layouts
+    /// first, then dev/repo layouts relative to the executable and cwd.
+    fn find_resource_path(&self, rel_path: &str) -> Option<PathBuf> {
+        let mut searched = Vec::new();
+
+        if let Some(exe) = std::env::current_exe().ok() {
+            if let Some(exe_dir) = exe.parent() {
+                if let Some(contents) = exe_dir.parent() {
+                    let res = contents.join("Resources");
+                    // Tauri encodes ".." as "_up_" in resource paths
+                    for base in [
+                        res.join("_up_/_up_"),
+                        res.clone(),
+                    ] {
+                        let p = base.join(rel_path);
+                        searched.push(p.clone());
+                        if p.exists() {
+                            return Some(p);
+                        }
+                    }
+                }
+                // Dev build: exe at target/{profile}/jcowork-desktop
+                if let Some(project_root) = exe_dir.parent().and_then(|p| p.parent()) {
+                    let p = project_root.join(rel_path);
+                    searched.push(p.clone());
+                    if p.exists() {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+
+        if let Ok(cwd) = std::env::current_dir() {
+            let p = cwd.join(rel_path);
+            searched.push(p.clone());
+            if p.exists() {
+                return Some(p);
+            }
+            let mut dir = cwd.as_path();
+            while let Some(parent) = dir.parent() {
+                let p = parent.join(rel_path);
+                searched.push(p.clone());
+                if p.exists() {
+                    return Some(p);
+                }
+                dir = parent;
+            }
+        }
+
+        warn!(
+            rel_path,
+            searched = ?searched.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+            "Resource not found in any expected location"
+        );
+        None
+    }
+
     /// Poll `/health` until the service is healthy or timeout.
     pub async fn wait_healthy(
         &self,
@@ -205,15 +506,20 @@ impl DoclingManager {
     pub async fn status(&self) -> DoclingStatus {
         let url = Self::service_url();
         let running = Self::check_health(&url).await;
+        let setup = self.setup_state();
+        let message = if running {
+            "Docling service is running".to_string()
+        } else if setup == SetupState::Installing {
+            "Docling dependencies are being installed in the background".to_string()
+        } else {
+            "Docling service is not running".to_string()
+        };
         DoclingStatus {
             running,
             starting: !running && self.start_lock.try_lock().is_err(),
             service_url: url,
-            message: if running {
-                "Docling service is running".to_string()
-            } else {
-                "Docling service is not running".to_string()
-            },
+            message,
+            setup,
         }
     }
 
@@ -230,7 +536,9 @@ impl DoclingManager {
         poll_interval: std::time::Duration,
     ) -> PreWarmStatus {
         let start_fn = || {
-            let fut = self.start_background();
+            // Includes dependency bootstrap on fresh installs — acceptable
+            // here because pre-warm runs as a detached background task.
+            let fut = self.start_with_setup();
             async move { fut.await }
         };
         Self::prewarm_core(service_url, delay, wait_timeout, poll_interval, start_fn).await
@@ -592,6 +900,85 @@ mod tests {
         assert!(
             started_at.elapsed() >= ms(200),
             "the configured delay must elapse before the first health probe"
+        );
+    }
+
+    #[test]
+    fn setup_state_u8_roundtrip() {
+        for s in [
+            SetupState::NotNeeded,
+            SetupState::NotStarted,
+            SetupState::Installing,
+            SetupState::Done,
+            SetupState::Failed,
+        ] {
+            assert_eq!(SetupState::from_u8(s.as_u8()), s);
+        }
+    }
+
+    #[test]
+    fn setup_state_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&SetupState::Installing).unwrap(),
+            "\"installing\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SetupState::NotNeeded).unwrap(),
+            "\"not_needed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SetupState::Failed).unwrap(),
+            "\"failed\""
+        );
+    }
+
+    #[test]
+    fn setup_needed_depends_on_venv_and_marker() {
+        // Fresh "machine": empty HOME-like directory -> no venv -> needed.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let saved_home = std::env::var("HOME").ok();
+        // SAFETY: single-threaded test; restored before returning. Kept in a
+        // separate #[test] that does not touch HOME anywhere else.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+
+        let manager = DoclingManager::new();
+        assert!(manager.setup_needed(), "no venv => setup needed");
+        assert_eq!(manager.setup_state(), SetupState::NotStarted);
+
+        // venv python present but no marker -> still needed.
+        let venv_bin = tmp.path().join(".jcowork/venv/bin");
+        std::fs::create_dir_all(&venv_bin).unwrap();
+        std::fs::write(venv_bin.join("python"), "").unwrap();
+        assert!(manager.setup_needed(), "no marker => setup needed");
+
+        // Marker present -> not needed, state reports NotNeeded.
+        std::fs::write(tmp.path().join(".jcowork/venv/.docling-setup-ok"), "")
+            .unwrap();
+        assert!(!manager.setup_needed(), "marker => setup done");
+        assert_eq!(manager.setup_state(), SetupState::NotNeeded);
+
+        // Restore HOME.
+        match saved_home {
+            Some(h) => unsafe { std::env::set_var("HOME", h) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    fn find_setup_script_locates_repo_script() {
+        // Tests run with cwd inside the workspace, so walking up from cwd
+        // must find scripts/setup-docling.sh in the repo root.
+        let manager = DoclingManager::new();
+        let script = manager.find_setup_script();
+        assert!(
+            script.is_some(),
+            "setup-docling script must be discoverable from the workspace"
+        );
+        let path = script.unwrap();
+        assert!(
+            path.to_string_lossy().contains("scripts"),
+            "unexpected path: {}",
+            path.display()
         );
     }
 }

@@ -547,6 +547,7 @@ pub(crate) async fn get_docling_status() -> impl IntoResponse {
         "starting": status.starting,
         "service_url": status.service_url,
         "message": status.message,
+        "setup": status.setup,
     }))).into_response()
 }
 
@@ -560,6 +561,16 @@ pub(crate) async fn start_docling_service() -> impl IntoResponse {
         return (StatusCode::OK, Json(serde_json::json!({
             "ok": true,
             "message": "Docling service is already running",
+        }))).into_response();
+    }
+
+    // Fresh install: dependencies missing — kick off background setup
+    // instead of failing, and tell the client to keep polling.
+    if manager.setup_needed() {
+        jcowork_storage::DoclingManager::global().spawn_setup_and_service();
+        return (StatusCode::OK, Json(serde_json::json!({
+            "ok": true,
+            "message": "Docling dependencies are being installed in the background; poll /api/docling/status for progress",
         }))).into_response();
     }
 

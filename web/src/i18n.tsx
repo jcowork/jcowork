@@ -83,6 +83,8 @@ const translations = {
     doclingReady: 'Docling 服务已就绪',
     doclingStartFailed: 'Docling 服务启动失败',
     doclingChecking: '正在检查 Docling 服务...',
+    doclingInstalling: '首次使用：正在后台安装文档解析依赖（需联网），不影响对话；安装完成前文档索引暂不可用',
+    doclingSetupFailed: '文档解析依赖安装失败，请检查网络后重启应用重试',
     pdfParsing: 'PDF 正在解析中...',
 
     // Schedule
@@ -386,6 +388,8 @@ const translations = {
     doclingReady: 'Docling service is ready',
     doclingStartFailed: 'Docling service failed to start',
     doclingChecking: 'Checking Docling service...',
+    doclingInstalling: 'First run: installing document parsing dependencies in the background (needs internet). Chat is unaffected; document indexing is unavailable until installation finishes',
+    doclingSetupFailed: 'Document parsing dependency installation failed. Check your network and restart the app to retry',
     pdfParsing: 'PDF is being parsed...',
 
     // Schedule

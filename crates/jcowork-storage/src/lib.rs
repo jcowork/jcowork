@@ -18,7 +18,7 @@ pub use cron_store::CronJobStore;
 pub use doc_chunker::{DocChunk, chunk_markdown};
 pub use embedding_client::{EmbeddingClient, cosine_similarity, embedding_to_bytes, bytes_to_embedding};
 pub use feishu_store::FeishuConfigStore;
-pub use docling_manager::{DoclingManager, DoclingStatus, PreWarmStatus};
+pub use docling_manager::{DoclingManager, DoclingStatus, PreWarmStatus, SetupState};
 pub use file_store::FileStore;
 pub use user_store::UserStore;
 pub use vector_index::VectorIndex;
