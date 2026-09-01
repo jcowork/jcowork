@@ -641,8 +641,14 @@ export default function Documents({ token }: DocumentsProps) {
   const openInNewTab = (filePath: string) => {
     const url = `${API_BASE}/api/workspace/download?path=${encodeURIComponent(filePath)}&token=${encodeURIComponent(token)}`;
     // In Tauri WebView, use native command to open in system browser
-    if ((window as any).__TAURI__) {
-      (window as any).__TAURI__.core.invoke('open_in_browser', { url });
+    const tauri = (window as any).__TAURI__;
+    if (tauri) {
+      // IPC calls can be rejected by the Tauri ACL (e.g. missing remote
+      // capability) — surface the error instead of failing silently.
+      tauri.core.invoke('open_in_browser', { url }).catch((err: unknown) => {
+        console.error('open_in_browser failed:', err);
+        setStatusMessage(`Failed to open in browser: ${err}`);
+      });
     } else {
       window.open(url, '_blank');
     }

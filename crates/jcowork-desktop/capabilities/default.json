@@ -2,7 +2,11 @@
   "identifier": "default",
   "description": "Default capabilities for Jcowork desktop",
   "windows": ["main"],
+  "remote": {
+    "urls": ["http://localhost:*"]
+  },
   "permissions": [
-    "core:default"
+    "core:default",
+    "allow-open-in-browser"
   ]
 }
