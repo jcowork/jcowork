@@ -248,21 +248,32 @@ impl LlmRouter {
     }
 
     /// Get a provider by model string (format: "provider:model" or just "model").
+    ///
+    /// The model part of the string is applied to the returned provider via
+    /// [`LlmProvider::with_model`] — providers are registered with their
+    /// default model only, so without this the user's model selection would
+    /// be silently ignored and every request would use the default model.
     pub fn get_provider(&self, model: &str) -> Result<Arc<dyn LlmProvider>> {
-        let provider_name = if let Some(colon_pos) = model.find(':') {
-            &model[..colon_pos]
-        } else {
-            "openai" // default provider
+        let (provider_name, model_name) = match model.find(':') {
+            Some(colon_pos) => (&model[..colon_pos], &model[colon_pos + 1..]),
+            None => ("openai", model),
         };
 
-        self.providers
+        let provider = self
+            .providers
             .get(provider_name)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!(
                 "Unknown provider '{}'. Available: {}. Set the corresponding API key env var to enable it.",
                 provider_name,
                 self.available_providers().join(", ")
-            ))
+            ))?;
+
+        if model_name.is_empty() {
+            Ok(provider)
+        } else {
+            Ok(provider.with_model(model_name))
+        }
     }
 
     /// Extract just the model name from a "provider:model" string.

@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use reqwest::Client;
 use serde::Deserialize;
+use std::sync::Arc;
 
 use crate::provider::{
     ChatMessage, ChatResponse, ChatStream, FunctionCall, LlmProvider, StreamChunk, ToolCall,
@@ -247,6 +248,12 @@ impl LlmProvider for OpenAiProvider {
 
     fn context_length(&self) -> usize {
         self.config.context_length
+    }
+
+    fn with_model(&self, model: &str) -> Arc<dyn LlmProvider> {
+        let mut config = self.config.clone();
+        config.model = model.to_string();
+        Arc::new(Self::new(config))
     }
 }
 

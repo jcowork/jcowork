@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
+use std::sync::Arc;
 
 /// A single message in a chat conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,6 +105,14 @@ pub trait LlmProvider: Send + Sync {
 
     /// Get the model's context length.
     fn context_length(&self) -> usize;
+
+    /// Return a provider instance that uses the given model.
+    ///
+    /// Providers are registered per provider id with a default model; the
+    /// requested model from a "provider:model" string must be applied via
+    /// this method, otherwise every request falls back to the provider's
+    /// default model regardless of the user's selection.
+    fn with_model(&self, model: &str) -> Arc<dyn LlmProvider>;
 }
 
 /// Mock LLM provider for testing.
@@ -181,5 +190,10 @@ impl LlmProvider for MockLlmProvider {
 
     fn context_length(&self) -> usize {
         self.context_len
+    }
+
+    fn with_model(&self, _model: &str) -> Arc<dyn LlmProvider> {
+        // Mock ignores model selection
+        Arc::new(Self::with_context_length(self.context_len))
     }
 }
