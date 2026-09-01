@@ -62,5 +62,27 @@ Write-Host "Installing Docling service dependencies (this may take several minut
 & $VenvPython -m pip install --quiet -r $ReqFile
 if ($LASTEXITCODE -ne 0) { throw "Failed to install dependencies" }
 
+# Non-Docling tool dependencies that share this venv:
+# playwright -> web_search tool, pdftext -> pdf_parse tool.
+Write-Host "Installing tool dependencies (playwright, pdftext)..."
+& $VenvPython -m pip install --quiet playwright pdftext
+if ($LASTEXITCODE -ne 0) { throw "Failed to install tool dependencies" }
+
+# web_search.py prefers the system Chrome; only download Playwright's
+# Chromium when no system browser is available.
+$ChromeCandidates = @(
+    "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
+    "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
+    "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe",
+    "$env:ProgramFiles\Chromium\Application\chrome.exe"
+)
+$HasChrome = $false
+foreach ($c in $ChromeCandidates) { if (Test-Path $c) { $HasChrome = $true; break } }
+if (-not $HasChrome) {
+    Write-Host "System Chrome not found - downloading Playwright Chromium..."
+    & $VenvPython -m playwright install chromium
+    if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: Chromium download failed; web_search needs Chrome" }
+}
+
 New-Item -ItemType File -Force -Path $Marker | Out-Null
 Write-Host "=== Docling Python environment ready: $VenvDir ==="

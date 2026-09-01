@@ -67,5 +67,23 @@ echo "Upgrading pip..."
 echo "Installing Docling service dependencies (this may take several minutes)..."
 "${VENV_DIR}/bin/python" -m pip install --quiet -r "${REQ_FILE}"
 
+# Non-Docling tool dependencies that share this venv:
+# playwright -> web_search tool, pdftext -> pdf_parse tool.
+# They are not part of the Docling requirements (which stay pinned for
+# determinism), but missing them breaks the tools at runtime.
+echo "Installing tool dependencies (playwright, pdftext)..."
+"${VENV_DIR}/bin/python" -m pip install --quiet playwright pdftext
+
+# web_search.py prefers the system Chrome/Chromium; only download
+# Playwright's Chromium when no system browser is available.
+if [ ! -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ] && \
+   [ ! -x "/Applications/Chromium.app/Contents/MacOS/Chromium" ] && \
+   ! command -v google-chrome &>/dev/null && \
+   ! command -v chromium &>/dev/null && \
+   ! command -v chromium-browser &>/dev/null; then
+    echo "System Chrome not found — downloading Playwright Chromium..."
+    "${VENV_DIR}/bin/playwright" install chromium || echo "WARNING: Chromium download failed; web_search needs Chrome"
+fi
+
 touch "${MARKER}"
 echo "=== Docling Python environment ready: ${VENV_DIR} ==="
