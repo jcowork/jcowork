@@ -16,11 +16,11 @@
     "name": "Moonshot",
     "env_key": "MOONSHOT_API_KEY",
     "base_url": "https://api.moonshot.cn/v1",
-    "default_model": "kimi-k2.5",
+    "default_model": "kimi-k2.6",
     "context_length": 256000,
     "models": [
-      { "id": "kimi-k2.5", "name": "Kimi K2.5", "context_length": 256000 },
-      { "id": "kimi-k2.6", "name": "Kimi K2.6", "context_length": 256000 }
+      { "id": "kimi-k2.6", "name": "Kimi K2.6", "context_length": 256000 },
+      { "id": "kimi-k3", "name": "Kimi K3", "context_length": 1000000 }
     ]
   },
   {
