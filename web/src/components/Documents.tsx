@@ -166,6 +166,100 @@ export default function Documents({ token }: DocumentsProps) {
   const [editDirty, setEditDirty] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  // Render document content as styled Markdown. Shared by PDF (extracted
+  // text) and .md file preview. Images are resolved per document type:
+  // PDF images go through the doc/image proxy; markdown relative images
+  // resolve against the workspace download API.
+  const renderMarkdownPreview = (content: string, filePath: string): React.ReactNode => {
+    const isPdf = filePath.toLowerCase().endsWith('.pdf');
+    const fileDir = filePath.includes('/') ? filePath.substring(0, filePath.lastIndexOf('/')) : '';
+    return (
+      <div className="pdf-markdown-preview" style={{
+        fontSize: 14,
+        lineHeight: 1.7,
+        color: '#c9d1d9',
+      }}>
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          components={{
+            img: ({ node, src, alt, ...props }) => {
+              if (!isPdf && src && (src.startsWith('http') || src.startsWith('data:'))) {
+                // External / inline image: render directly, no auth needed
+                return (
+                  <img src={src} alt={alt || 'Document image'} style={{ maxWidth: '100%', height: 'auto', borderRadius: 6, margin: '12px 0' }} {...props} />
+                );
+              }
+              // PDF: proxy through doc/image endpoint; MD: resolve relative
+              // path against the workspace download API with Bearer token
+              const filename = src ? src.split('/').pop() : '';
+              const url = isPdf
+                ? `/api/workspace/doc/image?file_path=${encodeURIComponent(filePath)}&filename=${encodeURIComponent(filename || '')}`
+                : `/api/workspace/download?path=${encodeURIComponent(fileDir && src ? `${fileDir}/${src}` : (src || ''))}`;
+              return <AuthImage src={url} token={token} alt={alt || 'Document image'} {...props} />;
+            },
+            table: ({ children, ...props }) => (
+              <div style={{ overflow: 'auto', border: '1px solid #333', borderRadius: 6, margin: '12px 0' }}>
+                <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 13 }} {...props}>
+                  {children}
+                </table>
+              </div>
+            ),
+            th: ({ children, ...props }) => (
+              <th style={{
+                padding: '6px 12px', borderBottom: '1px solid #333',
+                background: '#161b22', textAlign: 'left', color: '#c9d1d9', fontWeight: 600,
+              }} {...props}>
+                {children}
+              </th>
+            ),
+            td: ({ children, ...props }) => (
+              <td style={{ padding: '4px 12px', borderTop: '1px solid #21262d', color: '#c9d1d9' }} {...props}>
+                {children}
+              </td>
+            ),
+            h1: ({ children, ...props }) => (
+              <h1 style={{ fontSize: 24, fontWeight: 700, color: '#e6edf3', borderBottom: '1px solid #333', paddingBottom: 8, marginTop: 24 }} {...props}>
+                {children}
+              </h1>
+            ),
+            h2: ({ children, ...props }) => (
+              <h2 style={{ fontSize: 20, fontWeight: 600, color: '#e6edf3', borderBottom: '1px solid #333', paddingBottom: 6, marginTop: 20 }} {...props}>
+                {children}
+              </h2>
+            ),
+            h3: ({ children, ...props }) => (
+              <h3 style={{ fontSize: 16, fontWeight: 600, color: '#e6edf3', marginTop: 16 }} {...props}>
+                {children}
+              </h3>
+            ),
+            code: ({ children, ...props }) => (
+              <code style={{ background: '#161b22', padding: '2px 6px', borderRadius: 4, fontSize: '0.9em', color: '#f0883e' }} {...props}>
+                {children}
+              </code>
+            ),
+            pre: ({ children, ...props }) => (
+              <pre style={{ background: '#161b22', padding: 12, borderRadius: 6, overflow: 'auto', fontSize: 13 }} {...props}>
+                {children}
+              </pre>
+            ),
+            blockquote: ({ children, ...props }) => (
+              <blockquote style={{ borderLeft: '3px solid #1f6feb', paddingLeft: 16, margin: '12px 0', color: '#8b949e' }} {...props}>
+                {children}
+              </blockquote>
+            ),
+            a: ({ children, ...props }) => (
+              <a style={{ color: '#58a6ff', textDecoration: 'none' }} {...props}>
+                {children}
+              </a>
+            ),
+          }}
+        >
+          {content}
+        </ReactMarkdown>
+      </div>
+    );
+  };
+
   const isEditableFile = (path: string) => {
     const ext = path.split('.').pop()?.toLowerCase();
     return ext === 'html' || ext === 'htm' || ext === 'md' || ext === 'txt' || ext === 'csv';
@@ -1112,6 +1206,12 @@ export default function Documents({ token }: DocumentsProps) {
                     background: '#1f6feb', color: '#fff', fontWeight: 600, flexShrink: 0,
                   }}>EXCEL → SQLITE</span>
                 )}
+                {previewPath.toLowerCase().endsWith('.md') && (
+                  <span style={{
+                    fontSize: 10, padding: '1px 6px', borderRadius: 3,
+                    background: '#8957e5', color: '#fff', fontWeight: 600, flexShrink: 0,
+                  }}>MARKDOWN</span>
+                )}
                 {previewPath}
               </span>
               <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
@@ -1153,7 +1253,7 @@ export default function Documents({ token }: DocumentsProps) {
                   </>
                 ) : (
                   <>
-                    {previewPath.endsWith('.html') && (
+                    {(previewPath.endsWith('.html') || previewPath.toLowerCase().endsWith('.md')) && (
                       <>
                         <div style={{ display: 'flex', borderRadius: 4, border: '1px solid #555', overflow: 'hidden' }}>
                           <button
@@ -1186,20 +1286,22 @@ export default function Documents({ token }: DocumentsProps) {
                             {t('source')}
                           </button>
                         </div>
-                        <button
-                          onClick={() => openInNewTab(previewPath)}
-                          style={{
-                            padding: '3px 10px',
-                            borderRadius: 4,
-                            border: '1px solid #1f6feb',
-                            background: 'transparent',
-                            color: '#58a6ff',
-                            cursor: 'pointer',
-                            fontSize: 12,
-                          }}
-                        >
-                          {t('openInBrowser')}
-                        </button>
+                        {previewPath.endsWith('.html') && (
+                          <button
+                            onClick={() => openInNewTab(previewPath)}
+                            style={{
+                              padding: '3px 10px',
+                              borderRadius: 4,
+                              border: '1px solid #1f6feb',
+                              background: 'transparent',
+                              color: '#58a6ff',
+                              cursor: 'pointer',
+                              fontSize: 12,
+                            }}
+                          >
+                            {t('openInBrowser')}
+                          </button>
+                        )}
                       </>
                     )}
                     {isEditableFile(previewPath) && (
@@ -1346,83 +1448,15 @@ export default function Documents({ token }: DocumentsProps) {
                 renderChunksPreview(docChunks)
               ) : previewPath.endsWith('.pdf') ? (
                 // PDF content: render as Markdown with image support
-                <div className="pdf-markdown-preview" style={{
-                  fontSize: 14,
-                  lineHeight: 1.7,
-                  color: '#c9d1d9',
-                }}>
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm]}
-                    components={{
-                      img: ({ node, src, alt, ...props }) => {
-                        // Use AuthImage component to load images with Bearer token
-                        const filename = src ? src.split('/').pop() : '';
-                        const proxyUrl = `/api/workspace/doc/image?file_path=${encodeURIComponent(previewPath || '')}&filename=${encodeURIComponent(filename || '')}`;
-                        return <AuthImage src={proxyUrl} token={token} alt={alt || 'Document image'} {...props} />;
-                      },
-                      table: ({ children, ...props }) => (
-                        <div style={{ overflow: 'auto', border: '1px solid #333', borderRadius: 6, margin: '12px 0' }}>
-                          <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 13 }} {...props}>
-                            {children}
-                          </table>
-                        </div>
-                      ),
-                      th: ({ children, ...props }) => (
-                        <th style={{
-                          padding: '6px 12px', borderBottom: '1px solid #333',
-                          background: '#161b22', textAlign: 'left', color: '#c9d1d9', fontWeight: 600,
-                        }} {...props}>
-                          {children}
-                        </th>
-                      ),
-                      td: ({ children, ...props }) => (
-                        <td style={{ padding: '4px 12px', borderTop: '1px solid #21262d', color: '#c9d1d9' }} {...props}>
-                          {children}
-                        </td>
-                      ),
-                      h1: ({ children, ...props }) => (
-                        <h1 style={{ fontSize: 24, fontWeight: 700, color: '#e6edf3', borderBottom: '1px solid #333', paddingBottom: 8, marginTop: 24 }} {...props}>
-                          {children}
-                        </h1>
-                      ),
-                      h2: ({ children, ...props }) => (
-                        <h2 style={{ fontSize: 20, fontWeight: 600, color: '#e6edf3', borderBottom: '1px solid #333', paddingBottom: 6, marginTop: 20 }} {...props}>
-                          {children}
-                        </h2>
-                      ),
-                      h3: ({ children, ...props }) => (
-                        <h3 style={{ fontSize: 16, fontWeight: 600, color: '#e6edf3', marginTop: 16 }} {...props}>
-                          {children}
-                        </h3>
-                      ),
-                      code: ({ children, ...props }) => (
-                        <code style={{ background: '#161b22', padding: '2px 6px', borderRadius: 4, fontSize: '0.9em', color: '#f0883e' }} {...props}>
-                          {children}
-                        </code>
-                      ),
-                      pre: ({ children, ...props }) => (
-                        <pre style={{ background: '#161b22', padding: 12, borderRadius: 6, overflow: 'auto', fontSize: 13 }} {...props}>
-                          {children}
-                        </pre>
-                      ),
-                      blockquote: ({ children, ...props }) => (
-                        <blockquote style={{ borderLeft: '3px solid #1f6feb', paddingLeft: 16, margin: '12px 0', color: '#8b949e' }} {...props}>
-                          {children}
-                        </blockquote>
-                      ),
-                      a: ({ children, ...props }) => (
-                        <a style={{ color: '#58a6ff', textDecoration: 'none' }} {...props}>
-                          {children}
-                        </a>
-                      ),
-                    }}
-                  >
-                    {previewContent}
-                  </ReactMarkdown>
+                <>
+                  {renderMarkdownPreview(previewContent, previewPath)}
                   {previewLoadingMore && (
                     <div style={{ color: '#666', textAlign: 'center', padding: 12 }}>{t('loading')}</div>
                   )}
-                </div>
+                </>
+              ) : previewPath.toLowerCase().endsWith('.md') && htmlViewMode === 'preview' ? (
+                // Markdown file: rendered preview (source view falls through to <pre>)
+                renderMarkdownPreview(previewContent, previewPath)
               ) : previewPath.endsWith('.html') && htmlViewMode === 'preview' ? (
                 <iframe
                   srcDoc={injectWorkspaceFetch(previewContent, previewPath, token)}
