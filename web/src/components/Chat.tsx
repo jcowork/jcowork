@@ -139,6 +139,7 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
   const [statusMsg, setStatusMsg] = useState<string>('');
   const [alarmActive, setAlarmActive] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
+  const mountedRef = useRef(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   // --- Tab-switch preservation (App keeps Chat mounted but hidden) ---
   const scrollRef = useRef<HTMLDivElement>(null);   // messages scroll container
@@ -167,11 +168,11 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
     let wsUrl: string;
     if (WS_BASE) {
       // Tauri custom-protocol: use absolute WebSocket URL
-      wsUrl = `${WS_BASE}/api/ws?token=${encodeURIComponent(token)}`;
+      wsUrl = `${WS_BASE}/api/ws?token=${encodeURIComponent(token)}&conv=${encodeURIComponent(conversationId)}`;
     } else {
       // Browser mode: derive from current page location
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      wsUrl = `${protocol}//${window.location.host}/api/ws?token=${encodeURIComponent(token)}`;
+      wsUrl = `${protocol}//${window.location.host}/api/ws?token=${encodeURIComponent(token)}&conv=${encodeURIComponent(conversationId)}`;
     }
     const ws = new WebSocket(wsUrl);
 
@@ -187,8 +188,17 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
       }
     };
     ws.onclose = () => {
+      // Only the ACTIVE socket drives connection state and reconnects.
+      // Stale sockets (StrictMode remounts, conversation switches) just close.
+      if (wsRef.current !== ws) return;
       setConnected(false);
-      setTimeout(connect, 3000);
+      // Unstick the UI if a task was streaming when the connection dropped;
+      // if the task is still running server-side, the reconnect will send
+      // `task_resume` which re-enables the streaming state.
+      setStreaming(false);
+      if (mountedRef.current) {
+        setTimeout(connect, 3000);
+      }
     };
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
@@ -243,6 +253,16 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
             timestamp: Date.now(),
           },
         ]);
+      } else if (data.type === 'task_resume') {
+        // The server re-attached this connection to a background task that
+        // was started before a disconnect (e.g. app switch). Drop any partial
+        // replay from a previous attempt, then let the replayed events
+        // rebuild the streaming message.
+        setStreaming(true);
+        setMessages((prev) => {
+          const lastUser = prev.map((m) => m.role).lastIndexOf('user');
+          return lastUser >= 0 ? prev.slice(0, lastUser + 1) : prev;
+        });
       } else if (data.type === 'reminder') {
         setMessages((prev) => [
           ...prev,
@@ -278,8 +298,12 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
   }, [userId, token, conversationId]);
 
   useEffect(() => {
+    mountedRef.current = true;
     connect();
-    return () => wsRef.current?.close();
+    return () => {
+      mountedRef.current = false;
+      wsRef.current?.close();
+    };
   }, [connect]);
 
   // Keep the visibility mirror in sync (WS closures read the ref)

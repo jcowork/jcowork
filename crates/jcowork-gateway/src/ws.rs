@@ -33,7 +33,7 @@ use jcowork_tools::pdf_parse::PdfParseTool;
 use jcowork_tools::registry::ToolRegistry;
 use jcowork_tools::shell::ShellTool;
 
-use crate::session::SessionManager;
+use crate::session::{RunningTask, SessionManager};
 
 /// Incoming WebSocket message from client.
 #[derive(Debug, Deserialize)]
@@ -198,10 +198,75 @@ impl<'a> AgentOutputSink for WsSink<'a> {
 
 // ─── WebSocket handler ────────────────────────────────────────────────
 
+/// Task output sink — records every agent event into the RunningTask
+/// (replay log + live broadcast), fully decoupled from any connection.
+struct TaskSink {
+    task: Arc<RunningTask>,
+}
+
+impl AgentOutputSink for TaskSink {
+    fn on_text_delta<'b>(&'b mut self, text: &'b str) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'b>> {
+        let json = serde_json::json!({"type": "text_delta", "content": text}).to_string();
+        let task = self.task.clone();
+        Box::pin(async move {
+            task.emit(json);
+        })
+    }
+
+    fn on_tool_call_start<'b>(&'b mut self, name: &'b str, call_id: &'b str, arguments: &'b str) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'b>> {
+        let json = serde_json::json!({"type": "tool_call_start", "name": name, "call_id": call_id, "arguments": arguments}).to_string();
+        let task = self.task.clone();
+        Box::pin(async move {
+            task.emit(json);
+        })
+    }
+
+    fn on_tool_call_end<'b>(&'b mut self, name: &'b str, result: &'b str) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'b>> {
+        let json = serde_json::json!({"type": "tool_call_end", "name": name, "result": result}).to_string();
+        let task = self.task.clone();
+        Box::pin(async move {
+            task.emit(json);
+        })
+    }
+
+    fn on_done<'b>(&'b mut self, usage: Option<(i32, i32, i32)>) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'b>> {
+        let (pt, ct, tt) = usage.unwrap_or((0, 0, 0));
+        let json = serde_json::json!({"type": "done", "usage": {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": tt}}).to_string();
+        let task = self.task.clone();
+        Box::pin(async move {
+            task.emit(json);
+        })
+    }
+
+    fn on_error<'b>(&'b mut self, message: &'b str) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'b>> {
+        let json = serde_json::json!({"type": "error", "message": message}).to_string();
+        let task = self.task.clone();
+        Box::pin(async move {
+            task.emit(json);
+        })
+    }
+
+    fn on_status<'b>(&'b mut self, message: &'b str) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'b>> {
+        let json = serde_json::json!({"type": "status", "message": message}).to_string();
+        let task = self.task.clone();
+        Box::pin(async move {
+            task.emit(json);
+        })
+    }
+}
+
 /// Handle a WebSocket connection for a specific user.
+///
+/// Agent turns run as detached background tasks (see [`RunningTask`]), so a
+/// running task survives client disconnects — e.g. the desktop WebView being
+/// suspended while the user switches OS apps. When the client reconnects it
+/// sends `load_history`; if the recorded task belongs to that conversation
+/// and its output was never delivered, the server replays the missed events
+/// and streams the rest live.
 pub async fn ws_handler(
     ws: WebSocket,
     user_id: String,
+    conv: String,
     session_manager: Arc<SessionManager>,
     llm_router: Arc<RwLock<LlmRouter>>,
     default_model: String,
@@ -242,8 +307,39 @@ pub async fn ws_handler(
     let mut reminder_rx = cron_scheduler.subscribe();
     let user_id_for_reminder = user_id.clone();
 
+    // Live event stream of the conversation's current background task.
+    // `None` while no task is attached to this connection.
+    let mut live_task_rx: Option<tokio::sync::broadcast::Receiver<String>> = None;
+
     loop {
         tokio::select! {
+            // ── Live events from the background agent task ──
+            ev = async {
+                match live_task_rx.as_mut() {
+                    Some(rx) => match rx.recv().await {
+                        Ok(ev) => Some(ev),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            Some(format!("__LAGGED__:{}", n))
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            // Channel is gone; park this branch forever.
+                            std::future::pending::<Option<String>>().await
+                        }
+                    },
+                    None => std::future::pending::<Option<String>>().await,
+                }
+            } => {
+                if let Some(ev) = ev {
+                    if let Some(skipped) = ev.strip_prefix("__LAGGED__:") {
+                        // This connection fell too far behind; drop it so the
+                        // client reconnects and gets a clean full replay.
+                        tracing::warn!(user_id = %user_id, conv = %conv, skipped = %skipped,
+                            "Live event receiver lagged; closing connection for clean replay");
+                        break;
+                    }
+                    let _ = ws_sender.send(Message::Text(ev.into())).await;
+                }
+            }
             // ── Incoming WebSocket messages from client ──
             msg = ws_receiver.next() => {
                 match msg {
@@ -260,12 +356,27 @@ pub async fn ws_handler(
                             }
                         };
 
-                        // Handle stop signal
+                        // Handle stop signal: abort the running background
+                        // task for this conversation (if any).
                         if input.msg_type.as_deref() == Some("stop") {
                             tracing::info!(user_id = %user_id, "Received stop signal");
-                            let _ = ws_sender.send(Message::Text(
-                                serde_json::json!({"type": "stopped"}).to_string().into(),
-                            )).await;
+                            let mut stopped_sent = false;
+                            if let Some(task) = session_manager.get_task(&conv) {
+                                if task.abort() {
+                                    // Broadcast the stopped event to live
+                                    // subscribers and record it for replay.
+                                    task.emit(
+                                        serde_json::json!({"type": "stopped"}).to_string(),
+                                    );
+                                    stopped_sent = true;
+                                }
+                            }
+                            if !stopped_sent {
+                                // No running task — acknowledge directly.
+                                let _ = ws_sender.send(Message::Text(
+                                    serde_json::json!({"type": "stopped"}).to_string().into(),
+                                )).await;
+                            }
                             continue;
                         }
 
@@ -295,10 +406,67 @@ pub async fn ws_handler(
                                 }
                             }
                             tracing::info!(user_id = %user_id, history_len = history.len(), "Conversation history restored");
+
+                            // ── Re-attach to a background task for this conversation ──
+                            // If the task that started with the client's last user
+                            // message is still running (or finished while the
+                            // client was disconnected and its output was never
+                            // delivered), replay the missed events and continue
+                            // streaming live.
+                            let mut attached = false;
+                            if let Some(task) = session_manager.get_task(&conv) {
+                                if let Some(idx) = history.iter().rposition(|m| m.role == "user") {
+                                    let missed_response = !history[idx + 1..]
+                                        .iter()
+                                        .any(|m| m.role == "assistant");
+                                    if missed_response && history[idx].content == task.start_message {
+                                        let _ = ws_sender.send(Message::Text(
+                                            serde_json::json!({"type": "task_resume"}).to_string().into(),
+                                        )).await;
+                                        let (rx, snapshot) = task.attach();
+                                        for ev in snapshot {
+                                            let _ = ws_sender.send(Message::Text(ev.into())).await;
+                                        }
+                                        live_task_rx = Some(rx);
+                                        attached = true;
+                                        // If the task already finished, adopt its
+                                        // final history for follow-up context.
+                                        if !task.is_running() {
+                                            if let Some(h) = task.take_final_history() {
+                                                history = h;
+                                            }
+                                        }
+                                        tracing::info!(user_id = %user_id, conv = %conv,
+                                            running = task.is_running(),
+                                            "Client re-attached to background task");
+                                    }
+                                }
+                            }
+                            if !attached {
+                                // Client is on a different conversation state;
+                                // stop forwarding any previous task's events.
+                                live_task_rx = None;
+                            }
                             continue;
                         }
 
                         let user_content = input.content.clone().unwrap_or_default();
+
+                        // Reject a new task while one is already running for this
+                        // conversation; adopt the finished task's history so
+                        // follow-up messages keep the right context.
+                        if let Some(task) = session_manager.get_task(&conv) {
+                            if task.is_running() {
+                                let _ = ws_sender.send(Message::Text(
+                                    serde_json::json!({"type": "error", "message": "当前对话已有任务正在运行，请等待完成或点击停止后再发送"})
+                                        .to_string().into(),
+                                )).await;
+                                continue;
+                            }
+                            if let Some(h) = task.take_final_history() {
+                                history = h;
+                            }
+                        }
 
                         // Status: message received
                         let _ = ws_sender.send(Message::Text(
@@ -378,52 +546,83 @@ pub async fn ws_handler(
                             user_id: user_id.clone(),
                             workspace_root,
                         };
-
                         // Fetch active reminders/cron jobs for context injection
                         let active_reminders = cron_scheduler.list_reminders(&user_id).await;
                         let active_cron_jobs = cron_scheduler.list_cron_jobs(&user_id).await;
                         let reminder_ctx_msg = agent_loop::build_reminder_context_msg(&active_reminders, &active_cron_jobs);
 
-                        // ── Run agent turn via shared run_turn() ──
-                        let mut sink = WsSink {
-                            ws_sender: &mut ws_sender,
-                        };
+                        // ── Run agent turn as a detached background task ──
+                        // The task keeps running even if this WebSocket drops
+                        // (e.g. desktop app window suspended while the user
+                        // switches OS apps). Events are recorded in the task
+                        // log and broadcast to attached connections live.
+                        let task = RunningTask::new(user_content.clone());
+                        session_manager.set_task(&conv, task.clone());
+                        let (task_rx, _empty_snapshot) = task.attach();
+                        live_task_rx = Some(task_rx);
 
-                        let result: AgentTurnResult = agent_loop::run_turn(AgentTurnOptions {
-                            history: &mut history,
-                            tools: &tools,
-                            provider,
-                            tool_registry: tool_registry.clone(),
-                            tool_ctx: &tool_ctx,
-                            pre_context: reminder_ctx_msg.as_ref(),
-                            max_turns: 10,
-                            llm_timeout_secs: 60,
-                            stream_timeout_secs: 120,
-                            tool_timeout_secs: 30,
-                            output: &mut sink,
-                            user_id: &user_id,
-                            model: model_str,
-                            log_writer: Some(log_writer.clone()),
-                        }).await;
+                        let history_snapshot = history.clone();
+                        let user_id_task = user_id.clone();
+                        let model_task = model_str.to_string();
+                        let task_for_spawn = task.clone();
+                        let tool_registry_task = tool_registry.clone();
+                        let log_writer_task = log_writer.clone();
 
-                        // Fallback if run_turn didn't send a done event
-                        if !result.completed {
-                            let fallback_message = if result.turns_used > 0 {
-                                format!(
-                                    "我已完成多轮工具探查，但还没来得及生成最终结论。你可以基于当前结果继续追问，或让我直接根据最近一次工具调用结果做总结。"
-                                )
-                            } else {
-                                "我已完成处理流程，但模型没有产出最终文本回答。请直接重试一次，或让我基于当前已获取的数据继续总结。".to_string()
-                            };
-                            let _ = ws_sender.send(Message::Text(
-                                serde_json::json!({"type": "text_delta", "content": fallback_message})
-                                    .to_string().into(),
-                            )).await;
-                            let _ = ws_sender.send(Message::Text(
-                                serde_json::json!({"type": "done", "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}})
-                                    .to_string().into(),
-                            )).await;
-                        }
+                        let join = tokio::spawn(async move {
+                            // Drop guard: always mark the task finished, even on
+                            // panic or abort (stop signal).
+                            struct RunGuard(Arc<RunningTask>);
+                            impl Drop for RunGuard {
+                                fn drop(&mut self) {
+                                    self.0.set_finished();
+                                }
+                            }
+                            let _guard = RunGuard(task_for_spawn.clone());
+
+                            let mut sink = TaskSink { task: task_for_spawn.clone() };
+                            let mut task_history = history_snapshot;
+
+                            let result: AgentTurnResult = agent_loop::run_turn(AgentTurnOptions {
+                                history: &mut task_history,
+                                tools: &tools,
+                                provider,
+                                tool_registry: tool_registry_task,
+                                tool_ctx: &tool_ctx,
+                                pre_context: reminder_ctx_msg.as_ref(),
+                                max_turns: 10,
+                                llm_timeout_secs: 60,
+                                stream_timeout_secs: 120,
+                                tool_timeout_secs: 30,
+                                output: &mut sink,
+                                user_id: &user_id_task,
+                                model: &model_task,
+                                log_writer: Some(log_writer_task),
+                            }).await;
+
+                            // Fallback if run_turn didn't send a done event
+                            if !result.completed {
+                                let fallback_message = if result.turns_used > 0 {
+                                    format!(
+                                        "我已完成多轮工具探查，但还没来得及生成最终结论。你可以基于当前结果继续追问，或让我直接根据最近一次工具调用结果做总结。"
+                                    )
+                                } else {
+                                    "我已完成处理流程，但模型没有产出最终文本回答。请直接重试一次，或让我基于当前已获取的数据继续总结。".to_string()
+                                };
+                                task_for_spawn.emit(
+                                    serde_json::json!({"type": "text_delta", "content": fallback_message})
+                                        .to_string(),
+                                );
+                                task_for_spawn.emit(
+                                    serde_json::json!({"type": "done", "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}})
+                                        .to_string(),
+                                );
+                            }
+
+                            // Publish the finished conversation history so the
+                            // next connection (or follow-up message) can adopt it.
+                            task_for_spawn.set_final_history(task_history);
+                        });
+                        task.set_abort_handle(join.abort_handle());
                     }
                     Some(Ok(Message::Close(_))) => break,
                     Some(Err(e)) => {
@@ -452,6 +651,16 @@ pub async fn ws_handler(
                         if reminder.cron_job_id.is_none() {
                             if let Some(action) = &reminder.action {
                                 tracing::info!(action = %action, "Executing reminder action");
+
+                                // Adopt the finished background task's history
+                                // so the action runs with the full context.
+                                if let Some(task) = session_manager.get_task(&conv) {
+                                    if !task.is_running() {
+                                        if let Some(h) = task.take_final_history() {
+                                            history = h;
+                                        }
+                                    }
+                                }
 
                                 history.push(jcowork_llm::provider::ChatMessage {
                                     role: "user".to_string(),

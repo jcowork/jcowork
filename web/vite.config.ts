@@ -9,12 +9,12 @@ export default defineConfig({
     allowedHosts: ['home.top.jx.cn'],
     proxy: {
       '/api/ws': {
-        target: 'ws://localhost:3000',
+        target: process.env.API_TARGET || 'ws://localhost:3000',
         changeOrigin: true,
         ws: true,
       },
       '/api': {
-        target: 'http://localhost:3000',
+        target: process.env.API_TARGET || 'http://localhost:3000',
         changeOrigin: true,
       },
     },

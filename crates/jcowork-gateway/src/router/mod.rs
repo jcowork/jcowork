@@ -404,10 +404,14 @@ async fn list_sessions(
 
 async fn ws_upgrade(
     ws: WebSocketUpgrade,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     axum::Extension(auth_user): axum::Extension<AuthUser>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
     let user_id = auth_user.user_id;
+    // Conversation id (sent by the client) — used to key background tasks so
+    // they survive disconnects and can be re-attached on reconnect.
+    let conv = params.get("conv").cloned().unwrap_or_default();
     let default_model = state.default_model.clone();
     let tool_registry = state.tool_registry.clone();
     let cron_scheduler = state.cron_scheduler.clone();
@@ -417,7 +421,7 @@ async fn ws_upgrade(
     let data_dir = state.data_dir.clone();
     let llm_router = state.llm_router.clone();
     ws.on_upgrade(move |socket| {
-        ws::ws_handler(socket, user_id, state.session_manager, llm_router, default_model, tool_registry, cron_scheduler, log_writer, memory_manager, skill_manager, data_dir)
+        ws::ws_handler(socket, user_id, conv, state.session_manager, llm_router, default_model, tool_registry, cron_scheduler, log_writer, memory_manager, skill_manager, data_dir)
     })
 }
 
