@@ -44,6 +44,12 @@ const translations = {
     resetSuccess: '密码重置成功，请使用新密码登录',
     passwordMismatch: '两次输入的密码不一致',
     passwordTooShort: '密码至少需要 6 位',
+    userNotFound: '该账号不存在',
+    usernameExists: '该用户名已被注册',
+    invalidOrExpiredCode: '验证码无效或已过期，请重新获取',
+    invalidResetCode: '验证码不正确',
+    resetCodeExpired: '验证码已过期，请重新获取',
+    networkError: '网络错误，请稍后重试',
 
     // Chat
     typeMessage: '输入消息...',
@@ -361,6 +367,12 @@ const translations = {
     resetSuccess: 'Password reset successfully. Please log in with your new password.',
     passwordMismatch: 'Passwords do not match',
     passwordTooShort: 'Password must be at least 6 characters',
+    userNotFound: 'Account not found',
+    usernameExists: 'Username already exists',
+    invalidOrExpiredCode: 'Invalid or expired reset code. Please request a new one.',
+    invalidResetCode: 'Invalid reset code',
+    resetCodeExpired: 'Reset code expired. Please request a new one.',
+    networkError: 'Network error. Please try again.',
 
     // Chat
     typeMessage: 'Type a message...',

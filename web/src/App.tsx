@@ -73,7 +73,23 @@ function AppInner() {
   const [forgotUsername, setForgotUsername] = useState('');
   const [generatedCode, setGeneratedCode] = useState<string | null>(null);
   const [resetForm, setResetForm] = useState({ code: '', password: '', confirmPassword: '' });
+  const [authError, setAuthError] = useState('');
+  const [authSuccess, setAuthSuccess] = useState('');
+  const [forgotError, setForgotError] = useState('');
+  const [resetError, setResetError] = useState('');
   const hiddenTimeRef = useRef(0);
+
+  // Map backend error strings to localized, user-friendly messages.
+  const mapAuthError = (raw: string): string => {
+    if (raw.includes('User not found')) return t('userNotFound');
+    if (raw.includes('Invalid username or password')) return t('authFailed');
+    if (raw.includes('already exists')) return t('usernameExists');
+    if (raw.includes('Password must be at least')) return t('passwordTooShort');
+    if (raw.includes('Invalid or expired')) return t('invalidOrExpiredCode');
+    if (raw.includes('Reset code has expired')) return t('resetCodeExpired');
+    if (raw.includes('Invalid reset code')) return t('invalidResetCode');
+    return raw;
+  };
 
   // Sleep/wake recovery: when the page becomes visible again after being hidden
   // for a while (e.g. laptop lid closed), reload to restore WebView rendering.
@@ -161,6 +177,8 @@ function AppInner() {
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
+    setAuthError('');
+    setAuthSuccess('');
     const endpoint = authView === 'register' ? '/api/auth/register' : '/api/auth/login';
     try {
       const res = await fetch(`${API_BASE}${endpoint}`, {
@@ -178,16 +196,19 @@ function AppInner() {
         setAuth(authState);
         localStorage.setItem('jcowork_auth', JSON.stringify(authState));
       } else if (data.error) {
-        alert(data.error);
+        setAuthError(mapAuthError(data.error));
+      } else {
+        setAuthError(t('authFailed'));
       }
-    } catch (err) {
-      console.error('Auth failed:', err);
-      alert('Authentication failed. Please try again.');
+    } catch {
+      console.error('Auth failed');
+      setAuthError(t('networkError'));
     }
   };
 
   const handleForgotPassword = async (e: React.FormEvent) => {
     e.preventDefault();
+    setForgotError('');
     try {
       const res = await fetch(`${API_BASE}/api/auth/forgot-password`, {
         method: 'POST',
@@ -199,21 +220,24 @@ function AppInner() {
         setGeneratedCode(data.code);
         setForgotStep('reset');
       } else if (data.error) {
-        alert(data.error);
+        setForgotError(mapAuthError(data.error));
+      } else {
+        setForgotError(t('networkError'));
       }
     } catch {
-      alert('Failed to generate reset code.');
+      setForgotError(t('networkError'));
     }
   };
 
   const handleResetPassword = async (e: React.FormEvent) => {
     e.preventDefault();
+    setResetError('');
     if (resetForm.password !== resetForm.confirmPassword) {
-      alert(t('passwordMismatch'));
+      setResetError(t('passwordMismatch'));
       return;
     }
     if (resetForm.password.length < 6) {
-      alert(t('passwordTooShort'));
+      setResetError(t('passwordTooShort'));
       return;
     }
     try {
@@ -224,17 +248,20 @@ function AppInner() {
       });
       const data = await res.json();
       if (data.message) {
-        alert(t('resetSuccess'));
         setAuthView('login');
         setForgotStep('request');
         setGeneratedCode(null);
         setResetForm({ code: '', password: '', confirmPassword: '' });
         setForgotUsername('');
+        setAuthError('');
+        setAuthSuccess(t('resetSuccess'));
       } else if (data.error) {
-        alert(data.error);
+        setResetError(mapAuthError(data.error));
+      } else {
+        setResetError(t('networkError'));
       }
     } catch {
-      alert('Failed to reset password.');
+      setResetError(t('networkError'));
     }
   };
 
@@ -244,6 +271,10 @@ function AppInner() {
     setGeneratedCode(null);
     setResetForm({ code: '', password: '', confirmPassword: '' });
     setForgotUsername('');
+    setForgotError('');
+    setResetError('');
+    setAuthError('');
+    setAuthSuccess('');
   };
 
   const logout = () => {
@@ -254,6 +285,21 @@ function AppInner() {
   if (!auth) {
     const inputStyle = { width: '100%', padding: 10, marginBottom: 12, borderRadius: 8, border: '1px solid #555', background: '#1a1a1a', color: '#eee', fontSize: 16 };
     const btnStyle = { width: '100%', padding: 10, borderRadius: 8, border: 'none', background: '#1a73e8', color: '#fff', fontSize: 16, cursor: 'pointer' };
+    const banner = (msg: string, type: 'error' | 'success') => msg ? (
+      <div style={{
+        background: type === 'error' ? '#3d1c1c' : '#123322',
+        border: `1px solid ${type === 'error' ? '#e74c3c' : '#22aa55'}`,
+        borderRadius: 8,
+        padding: '8px 12px',
+        marginBottom: 12,
+        color: type === 'error' ? '#f5a5a5' : '#7bd88f',
+        fontSize: 14,
+        textAlign: 'center',
+        lineHeight: 1.4,
+      }}>
+        {msg}
+      </div>
+    ) : null;
 
     if (authView === 'forgot') {
       return (
@@ -263,13 +309,15 @@ function AppInner() {
             {forgotStep === 'request' ? (
               <form onSubmit={handleForgotPassword}>
                 <p style={{ color: '#888', marginBottom: 16, fontSize: 14 }}>{t('forgotPassword')}</p>
+                {banner(forgotError, 'error')}
                 <input
                   type="text"
                   placeholder={t('username')}
                   value={forgotUsername}
-                  onChange={(e) => setForgotUsername(e.target.value)}
+                  onChange={(e) => { setForgotUsername(e.target.value); setForgotError(''); }}
                   required
-                  style={inputStyle}
+                  autoFocus
+                  style={forgotError ? { ...inputStyle, border: '1px solid #e74c3c' } : inputStyle}
                 />
                 <button type="submit" style={btnStyle}>
                   {t('getResetCode')}
@@ -284,11 +332,12 @@ function AppInner() {
                     {generatedCode}
                   </p>
                 </div>
+                {banner(resetError, 'error')}
                 <input
                   type="text"
                   placeholder={t('resetCode')}
                   value={resetForm.code}
-                  onChange={(e) => setResetForm({ ...resetForm, code: e.target.value })}
+                  onChange={(e) => { setResetForm({ ...resetForm, code: e.target.value }); setResetError(''); }}
                   required
                   maxLength={6}
                   style={{ ...inputStyle, letterSpacing: 4, textAlign: 'center', fontSize: 20 }}
@@ -297,7 +346,7 @@ function AppInner() {
                   type="password"
                   placeholder={t('newPassword')}
                   value={resetForm.password}
-                  onChange={(e) => setResetForm({ ...resetForm, password: e.target.value })}
+                  onChange={(e) => { setResetForm({ ...resetForm, password: e.target.value }); setResetError(''); }}
                   required
                   style={inputStyle}
                 />
@@ -305,7 +354,7 @@ function AppInner() {
                   type="password"
                   placeholder={t('confirmPassword')}
                   value={resetForm.confirmPassword}
-                  onChange={(e) => setResetForm({ ...resetForm, confirmPassword: e.target.value })}
+                  onChange={(e) => { setResetForm({ ...resetForm, confirmPassword: e.target.value }); setResetError(''); }}
                   required
                   style={{ ...inputStyle, marginBottom: 16 }}
                 />
@@ -329,18 +378,21 @@ function AppInner() {
         <div className="login-card">
           <h1 style={{ fontSize: 28, marginBottom: 24 }}>Jcowork Agent</h1>
           <form onSubmit={handleAuth}>
+            {banner(authError, 'error')}
+            {banner(authSuccess, 'success')}
             <input
               type="text"
               placeholder={t('username')}
               value={loginForm.username}
-              onChange={(e) => setLoginForm({ ...loginForm, username: e.target.value })}
+              onChange={(e) => { setLoginForm({ ...loginForm, username: e.target.value }); setAuthError(''); setAuthSuccess(''); }}
               style={inputStyle}
+              autoFocus
             />
             <input
               type="password"
               placeholder={t('password')}
               value={loginForm.password}
-              onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })}
+              onChange={(e) => { setLoginForm({ ...loginForm, password: e.target.value }); setAuthError(''); }}
               style={inputStyle}
             />
             <button type="submit" style={{ ...btnStyle, marginBottom: 0 }}>
@@ -349,14 +401,14 @@ function AppInner() {
           </form>
           {authView === 'login' && (
             <p style={{ marginTop: 12, textAlign: 'center' }}>
-              <a href="#" onClick={() => setAuthView('forgot')} style={{ color: '#1a73e8', fontSize: 14 }}>
+              <a href="#" onClick={() => { setAuthView('forgot'); setAuthError(''); setAuthSuccess(''); }} style={{ color: '#1a73e8', fontSize: 14 }}>
                 {t('forgotPassword')}
               </a>
             </p>
           )}
           <p style={{ marginTop: 16, textAlign: 'center' }}>
             <span style={{ color: '#888' }}>{authView === 'register' ? t('alreadyHaveAccount') : t('dontHaveAccount')}</span>{' '}
-            <a href="#" onClick={() => setAuthView(authView === 'register' ? 'login' : 'register')} style={{ color: '#1a73e8' }}>
+            <a href="#" onClick={() => { setAuthView(authView === 'register' ? 'login' : 'register'); setAuthError(''); setAuthSuccess(''); }} style={{ color: '#1a73e8' }}>
               {authView === 'register' ? t('login') : t('register')}
             </a>
           </p>
