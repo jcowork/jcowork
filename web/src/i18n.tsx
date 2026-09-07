@@ -23,6 +23,10 @@ const translations = {
     signedInAs: '已登录',
     navigation: '导航',
     logout: '退出登录',
+    contacts: '联系人',
+    addAccount: '添加账户',
+    switchAccount: '切换账户',
+    removeAccount: '移除账户',
 
     // Login
     username: '用户名',
@@ -346,6 +350,10 @@ const translations = {
     signedInAs: 'Signed in as',
     navigation: 'Navigation',
     logout: 'Logout',
+    contacts: 'Contacts',
+    addAccount: 'Add Account',
+    switchAccount: 'Switch Account',
+    removeAccount: 'Remove Account',
 
     // Login
     username: 'Username',

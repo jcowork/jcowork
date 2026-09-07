@@ -3,7 +3,11 @@ import { useLang, useT } from '../i18n';
 import { type Conversation } from '../chatStore';
 
 interface SidebarProps {
-  username: string;
+  accounts: { userId: string; username: string }[];
+  activeUserId: string;
+  onSwitchAccount: (userId: string) => void;
+  onAddAccount: () => void;
+  onRemoveAccount: (userId: string) => void;
   onLogout: () => void;
   onChat: () => void;
   onSettings: () => void;
@@ -21,7 +25,7 @@ interface SidebarProps {
   onClose?: () => void;
 }
 
-export default function Sidebar({ username, onLogout, onChat, onSettings, onSchedule, onMemory, onSkills, onDocuments, currentView, conversations, activeConvId, onNewChat, onSelectConversation, onDeleteConversation, mobileOpen, onClose }: SidebarProps) {
+export default function Sidebar({ accounts, activeUserId, onSwitchAccount, onAddAccount, onRemoveAccount, onLogout, onChat, onSettings, onSchedule, onMemory, onSkills, onDocuments, currentView, conversations, activeConvId, onNewChat, onSelectConversation, onDeleteConversation, mobileOpen, onClose }: SidebarProps) {
   const t = useT();
   const { lang, setLang } = useLang();
   const [historyOpen, setHistoryOpen] = useState(true);
@@ -84,8 +88,50 @@ export default function Sidebar({ username, onLogout, onChat, onSettings, onSche
           Jcowork
         </div>
 
-        <div style={{ color: '#888', fontSize: 12, marginBottom: 8 }}>{t('signedInAs')}</div>
-        <div style={{ marginBottom: 24, fontWeight: 500 }}>{username}</div>
+        {/* Contacts section */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+            <div style={{ color: '#888', fontSize: 12, textTransform: 'uppercase' }}>{t('contacts')}</div>
+            <button
+              onClick={onAddAccount}
+              title={t('addAccount')}
+              style={{
+                background: 'none', border: 'none', color: '#888', cursor: 'pointer',
+                fontSize: 16, lineHeight: 1, padding: '0 2px',
+              }}
+            >+</button>
+          </div>
+          {accounts.map((a) => (
+            <div
+              key={a.userId}
+              onClick={() => onSwitchAccount(a.userId)}
+              style={{
+                display: 'flex', alignItems: 'center', padding: '6px 8px',
+                borderRadius: 6, cursor: 'pointer', marginBottom: 2,
+                background: a.userId === activeUserId ? '#2a2a2a' : 'transparent',
+              }}
+            >
+              <span style={{
+                flex: 1, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                color: a.userId === activeUserId ? '#eee' : '#999',
+                fontWeight: a.userId === activeUserId ? 600 : 400,
+              }}>
+                {a.username}
+              </span>
+              {a.userId !== activeUserId && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onRemoveAccount(a.userId); }}
+                  title={t('removeAccount')}
+                  style={{
+                    background: 'none', border: 'none', color: '#666', cursor: 'pointer',
+                    fontSize: 11, padding: '0 2px', flexShrink: 0,
+                  }}
+                >✕</button>
+              )}
+            </div>
+          ))}
+        </div>
 
         <div style={{ flex: 1 }}>
           <div style={{ color: '#888', fontSize: 12, marginBottom: 8, textTransform: 'uppercase' }}>
@@ -248,7 +294,7 @@ export default function Sidebar({ username, onLogout, onChat, onSettings, onSche
             fontSize: 14,
           }}
         >
-          {t('logout')}
+          {t('removeAccount')}
         </button>
       </div>
 

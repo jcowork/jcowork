@@ -16,16 +16,19 @@ import {
   createConversation,
   deleteConversation,
 } from './chatStore';
-
-interface AuthState {
-  token: string;
-  userId: string;
-  username: string;
-}
+import {
+  type AuthState,
+  loadAccounts,
+  saveAccounts,
+  getActiveAccount,
+  setActiveAccount,
+  upsertAccount,
+  removeAccount,
+} from './accountStore';
 
 // Global fetch wrapper:
 // 1. Prepend API_BASE for relative URLs (Tauri custom-protocol → http://localhost:3000)
-// 2. 401 interceptor — auto-logout on expired token.
+// 2. 401 interceptor — remove the specific account whose token caused the 401.
 // This runs once at module load and affects ALL fetch calls across the app.
 const _origFetch = window.fetch;
 window.fetch = async function(input: RequestInfo | URL, init?: RequestInit) {
@@ -33,13 +36,31 @@ window.fetch = async function(input: RequestInfo | URL, init?: RequestInit) {
   if (API_BASE && typeof input === 'string' && input.startsWith('/')) {
     input = API_BASE + input;
   }
+  // Extract the Authorization header token (if any) before the request
+  let reqToken: string | undefined;
+  if (init?.headers) {
+    const h = init.headers instanceof Headers ? init.headers : new Headers(init.headers as Record<string, string>);
+    reqToken = h.get('Authorization')?.replace('Bearer ', '') ?? undefined;
+  }
   const res = await _origFetch.call(window, input, init);
-  if (res.status === 401) {
-    localStorage.removeItem('jcowork_auth');
-    // Only reload if not already on the login screen
-    if (document.querySelector('#root')?.childElementCount) {
-      window.location.reload();
-    }
+  if (res.status === 401 && reqToken) {
+    // Decode JWT payload to find the userId for this specific token
+    try {
+      const payload = JSON.parse(atob(reqToken.split('.')[1]));
+      const uid = payload.sub || payload.user_id || payload.userId;
+      if (uid) {
+        const remaining = removeAccount(uid);
+        saveAccounts(remaining);
+        // If no accounts left, reload to show login
+        if (remaining.length === 0) {
+          window.location.reload();
+        } else {
+          // Switch to the first remaining account
+          setActiveAccount(remaining[0].userId);
+          window.location.reload();
+        }
+      }
+    } catch {}
   }
   return res;
 };
@@ -54,10 +75,15 @@ export default function App() {
 
 function AppInner() {
   const t = useT();
-  const [auth, setAuth] = useState<AuthState | null>(() => {
-    const saved = localStorage.getItem('jcowork_auth');
-    return saved ? JSON.parse(saved) : null;
+  const [accounts, setAccounts] = useState<AuthState[]>(() => loadAccounts());
+  const [activeUserId, setActiveUserId] = useState<string>(() => {
+    const saved = getActiveAccount();
+    const accts = loadAccounts();
+    if (saved && accts.some((a) => a.userId === saved)) return saved;
+    return accts[0]?.userId ?? '';
   });
+  // When true, show login form to add a new account without logging out current
+  const [addingAccount, setAddingAccount] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showSchedule, setShowSchedule] = useState(false);
   const [showMemory, setShowMemory] = useState(false);
@@ -78,6 +104,13 @@ function AppInner() {
   const [forgotError, setForgotError] = useState('');
   const [resetError, setResetError] = useState('');
   const hiddenTimeRef = useRef(0);
+
+  // Per-account conversation storage (background accounts keep their convs here)
+  const accountConvsRef = useRef<Record<string, Conversation[]>>({});
+  // Per-account active conversation ID
+  const accountActiveConvRef = useRef<Record<string, string>>({});
+
+  const activeAccount = accounts.find((a) => a.userId === activeUserId) ?? null;
 
   // Map backend error strings to localized, user-friendly messages.
   const mapAuthError = (raw: string): string => {
@@ -102,35 +135,42 @@ function AppInner() {
         window.location.reload();
         return;
       }
-      // Even for short hides, verify auth state hasn't been cleared by the 401 interceptor
-      const current = localStorage.getItem('jcowork_auth');
-      if (!current && auth) {
-        setAuth(null);
+      // Verify account state hasn't been cleared by the 401 interceptor
+      const current = loadAccounts();
+      if (current.length === 0 && accounts.length > 0) {
+        setAccounts([]);
+        setActiveUserId('');
       }
     } else if (document.visibilityState === 'hidden') {
       hiddenTimeRef.current = Date.now();
     }
-  }, [auth]);
+  }, [accounts]);
 
   useEffect(() => {
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
   }, [handleVisibilityChange]);
 
-  // Load conversations once authenticated; create one if none exists
+  // Load conversations when active account changes; create one if none exists
   useEffect(() => {
-    if (!auth) return;
-    const convs = loadConversations(auth.userId);
-    const savedId = getActiveConvId(auth.userId);
-    if (savedId && convs.some((c) => c.id === savedId)) {
+    if (!activeAccount) return;
+    // Always reload from localStorage (the Chat's persistence useEffect keeps it fresh)
+    const convs = loadConversations(activeAccount.userId);
+    // Prefer the saved active conv ID from the ref (set during switch), fallback to localStorage
+    const refConvId = accountActiveConvRef.current[activeAccount.userId];
+    const savedId = refConvId || getActiveConvId(activeAccount.userId);
+    if (convs.length > 0 && savedId && convs.some((c) => c.id === savedId)) {
       setConversations(convs);
       setActiveConvIdState(savedId);
+    } else if (convs.length > 0) {
+      setConversations(convs);
+      setActiveConvIdState(convs[0].id);
     } else {
-      const res = createConversation(auth.userId);
+      const res = createConversation(activeAccount.userId);
       setConversations(res.convs);
       setActiveConvIdState(res.id);
     }
-  }, [auth]);
+  }, [activeAccount?.userId]);
 
   // Re-evaluate the 1h history threshold every minute
   useEffect(() => {
@@ -144,36 +184,36 @@ function AppInner() {
   };
 
   const handleNewChat = useCallback(() => {
-    if (!auth) return;
+    if (!activeAccount) return;
     // Reuse the active conversation if it's still empty
     const active = conversations.find((c) => c.id === activeConvId);
     if (active && active.messages.length === 0) {
       switchToChatView();
       return;
     }
-    const res = createConversation(auth.userId);
+    const res = createConversation(activeAccount.userId);
     setConversations(res.convs);
     setActiveConvIdState(res.id);
     switchToChatView();
-  }, [auth, conversations, activeConvId]);
+  }, [activeAccount, conversations, activeConvId]);
 
   const handleSelectConversation = useCallback((id: string) => {
-    if (!auth) return;
-    setActiveConvId(auth.userId, id);
+    if (!activeAccount) return;
+    setActiveConvId(activeAccount.userId, id);
     setActiveConvIdState(id);
     switchToChatView();
-  }, [auth]);
+  }, [activeAccount]);
 
   const handleDeleteConversation = useCallback((id: string) => {
-    if (!auth) return;
-    const convs = deleteConversation(auth.userId, id);
+    if (!activeAccount) return;
+    const convs = deleteConversation(activeAccount.userId, id);
     setConversations(convs);
     if (activeConvId === id) {
-      const res = createConversation(auth.userId);
+      const res = createConversation(activeAccount.userId);
       setConversations(res.convs);
       setActiveConvIdState(res.id);
     }
-  }, [auth, activeConvId]);
+  }, [activeAccount, activeConvId]);
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -193,8 +233,12 @@ function AppInner() {
           userId: data.user_id,
           username: data.username,
         };
-        setAuth(authState);
-        localStorage.setItem('jcowork_auth', JSON.stringify(authState));
+        // Upsert into multi-account store
+        const updated = upsertAccount(authState);
+        setAccounts(updated);
+        setActiveUserId(authState.userId);
+        setActiveAccount(authState.userId);
+        setAddingAccount(false);
       } else if (data.error) {
         setAuthError(mapAuthError(data.error));
       } else {
@@ -278,11 +322,74 @@ function AppInner() {
   };
 
   const logout = () => {
-    setAuth(null);
-    localStorage.removeItem('jcowork_auth');
+    if (!activeAccount) return;
+    const remaining = removeAccount(activeAccount.userId);
+    setAccounts(remaining);
+    // Clean up refs for removed account
+    delete accountConvsRef.current[activeAccount.userId];
+    delete accountActiveConvRef.current[activeAccount.userId];
+    if (remaining.length > 0) {
+      const nextId = remaining[0].userId;
+      setActiveUserId(nextId);
+      setActiveAccount(nextId);
+    } else {
+      setActiveUserId('');
+      setActiveAccount('');
+    }
   };
 
-  if (!auth) {
+  // Switch active account: save current convs to ref, load target's
+  const handleSwitchAccount = useCallback((userId: string) => {
+    if (userId === activeUserId) return;
+    // Save current account's conv state
+    if (activeAccount) {
+      accountConvsRef.current[activeAccount.userId] = conversations;
+      accountActiveConvRef.current[activeAccount.userId] = activeConvId;
+    }
+    setActiveUserId(userId);
+    setActiveAccount(userId);
+    // Reset tab state on account switch
+    setShowSettings(false); setShowSchedule(false); setShowMemory(false);
+    setShowSkills(false); setShowDocuments(false);
+  }, [activeUserId, activeAccount, conversations, activeConvId]);
+
+  const handleAddAccount = useCallback(() => {
+    setAddingAccount(true);
+    setAuthView('login');
+    setAuthError(''); setAuthSuccess('');
+    setLoginForm({ username: '', password: '' });
+  }, []);
+
+  const handleRemoveAccount = useCallback((userId: string) => {
+    const remaining = removeAccount(userId);
+    setAccounts(remaining);
+    delete accountConvsRef.current[userId];
+    delete accountActiveConvRef.current[userId];
+    if (userId === activeUserId) {
+      // Removed the active account — switch to another or show login
+      if (remaining.length > 0) {
+        const nextId = remaining[0].userId;
+        setActiveUserId(nextId);
+        setActiveAccount(nextId);
+      } else {
+        setActiveUserId('');
+        setActiveAccount('');
+      }
+    }
+  }, [activeUserId]);
+
+  // Handle onConversationsSync from any Chat (including background ones).
+  // Active account: update state directly. Background accounts: store in ref.
+  // Also reload from localStorage on switch-back to capture any
+  // persistence-layer updates the Chat wrote while hidden.
+  const handleConversationsSync = useCallback((userId: string, convs: Conversation[]) => {
+    accountConvsRef.current[userId] = convs;
+    if (userId === activeUserId) {
+      setConversations(convs);
+    }
+  }, [activeUserId]);
+
+  if (accounts.length === 0 || addingAccount) {
     const inputStyle = { width: '100%', padding: 10, marginBottom: 12, borderRadius: 8, border: '1px solid #555', background: '#1a1a1a', color: '#eee', fontSize: 16 };
     const btnStyle = { width: '100%', padding: 10, borderRadius: 8, border: 'none', background: '#1a73e8', color: '#fff', fontSize: 16, cursor: 'pointer' };
     const banner = (msg: string, type: 'error' | 'success') => msg ? (
@@ -399,7 +506,14 @@ function AppInner() {
               {authView === 'register' ? t('register') : t('login')}
             </button>
           </form>
-          {authView === 'login' && (
+          {addingAccount && (
+            <p style={{ marginTop: 12, textAlign: 'center' }}>
+              <a href="#" onClick={() => { setAddingAccount(false); setAuthError(''); setAuthSuccess(''); }} style={{ color: '#1a73e8', fontSize: 14 }}>
+                {t('cancel')}
+              </a>
+            </p>
+          )}
+          {!addingAccount && authView === 'login' && (
             <p style={{ marginTop: 12, textAlign: 'center' }}>
               <a href="#" onClick={() => { setAuthView('forgot'); setAuthError(''); setAuthSuccess(''); }} style={{ color: '#1a73e8', fontSize: 14 }}>
                 {t('forgotPassword')}
@@ -417,11 +531,18 @@ function AppInner() {
     );
   }
 
+  // --- Authenticated view ---
   const chatVisible = !showSettings && !showDocuments && !showSchedule && !showMemory && !showSkills;
 
   return (
     <div style={{ display: 'flex', height: '100vh', background: '#111', color: '#eee' }}>
-      <Sidebar username={auth.username} onLogout={logout}
+      <Sidebar
+        accounts={accounts.map((a) => ({ userId: a.userId, username: a.username }))}
+        activeUserId={activeUserId}
+        onSwitchAccount={handleSwitchAccount}
+        onAddAccount={handleAddAccount}
+        onRemoveAccount={handleRemoveAccount}
+        onLogout={logout}
         onChat={() => { setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); }}
         onDocuments={() => { setShowDocuments(true); setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); }}
         onSettings={() => { setShowSettings(true); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); }}
@@ -449,33 +570,36 @@ function AppInner() {
           <span style={{ fontWeight: 600, fontSize: 16 }}>Jcowork</span>
           <span style={{ width: 30 }} />
         </div>
-        {/* Content area with max-width for readability */}
+        {/* Content area */}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
-          {/* Chat stays mounted (hidden) while other tabs are active so that
-              running tasks keep streaming in the background and the conversation
-              state is preserved when switching back. */}
-          {activeConvId ? (
-            <div style={{ display: chatVisible ? 'flex' : 'none', flex: 1, flexDirection: 'column', minHeight: 0 }}>
-              <Chat
-                key={activeConvId}
-                userId={auth.userId}
-                token={auth.token}
-                conversationId={activeConvId}
-                onConversationsSync={setConversations}
-                visible={chatVisible}
-              />
-            </div>
-          ) : null}
-          {showSettings ? (
-            <Settings onClose={() => setShowSettings(false)} userId={auth.userId} token={auth.token} />
-          ) : showDocuments ? (
-            <Documents userId={auth.userId} token={auth.token} />
-          ) : showSchedule ? (
-            <Schedule userId={auth.userId} token={auth.token} />
-          ) : showMemory ? (
-            <Memory userId={auth.userId} token={auth.token} />
-          ) : showSkills ? (
-            <SkillsSquare userId={auth.userId} token={auth.token} />
+          {/* Render one Chat per account, all mounted. Only active is visible.
+              This keeps WS connections alive so background tasks continue streaming. */}
+          {accounts.map((acct) => {
+            const isActive = acct.userId === activeUserId;
+            const acctConvId = isActive ? activeConvId : (accountActiveConvRef.current[acct.userId] ?? '');
+            if (!acctConvId) return null;
+            return (
+              <div key={acct.userId} style={{ display: (isActive && chatVisible) ? 'flex' : 'none', flex: 1, flexDirection: 'column', minHeight: 0 }}>
+                <Chat
+                  userId={acct.userId}
+                  token={acct.token}
+                  conversationId={acctConvId}
+                  onConversationsSync={handleConversationsSync}
+                  visible={isActive && chatVisible}
+                />
+              </div>
+            );
+          })}
+          {showSettings && activeAccount ? (
+            <Settings onClose={() => setShowSettings(false)} userId={activeAccount.userId} token={activeAccount.token} />
+          ) : showDocuments && activeAccount ? (
+            <Documents userId={activeAccount.userId} token={activeAccount.token} />
+          ) : showSchedule && activeAccount ? (
+            <Schedule userId={activeAccount.userId} token={activeAccount.token} />
+          ) : showMemory && activeAccount ? (
+            <Memory userId={activeAccount.userId} token={activeAccount.token} />
+          ) : showSkills && activeAccount ? (
+            <SkillsSquare userId={activeAccount.userId} token={activeAccount.token} />
           ) : null}
         </div>
       </div>

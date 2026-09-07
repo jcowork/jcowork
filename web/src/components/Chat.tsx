@@ -21,7 +21,7 @@ interface ChatProps {
   userId: string;
   token: string;
   conversationId: string;
-  onConversationsSync?: (convs: Conversation[]) => void;
+  onConversationsSync?: (userId: string, convs: Conversation[]) => void;
   /** False while another tab is active — Chat stays mounted but hidden,
   *  so running tasks keep streaming in the background. */
   visible?: boolean;
@@ -444,8 +444,8 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
 
     // Record the user input (drives title + 1h history rule)
     const updated = [...messages, msg].filter((m) => !m.streaming && m.role !== 'system');
-    onConversationsSync?.(updateConvMessages(userId, conversationId, updated));
-    onConversationsSync?.(touchConversation(userId, conversationId));
+    onConversationsSync?.(userId, updateConvMessages(userId, conversationId, updated));
+    onConversationsSync?.(userId, touchConversation(userId, conversationId));
 
     // Read model from localStorage (set by Settings page)
     let model: string | undefined;
