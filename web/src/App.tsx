@@ -417,6 +417,8 @@ function AppInner() {
     );
   }
 
+  const chatVisible = !showSettings && !showDocuments && !showSchedule && !showMemory && !showSkills;
+
   return (
     <div style={{ display: 'flex', height: '100vh', background: '#111', color: '#eee' }}>
       <Sidebar username={auth.username} onLogout={logout}
@@ -449,6 +451,21 @@ function AppInner() {
         </div>
         {/* Content area with max-width for readability */}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
+          {/* Chat stays mounted (hidden) while other tabs are active so that
+              running tasks keep streaming in the background and the conversation
+              state is preserved when switching back. */}
+          {activeConvId ? (
+            <div style={{ display: chatVisible ? 'flex' : 'none', flex: 1, flexDirection: 'column', minHeight: 0 }}>
+              <Chat
+                key={activeConvId}
+                userId={auth.userId}
+                token={auth.token}
+                conversationId={activeConvId}
+                onConversationsSync={setConversations}
+                visible={chatVisible}
+              />
+            </div>
+          ) : null}
           {showSettings ? (
             <Settings onClose={() => setShowSettings(false)} userId={auth.userId} token={auth.token} />
           ) : showDocuments ? (
@@ -459,8 +476,6 @@ function AppInner() {
             <Memory userId={auth.userId} token={auth.token} />
           ) : showSkills ? (
             <SkillsSquare userId={auth.userId} token={auth.token} />
-          ) : activeConvId ? (
-            <Chat key={activeConvId} userId={auth.userId} token={auth.token} conversationId={activeConvId} onConversationsSync={setConversations} />
           ) : null}
         </div>
       </div>

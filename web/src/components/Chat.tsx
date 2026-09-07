@@ -22,6 +22,9 @@ interface ChatProps {
   token: string;
   conversationId: string;
   onConversationsSync?: (convs: Conversation[]) => void;
+  /** False while another tab is active — Chat stays mounted but hidden,
+  *  so running tasks keep streaming in the background. */
+  visible?: boolean;
 }
 
 // Copy button for message bubbles
@@ -127,7 +130,7 @@ function loadMessages(userId: string, conversationId: string): Message[] {
   return (conv?.messages ?? []).filter((m) => !m.streaming);
 }
 
-export default function Chat({ userId, token, conversationId, onConversationsSync }: ChatProps) {
+export default function Chat({ userId, token, conversationId, onConversationsSync, visible = true }: ChatProps) {
   const t = useT();
   const [messages, setMessages] = useState<Message[]>(() => loadMessages(userId, conversationId));
   const [input, setInput] = useState('');
@@ -137,6 +140,12 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
   const [alarmActive, setAlarmActive] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  // --- Tab-switch preservation (App keeps Chat mounted but hidden) ---
+  const scrollRef = useRef<HTMLDivElement>(null);   // messages scroll container
+  const savedScrollRef = useRef(0);                 // scrollTop captured while visible
+  const activityRef = useRef(false);                // content arrived while hidden
+  const visibleRef = useRef(visible);               // mirror for WS closures
+  const prevVisibleRef = useRef(visible);           // previous visibility (transitions)
   const alarmRef = useRef<{ ctx: AudioContext | null; timer: number | null; playing: boolean }>({ ctx: null, timer: null, playing: false });
 
   // Document picker state
@@ -183,6 +192,8 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
     };
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
+      // Track background activity so we can jump to the latest content on return
+      if (!visibleRef.current) activityRef.current = true;
       if (data.type === 'text_delta') {
         setMessages((prev) => {
           const last = prev[prev.length - 1];
@@ -271,8 +282,39 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
     return () => wsRef.current?.close();
   }, [connect]);
 
+  // Keep the visibility mirror in sync (WS closures read the ref)
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    visibleRef.current = visible;
+  }, [visible]);
+
+  // Track scroll position while visible; display:none resets scrollTop on hide
+  useEffect(() => {
+    if (!visible) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const onScroll = () => { savedScrollRef.current = el.scrollTop; };
+    el.addEventListener('scroll', onScroll);
+    return () => el.removeEventListener('scroll', onScroll);
+  }, [visible]);
+
+  // On tab return: jump to the live bottom if content arrived while hidden
+  // (or a stream is still running), otherwise restore the saved position.
+  useEffect(() => {
+    if (visible && !prevVisibleRef.current) {
+      requestAnimationFrame(() => {
+        const el = scrollRef.current;
+        if (!el) return;
+        el.scrollTop = (activityRef.current || streaming) ? el.scrollHeight : savedScrollRef.current;
+        activityRef.current = false;
+      });
+    }
+    prevVisibleRef.current = visible;
+  }, [visible, streaming]);
+
+  useEffect(() => {
+    if (visibleRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
   }, [messages]);
 
   // Close doc picker on outside click
@@ -569,7 +611,7 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
         </button>
       </div>
 
-      <div style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
+      <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
         <div className="chat-messages-inner">
         {messages.map((msg, i) => {
           const isUser = msg.role === 'user';
