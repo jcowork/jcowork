@@ -130,6 +130,20 @@ impl UserStore {
         Ok(user)
     }
 
+    /// Update a user's password hash.
+    pub async fn update_password_hash(&self, user_id: &str, new_hash: &str) -> Result<()> {
+        let result = sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
+            .bind(new_hash)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            anyhow::bail!("User not found");
+        }
+        Ok(())
+    }
+
     /// Look up a user by Feishu open_id.
     pub async fn get_user_by_feishu_open_id(&self, open_id: &str) -> Result<Option<User>> {
         let user = sqlx::query_as::<_, User>(

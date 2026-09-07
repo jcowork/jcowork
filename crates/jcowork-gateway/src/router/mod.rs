@@ -74,6 +74,8 @@ pub struct AppState {
     pub feishu_config_store: Arc<FeishuConfigStore>,
     /// Cache of FeishuClient instances keyed by app_id.
     pub feishu_client_cache: Arc<DashMap<String, Arc<FeishuClient>>>,
+    /// In-memory password reset codes (valid 10 min each, local/self-hosted).
+    pub reset_codes: Arc<DashMap<String, ResetCodeEntry>>,
     /// Data directory for per-user workspaces.
     pub data_dir: String,
 }
@@ -109,6 +111,26 @@ pub struct AuthResponse {
 pub struct LoginRequest {
     pub username: String,
     pub password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ForgotPasswordRequest {
+    pub username: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResetPasswordRequest {
+    pub username: String,
+    pub code: String,
+    pub password: String,
+}
+
+/// In-memory password reset code (used for local/self-hosted deployments).
+#[derive(Debug, Clone)]
+pub struct ResetCodeEntry {
+    pub code: String,
+    pub expires_at: i64,
+    pub user_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -170,6 +192,8 @@ pub fn build_router(state: AppState) -> Router {
     let public = Router::new()
         .route("/api/auth/register", post(auth_api::register))
         .route("/api/auth/login", post(auth_api::login))
+        .route("/api/auth/forgot-password", post(auth_api::forgot_password))
+        .route("/api/auth/reset-password", post(auth_api::reset_password))
         .route("/api/health", get(auth_api::health))
         .route("/api/feishu/event", post(crate::feishu::feishu_event_handler));
 

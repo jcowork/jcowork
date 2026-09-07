@@ -68,7 +68,11 @@ function AppInner() {
   const [activeConvId, setActiveConvIdState] = useState<string>('');
   const [, setTick] = useState(0); // periodic re-render for 1h history threshold
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
-  const [isRegister, setIsRegister] = useState(false);
+  const [authView, setAuthView] = useState<'login' | 'register' | 'forgot'>('login');
+  const [forgotStep, setForgotStep] = useState<'request' | 'reset'>('request');
+  const [forgotUsername, setForgotUsername] = useState('');
+  const [generatedCode, setGeneratedCode] = useState<string | null>(null);
+  const [resetForm, setResetForm] = useState({ code: '', password: '', confirmPassword: '' });
   const hiddenTimeRef = useRef(0);
 
   // Sleep/wake recovery: when the page becomes visible again after being hidden
@@ -157,7 +161,7 @@ function AppInner() {
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
-    const endpoint = isRegister ? '/api/auth/register' : '/api/auth/login';
+    const endpoint = authView === 'register' ? '/api/auth/register' : '/api/auth/login';
     try {
       const res = await fetch(`${API_BASE}${endpoint}`, {
         method: 'POST',
@@ -182,12 +186,144 @@ function AppInner() {
     }
   };
 
+  const handleForgotPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/forgot-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: forgotUsername }),
+      });
+      const data = await res.json();
+      if (data.code) {
+        setGeneratedCode(data.code);
+        setForgotStep('reset');
+      } else if (data.error) {
+        alert(data.error);
+      }
+    } catch {
+      alert('Failed to generate reset code.');
+    }
+  };
+
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (resetForm.password !== resetForm.confirmPassword) {
+      alert(t('passwordMismatch'));
+      return;
+    }
+    if (resetForm.password.length < 6) {
+      alert(t('passwordTooShort'));
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/reset-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: forgotUsername, code: resetForm.code, password: resetForm.password }),
+      });
+      const data = await res.json();
+      if (data.message) {
+        alert(t('resetSuccess'));
+        setAuthView('login');
+        setForgotStep('request');
+        setGeneratedCode(null);
+        setResetForm({ code: '', password: '', confirmPassword: '' });
+        setForgotUsername('');
+      } else if (data.error) {
+        alert(data.error);
+      }
+    } catch {
+      alert('Failed to reset password.');
+    }
+  };
+
+  const goBackToLogin = () => {
+    setAuthView('login');
+    setForgotStep('request');
+    setGeneratedCode(null);
+    setResetForm({ code: '', password: '', confirmPassword: '' });
+    setForgotUsername('');
+  };
+
   const logout = () => {
     setAuth(null);
     localStorage.removeItem('jcowork_auth');
   };
 
   if (!auth) {
+    const inputStyle = { width: '100%', padding: 10, marginBottom: 12, borderRadius: 8, border: '1px solid #555', background: '#1a1a1a', color: '#eee', fontSize: 16 };
+    const btnStyle = { width: '100%', padding: 10, borderRadius: 8, border: 'none', background: '#1a73e8', color: '#fff', fontSize: 16, cursor: 'pointer' };
+
+    if (authView === 'forgot') {
+      return (
+        <div className="login-container">
+          <div className="login-card">
+            <h1 style={{ fontSize: 28, marginBottom: 24 }}>Jcowork Agent</h1>
+            {forgotStep === 'request' ? (
+              <form onSubmit={handleForgotPassword}>
+                <p style={{ color: '#888', marginBottom: 16, fontSize: 14 }}>{t('forgotPassword')}</p>
+                <input
+                  type="text"
+                  placeholder={t('username')}
+                  value={forgotUsername}
+                  onChange={(e) => setForgotUsername(e.target.value)}
+                  required
+                  style={inputStyle}
+                />
+                <button type="submit" style={btnStyle}>
+                  {t('getResetCode')}
+                </button>
+              </form>
+            ) : (
+              <form onSubmit={handleResetPassword}>
+                <div style={{ background: '#1a2744', border: '1px solid #1a73e8', borderRadius: 8, padding: 12, marginBottom: 16, textAlign: 'center' }}>
+                  <p style={{ color: '#1a73e8', fontSize: 13, marginBottom: 4 }}>{t('resetCodeGenerated')}</p>
+                  <p style={{ color: '#888', fontSize: 12, marginBottom: 8 }}>{t('resetCodeExpiresIn')}</p>
+                  <p style={{ fontSize: 32, fontFamily: 'monospace', letterSpacing: 6, margin: 0, color: '#fff' }}>
+                    {generatedCode}
+                  </p>
+                </div>
+                <input
+                  type="text"
+                  placeholder={t('resetCode')}
+                  value={resetForm.code}
+                  onChange={(e) => setResetForm({ ...resetForm, code: e.target.value })}
+                  required
+                  maxLength={6}
+                  style={{ ...inputStyle, letterSpacing: 4, textAlign: 'center', fontSize: 20 }}
+                />
+                <input
+                  type="password"
+                  placeholder={t('newPassword')}
+                  value={resetForm.password}
+                  onChange={(e) => setResetForm({ ...resetForm, password: e.target.value })}
+                  required
+                  style={inputStyle}
+                />
+                <input
+                  type="password"
+                  placeholder={t('confirmPassword')}
+                  value={resetForm.confirmPassword}
+                  onChange={(e) => setResetForm({ ...resetForm, confirmPassword: e.target.value })}
+                  required
+                  style={{ ...inputStyle, marginBottom: 16 }}
+                />
+                <button type="submit" style={btnStyle}>
+                  {t('resetPassword')}
+                </button>
+              </form>
+            )}
+            <p style={{ marginTop: 16, textAlign: 'center' }}>
+              <a href="#" onClick={goBackToLogin} style={{ color: '#1a73e8' }}>
+                {t('backToLogin')}
+              </a>
+            </p>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="login-container">
         <div className="login-card">
@@ -198,26 +334,30 @@ function AppInner() {
               placeholder={t('username')}
               value={loginForm.username}
               onChange={(e) => setLoginForm({ ...loginForm, username: e.target.value })}
-              style={{ width: '100%', padding: 10, marginBottom: 12, borderRadius: 8, border: '1px solid #555', background: '#1a1a1a', color: '#eee', fontSize: 16 }}
+              style={inputStyle}
             />
             <input
               type="password"
               placeholder={t('password')}
               value={loginForm.password}
               onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })}
-              style={{ width: '100%', padding: 10, marginBottom: 16, borderRadius: 8, border: '1px solid #555', background: '#1a1a1a', color: '#eee', fontSize: 16 }}
+              style={inputStyle}
             />
-            <button
-              type="submit"
-              style={{ width: '100%', padding: 10, borderRadius: 8, border: 'none', background: '#1a73e8', color: '#fff', fontSize: 16, cursor: 'pointer' }}
-            >
-              {isRegister ? t('register') : t('login')}
+            <button type="submit" style={{ ...btnStyle, marginBottom: 0 }}>
+              {authView === 'register' ? t('register') : t('login')}
             </button>
           </form>
+          {authView === 'login' && (
+            <p style={{ marginTop: 12, textAlign: 'center' }}>
+              <a href="#" onClick={() => setAuthView('forgot')} style={{ color: '#1a73e8', fontSize: 14 }}>
+                {t('forgotPassword')}
+              </a>
+            </p>
+          )}
           <p style={{ marginTop: 16, textAlign: 'center' }}>
-            <span style={{ color: '#888' }}>{isRegister ? t('alreadyHaveAccount') : t('dontHaveAccount')}</span>{' '}
-            <a href="#" onClick={() => setIsRegister(!isRegister)} style={{ color: '#1a73e8' }}>
-              {isRegister ? t('login') : t('register')}
+            <span style={{ color: '#888' }}>{authView === 'register' ? t('alreadyHaveAccount') : t('dontHaveAccount')}</span>{' '}
+            <a href="#" onClick={() => setAuthView(authView === 'register' ? 'login' : 'register')} style={{ color: '#1a73e8' }}>
+              {authView === 'register' ? t('login') : t('register')}
             </a>
           </p>
         </div>
