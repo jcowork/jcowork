@@ -27,6 +27,7 @@ const translations = {
     addAccount: '添加账户',
     switchAccount: '切换账户',
     removeAccount: '移除账户',
+    searchContacts: '搜索联系人',
 
     // Login
     username: '用户名',
@@ -354,6 +355,7 @@ const translations = {
     addAccount: 'Add Account',
     switchAccount: 'Switch Account',
     removeAccount: 'Remove Account',
+    searchContacts: 'Search contacts',
 
     // Login
     username: 'Username',

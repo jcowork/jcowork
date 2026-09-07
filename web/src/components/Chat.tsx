@@ -22,6 +22,8 @@ interface ChatProps {
   token: string;
   conversationId: string;
   onConversationsSync?: (userId: string, convs: Conversation[]) => void;
+  /** Notifies parent when this Chat's streaming state changes (for background task indicators). */
+  onStreamingChange?: (userId: string, isStreaming: boolean) => void;
   /** False while another tab is active — Chat stays mounted but hidden,
   *  so running tasks keep streaming in the background. */
   visible?: boolean;
@@ -130,7 +132,7 @@ function loadMessages(userId: string, conversationId: string): Message[] {
   return (conv?.messages ?? []).filter((m) => !m.streaming);
 }
 
-export default function Chat({ userId, token, conversationId, onConversationsSync, visible = true }: ChatProps) {
+export default function Chat({ userId, token, conversationId, onConversationsSync, onStreamingChange, visible = true }: ChatProps) {
   const t = useT();
   const [messages, setMessages] = useState<Message[]>(() => loadMessages(userId, conversationId));
   const [input, setInput] = useState('');
@@ -310,6 +312,11 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
   useEffect(() => {
     visibleRef.current = visible;
   }, [visible]);
+
+  // Notify parent when streaming state changes (for background task indicators)
+  useEffect(() => {
+    onStreamingChange?.(userId, streaming);
+  }, [userId, streaming]);
 
   // Track scroll position while visible; display:none resets scrollTop on hide
   useEffect(() => {

@@ -5,6 +5,8 @@ import { type Conversation } from '../chatStore';
 interface SidebarProps {
   accounts: { userId: string; username: string }[];
   activeUserId: string;
+  streamingAccounts?: Set<string>;
+  unreadAccounts?: Set<string>;
   onSwitchAccount: (userId: string) => void;
   onAddAccount: () => void;
   onRemoveAccount: (userId: string) => void;
@@ -25,12 +27,15 @@ interface SidebarProps {
   onClose?: () => void;
 }
 
-export default function Sidebar({ accounts, activeUserId, onSwitchAccount, onAddAccount, onRemoveAccount, onLogout, onChat, onSettings, onSchedule, onMemory, onSkills, onDocuments, currentView, conversations, activeConvId, onNewChat, onSelectConversation, onDeleteConversation, mobileOpen, onClose }: SidebarProps) {
+export default function Sidebar({ accounts, activeUserId, streamingAccounts, unreadAccounts, onSwitchAccount, onAddAccount, onRemoveAccount, onLogout, onChat, onSettings, onSchedule, onMemory, onSkills, onDocuments, currentView, conversations, activeConvId, onNewChat, onSelectConversation, onDeleteConversation, mobileOpen, onClose }: SidebarProps) {
   const t = useT();
   const { lang, setLang } = useLang();
   const [historyOpen, setHistoryOpen] = useState(true);
   // window.confirm is unsupported in Tauri's WKWebView, use a custom modal
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  // Contacts section state
+  const [contactsOpen, setContactsOpen] = useState(true);
+  const [contactsSearch, setContactsSearch] = useState('');
 
   // Show all conversations with messages (except the currently active one)
   const historyConvs = conversations
@@ -90,47 +95,101 @@ export default function Sidebar({ accounts, activeUserId, onSwitchAccount, onAdd
 
         {/* Contacts section */}
         <div style={{ marginBottom: 16 }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-            <div style={{ color: '#888', fontSize: 12, textTransform: 'uppercase' }}>{t('contacts')}</div>
-            <button
-              onClick={onAddAccount}
-              title={t('addAccount')}
-              style={{
-                background: 'none', border: 'none', color: '#888', cursor: 'pointer',
-                fontSize: 16, lineHeight: 1, padding: '0 2px',
-              }}
-            >+</button>
-          </div>
-          {accounts.map((a) => (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: contactsOpen ? 8 : 0 }}>
             <div
-              key={a.userId}
-              onClick={() => onSwitchAccount(a.userId)}
-              style={{
-                display: 'flex', alignItems: 'center', padding: '6px 8px',
-                borderRadius: 6, cursor: 'pointer', marginBottom: 2,
-                background: a.userId === activeUserId ? '#2a2a2a' : 'transparent',
-              }}
+              onClick={() => setContactsOpen((o) => !o)}
+              style={{ color: '#888', fontSize: 12, textTransform: 'uppercase', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, flex: 1 }}
             >
-              <span style={{
-                flex: 1, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-                color: a.userId === activeUserId ? '#eee' : '#999',
-                fontWeight: a.userId === activeUserId ? 600 : 400,
-              }}>
-                {a.username}
-              </span>
-              {a.userId !== activeUserId && (
-                <button
-                  onClick={(e) => { e.stopPropagation(); onRemoveAccount(a.userId); }}
-                  title={t('removeAccount')}
-                  style={{
-                    background: 'none', border: 'none', color: '#666', cursor: 'pointer',
-                    fontSize: 11, padding: '0 2px', flexShrink: 0,
-                  }}
-                >✕</button>
+              <span style={{ fontSize: 10 }}>{contactsOpen ? '▼' : '▶'}</span>
+              {t('contacts')}
+              {unreadAccounts && unreadAccounts.size > 0 && (
+                <span style={{
+                  background: '#e53935', color: '#fff', borderRadius: '50%',
+                  width: 16, height: 16, fontSize: 10, display: 'inline-flex',
+                  alignItems: 'center', justifyContent: 'center', fontWeight: 700,
+                }}>{unreadAccounts.size}</span>
               )}
             </div>
-          ))}
+            {contactsOpen && (
+              <button
+                onClick={onAddAccount}
+                title={t('addAccount')}
+                style={{
+                  background: 'none', border: 'none', color: '#888', cursor: 'pointer',
+                  fontSize: 16, lineHeight: 1, padding: '0 2px',
+                }}
+              >+</button>
+            )}
+          </div>
+          {contactsOpen && (
+            <>
+              {accounts.length > 3 && (
+                <input
+                  type="text"
+                  placeholder={t('searchContacts')}
+                  value={contactsSearch}
+                  onChange={(e) => setContactsSearch(e.target.value)}
+                  style={{
+                    width: '100%', padding: '5px 8px', borderRadius: 5,
+                    border: '1px solid #333', background: '#222', color: '#ccc',
+                    fontSize: 12, marginBottom: 6, outline: 'none',
+                    boxSizing: 'border-box',
+                  }}
+                />
+              )}
+              {accounts
+                .filter((a) => !contactsSearch || a.username.toLowerCase().includes(contactsSearch.toLowerCase()))
+                .map((a) => {
+                const isStreaming = streamingAccounts?.has(a.userId) ?? false;
+                const hasUnread = unreadAccounts?.has(a.userId) ?? false;
+                return (
+                  <div
+                    key={a.userId}
+                    onClick={() => onSwitchAccount(a.userId)}
+                    style={{
+                      display: 'flex', alignItems: 'center', padding: '6px 8px',
+                      borderRadius: 6, cursor: 'pointer', marginBottom: 2,
+                      background: a.userId === activeUserId ? '#2a2a2a' : 'transparent',
+                    }}
+                  >
+                    <span style={{
+                      flex: 1, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      color: a.userId === activeUserId ? '#eee' : '#999',
+                      fontWeight: a.userId === activeUserId ? 600 : 400,
+                    }}>
+                      {a.username}
+                    </span>
+                    {isStreaming && (
+                      <span style={{
+                        display: 'inline-block', width: 8, height: 8,
+                        borderRadius: '50%', background: '#4caf50',
+                        flexShrink: 0, marginLeft: 4,
+                        animation: 'pulse 1.5s infinite',
+                      }} title="Task running" />
+                    )}
+                    {!isStreaming && hasUnread && (
+                      <span style={{
+                        display: 'inline-block', width: 8, height: 8,
+                        borderRadius: '50%', background: '#ff9800',
+                        flexShrink: 0, marginLeft: 4,
+                      }} title="Unread results" />
+                    )}
+                    {a.userId !== activeUserId && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onRemoveAccount(a.userId); }}
+                        title={t('removeAccount')}
+                        style={{
+                          background: 'none', border: 'none', color: '#666', cursor: 'pointer',
+                          fontSize: 11, padding: '0 2px', flexShrink: 0,
+                        }}
+                      >✕</button>
+                    )}
+                  </div>
+                );
+              })}
+            </>
+          )}
         </div>
 
         <div style={{ flex: 1 }}>

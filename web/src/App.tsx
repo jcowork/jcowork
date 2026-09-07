@@ -109,6 +109,10 @@ function AppInner() {
   const accountConvsRef = useRef<Record<string, Conversation[]>>({});
   // Per-account active conversation ID
   const accountActiveConvRef = useRef<Record<string, string>>({});
+  // Accounts currently streaming a task
+  const [streamingAccounts, setStreamingAccounts] = useState<Set<string>>(new Set());
+  // Accounts with completed-but-unread tasks (set when background task finishes, cleared on switch)
+  const [unreadAccounts, setUnreadAccounts] = useState<Set<string>>(new Set());
 
   const activeAccount = accounts.find((a) => a.userId === activeUserId) ?? null;
 
@@ -348,6 +352,13 @@ function AppInner() {
     }
     setActiveUserId(userId);
     setActiveAccount(userId);
+    // Clear unread marker for the account we just switched to
+    setUnreadAccounts((prev) => {
+      if (!prev.has(userId)) return prev;
+      const next = new Set(prev);
+      next.delete(userId);
+      return next;
+    });
     // Reset tab state on account switch
     setShowSettings(false); setShowSchedule(false); setShowMemory(false);
     setShowSkills(false); setShowDocuments(false);
@@ -387,6 +398,33 @@ function AppInner() {
     if (userId === activeUserId) {
       setConversations(convs);
     }
+  }, [activeUserId]);
+
+  // Handle streaming state changes from each Chat component
+  const handleStreamingChange = useCallback((userId: string, isStreaming: boolean) => {
+    setStreamingAccounts((prev) => {
+      const has = prev.has(userId);
+      if (isStreaming && !has) {
+        const next = new Set(prev);
+        next.add(userId);
+        return next;
+      }
+      if (!isStreaming && has) {
+        const next = new Set(prev);
+        next.delete(userId);
+        // Task just finished on a background account → mark unread
+        if (userId !== activeUserId) {
+          setUnreadAccounts((u) => {
+            if (u.has(userId)) return u;
+            const nu = new Set(u);
+            nu.add(userId);
+            return nu;
+          });
+        }
+        return next;
+      }
+      return prev;
+    });
   }, [activeUserId]);
 
   if (accounts.length === 0 || addingAccount) {
@@ -539,6 +577,8 @@ function AppInner() {
       <Sidebar
         accounts={accounts.map((a) => ({ userId: a.userId, username: a.username }))}
         activeUserId={activeUserId}
+        streamingAccounts={streamingAccounts}
+        unreadAccounts={unreadAccounts}
         onSwitchAccount={handleSwitchAccount}
         onAddAccount={handleAddAccount}
         onRemoveAccount={handleRemoveAccount}
@@ -585,6 +625,7 @@ function AppInner() {
                   token={acct.token}
                   conversationId={acctConvId}
                   onConversationsSync={handleConversationsSync}
+                  onStreamingChange={handleStreamingChange}
                   visible={isActive && chatVisible}
                 />
               </div>
