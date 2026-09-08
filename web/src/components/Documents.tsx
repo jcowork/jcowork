@@ -732,6 +732,19 @@ export default function Documents({ token }: DocumentsProps) {
     a.click();
   };
 
+  // Download the extracted Markdown preview content for PDFs
+  const downloadMarkdown = (filePath: string, content: string) => {
+    const originalName = filePath.split('/').pop() || 'document';
+    const baseName = originalName.replace(/\.pdf$/i, '');
+    const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${baseName}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const openInNewTab = (filePath: string) => {
     const url = `${API_BASE}/api/workspace/download?path=${encodeURIComponent(filePath)}&token=${encodeURIComponent(token)}`;
     // In Tauri WebView, use native command to open in system browser
@@ -1336,6 +1349,22 @@ export default function Documents({ token }: DocumentsProps) {
                 >
                   {t('download')}
                 </button>
+                {previewPath.endsWith('.pdf') && (
+                  <button
+                    onClick={() => downloadMarkdown(previewPath, previewContent)}
+                    style={{
+                      padding: '3px 10px',
+                      borderRadius: 4,
+                      border: '1px solid #1f6feb',
+                      background: 'transparent',
+                      color: '#58a6ff',
+                      cursor: 'pointer',
+                      fontSize: 12,
+                    }}
+                  >
+                    📝 {t('downloadMarkdown')}
+                  </button>
+                )}
                 <button
                   onClick={() => {
                     if (editing && editDirty && !confirm('有未保存的更改，确定关闭吗？')) return;
