@@ -127,13 +127,18 @@ The file must be complete and runnable — the user should be able to save it as
         hidden: false,
         content: r#"## Skill: web_search — Web Search & Answer
 
-When a question requires up-to-date or real-world information that you don't know from training data, use the `web_search` tool to find answers on the internet.
+Use the `web_search` tool ONLY after local document retrieval (doc_retrieve) returns no relevant results, OR when the question explicitly requires up-to-date or real-world information from the internet.
 
 ### When to use this skill
-- Questions about current events, news, prices, or recent data
-- Questions about specific products, companies, people you are uncertain about
-- Any question where your training knowledge may be outdated or incomplete
+- Questions about current events, news, prices, or recent data that are not covered by local documents
+- Questions about specific products, companies, people you are uncertain about AND that local documents do not answer
+- Any question where your training knowledge may be outdated or incomplete AND local documents are unavailable or insufficient
 - User explicitly asks you to search the web
+
+### Priority
+1. First, try `doc_retrieve` for any factual question if documents are available in the workspace.
+2. Only if doc_retrieve returns no relevant results, use `web_search`.
+3. If the user explicitly asks for online information, you may skip doc_retrieve.
 
 ### Query formulation tips
 - Keep queries concise: 3-6 key terms work best

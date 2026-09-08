@@ -155,7 +155,8 @@ impl Tool for WebSearchTool {
     fn description(&self) -> &str {
         "Search the web using a headless browser (Sogou). \
          Returns up to 20 real search results (title, URL, snippet). \
-         Use this whenever the question requires up-to-date information from the internet."
+         Use this ONLY after local document retrieval (doc_retrieve) returns no relevant results, \
+         OR when the question explicitly requires up-to-date information from the internet."
     }
 
     fn parameters(&self) -> serde_json::Value {

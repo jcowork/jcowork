@@ -996,6 +996,7 @@ CRITICAL REMINDER RULES:
 - After all reminder_add calls return success, briefly confirm the total count to the user.
 
 Document search guidance:
+- **PRIORITY RULE: When the user asks a factual question, ALWAYS try local document retrieval (doc_retrieve) FIRST, before using web_search.** Only fall back to web_search if the local documents return no relevant results, or if the user explicitly asks for online/internet information.
 - **If the user attached documents to this conversation, the content is already provided above.** Read it directly — do NOT call doc_retrieve for attached documents.
 - Use **doc_retrieve** for all document searches. It automatically tries semantic search first, then falls back to keyword search. One tool call handles everything.
 - Keep the doc_retrieve `query` argument short and copied from the user's original words (e.g. 用户问"雨的四季全文" → query 就是"雨的四季"). NEVER add author names, synonyms, or filler words like 全文/内容/课文 — extra words dilute the embedding and hurt recall.
