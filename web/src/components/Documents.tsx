@@ -1394,7 +1394,7 @@ export default function Documents({ token }: DocumentsProps) {
               </div>
             )}
             <div
-              style={{ flex: 1, overflow: 'hidden', padding: editing ? 0 : 16 }}
+              style={{ flex: 1, overflow: 'auto', padding: editing ? 0 : 16 }}
               onScroll={(e) => {
                 if (editing) return;
                 const el = e.currentTarget;
