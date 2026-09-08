@@ -148,6 +148,7 @@ export default function Documents({ token }: DocumentsProps) {
   // Pagination state for long documents (PDF preview "load more on scroll")
   const [previewPaging, setPreviewPaging] = useState<{ nextOffset: number } | null>(null);
   const [previewLoadingMore, setPreviewLoadingMore] = useState(false);
+  const [downloadingMarkdown, setDownloadingMarkdown] = useState(false);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [creatingFolder, setCreatingFolder] = useState(false);
@@ -732,11 +733,51 @@ export default function Documents({ token }: DocumentsProps) {
     a.click();
   };
 
-  // Download the extracted Markdown preview content for PDFs
-  const downloadMarkdown = (filePath: string, content: string) => {
+  // Download the extracted Markdown preview content for PDFs.
+  // PDF images referenced in the Markdown are fetched and inlined as base64
+  // so the downloaded .md file is self-contained.
+  const downloadMarkdown = async (filePath: string, content: string) => {
     const originalName = filePath.split('/').pop() || 'document';
     const baseName = originalName.replace(/\.pdf$/i, '');
-    const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
+
+    // Regex for Markdown images: ![alt](src "title")
+    const mdImageRegex = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+    // Regex for HTML img tags: <img ... src="..." ...>
+    const htmlImgRegex = /<img[^>]+src=["']([^"']+)["'][^>]*>/g;
+
+    const srcs = new Set<string>();
+    let match;
+    while ((match = mdImageRegex.exec(content)) !== null) {
+      srcs.add(match[2]);
+    }
+    while ((match = htmlImgRegex.exec(content)) !== null) {
+      srcs.add(match[1]);
+    }
+
+    let inlinedContent = content;
+    for (const src of srcs) {
+      // Skip already-inlined or external URLs
+      if (src.startsWith('data:') || src.startsWith('http://') || src.startsWith('https://')) continue;
+      const filename = src.split('/').pop() || '';
+      const imageUrl = `${API_BASE}/api/workspace/doc/image?file_path=${encodeURIComponent(filePath)}&filename=${encodeURIComponent(filename)}`;
+      try {
+        const res = await fetch(imageUrl, { headers: { Authorization: `Bearer ${token}` } });
+        if (!res.ok) continue;
+        const blob = await res.blob();
+        const dataUrl = await new Promise<string>((resolve) => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result as string);
+          reader.readAsDataURL(blob);
+        });
+        // Escape special regex chars in src before replacing
+        const escaped = src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        inlinedContent = inlinedContent.replace(new RegExp(escaped, 'g'), dataUrl);
+      } catch {
+        // Leave original src on failure
+      }
+    }
+
+    const blob = new Blob([inlinedContent], { type: 'text/markdown;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1351,18 +1392,26 @@ export default function Documents({ token }: DocumentsProps) {
                 </button>
                 {previewPath.endsWith('.pdf') && (
                   <button
-                    onClick={() => downloadMarkdown(previewPath, previewContent)}
+                    onClick={async () => {
+                      setDownloadingMarkdown(true);
+                      try {
+                        await downloadMarkdown(previewPath, previewContent);
+                      } finally {
+                        setDownloadingMarkdown(false);
+                      }
+                    }}
+                    disabled={downloadingMarkdown}
                     style={{
                       padding: '3px 10px',
                       borderRadius: 4,
                       border: '1px solid #1f6feb',
                       background: 'transparent',
-                      color: '#58a6ff',
-                      cursor: 'pointer',
+                      color: downloadingMarkdown ? '#666' : '#58a6ff',
+                      cursor: downloadingMarkdown ? 'not-allowed' : 'pointer',
                       fontSize: 12,
                     }}
                   >
-                    📝 {t('downloadMarkdown')}
+                    {downloadingMarkdown ? '⏳' : '📝'} {t('downloadMarkdown')}
                   </button>
                 )}
                 <button
