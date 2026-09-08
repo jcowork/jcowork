@@ -548,6 +548,8 @@ pub(crate) async fn get_docling_status() -> impl IntoResponse {
         "service_url": status.service_url,
         "message": status.message,
         "setup": status.setup,
+        "pdftext_ready": status.pdftext_ready,
+        "setup_error": status.setup_error,
     }))).into_response()
 }
 

@@ -166,6 +166,26 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
   const [urlFetching, setUrlFetching] = useState(false);
   const urlInputRef = useRef<HTMLDivElement>(null);
 
+  // Reset conversation-scoped state when switching to a different conversation
+  // (clicking "+" for a new task chat, or picking a history item). The Chat
+  // instance stays mounted per account, so a `conversationId` prop change must
+  // explicitly reload messages — otherwise the previous conversation keeps
+  // rendering and its messages leak into the new conversation through the
+  // persistence effect below. Uses React's "adjust state during render" pattern
+  // so the reload happens before effects run (no stale writes, no remount).
+  const [loadedConvId, setLoadedConvId] = useState(conversationId);
+  if (loadedConvId !== conversationId) {
+    setLoadedConvId(conversationId);
+    setMessages(loadMessages(userId, conversationId));
+    setInput('');
+    setStatusMsg('');
+    setSelectedDocs([]);
+    setStreaming(false);
+    setShowDocPicker(false);
+    setShowUrlInput(false);
+    setUrlInput('');
+  }
+
   const connect = useCallback(() => {
     let wsUrl: string;
     if (WS_BASE) {

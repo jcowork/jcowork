@@ -385,11 +385,14 @@ export default function Documents({ token }: DocumentsProps) {
             if (!status.running) {
               if (status.setup === 'installing') {
                 // Fresh install: dependencies are being installed in the
-                // background. Do not block — proceed with the upload; parsing
-                // will fail gracefully until installation completes.
-                setStatusMessage(t('doclingInstalling'));
+                // background. Do not block — proceed with the upload. When the
+                // lightweight pdftext parser is already available, PDFs are
+                // fully searchable now; structured parsing unlocks later.
+                setStatusMessage(status.pdftext_ready ? t('doclingInstallingPdfReady') : t('doclingInstalling'));
               } else if (status.setup === 'failed') {
-                setStatusMessage(t('doclingSetupFailed'));
+                // Even on failure, pdftext may have installed in phase 1, so
+                // PDF uploads can still succeed via the fallback parser.
+                setStatusMessage(status.pdftext_ready ? t('doclingInstallingPdfReady') : t('doclingSetupFailed'));
               } else {
                 // Start Docling service
                 setStatusMessage(t('doclingStarting'));

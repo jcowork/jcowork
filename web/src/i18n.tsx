@@ -108,6 +108,7 @@ const translations = {
     doclingStartFailed: 'Docling 服务启动失败',
     doclingChecking: '正在检查 Docling 服务...',
     doclingInstalling: '首次使用：正在后台安装文档解析依赖（需联网），不影响对话；安装完成前文档索引暂不可用',
+    doclingInstallingPdfReady: '首次使用：正在后台安装完整文档解析依赖（需联网）；PDF 已可上传并进行全文检索，安装完成后将自动支持结构化解析与语义搜索',
     doclingSetupFailed: '文档解析依赖安装失败，请检查网络后重启应用重试',
     pdfParsing: 'PDF 正在解析中...',
 
@@ -437,6 +438,7 @@ const translations = {
     doclingStartFailed: 'Docling service failed to start',
     doclingChecking: 'Checking Docling service...',
     doclingInstalling: 'First run: installing document parsing dependencies in the background (needs internet). Chat is unaffected; document indexing is unavailable until installation finishes',
+    doclingInstallingPdfReady: 'First run: installing full document parsing dependencies in the background (needs internet). PDFs can already be uploaded and full-text searched; structured parsing and semantic search unlock once installation finishes',
     doclingSetupFailed: 'Document parsing dependency installation failed. Check your network and restart the app to retry',
     pdfParsing: 'PDF is being parsed...',
 

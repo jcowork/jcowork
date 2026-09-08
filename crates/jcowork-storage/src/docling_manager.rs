@@ -25,6 +25,11 @@ pub struct DoclingStatus {
     pub message: String,
     /// Python environment bootstrap state (fresh installs).
     pub setup: SetupState,
+    /// True when the lightweight pdftext parser is available, so PDFs can be
+    /// indexed for full-text search even before the Docling service is ready.
+    pub pdftext_ready: bool,
+    /// Most recent setup failure reason (empty when setup has not failed).
+    pub setup_error: String,
 }
 
 /// Outcome of a [`DoclingManager::prewarm`] attempt.
@@ -90,6 +95,9 @@ pub struct DoclingManager {
     setup_lock: Mutex<()>,
     /// Current [`SetupState`] (atomic so it can be read without a lock).
     setup_state: AtomicU8,
+    /// Human-readable reason for the most recent setup failure, surfaced to
+    /// the user instead of a generic "installing" message.
+    last_setup_error: std::sync::Mutex<Option<String>>,
 }
 
 impl DoclingManager {
@@ -99,6 +107,7 @@ impl DoclingManager {
             start_lock: Mutex::new(()),
             setup_lock: Mutex::new(()),
             setup_state: AtomicU8::new(SetupState::NotStarted.as_u8()),
+            last_setup_error: std::sync::Mutex::new(None),
         }
     }
 
@@ -143,16 +152,33 @@ impl DoclingManager {
 
         // Python environment missing? Kick off dependency setup in the
         // background and fail fast instead of hanging the caller for minutes.
+        // PDF uploads meanwhile degrade to the lightweight pdftext parser (see
+        // WorkspaceIndex::parse_pdf_with_pdftext_fallback), so this is not fatal.
         if self.setup_needed() {
-            if self.setup_state() == SetupState::Installing {
-                anyhow::bail!(
-                    "Docling dependencies are being installed in the background; document parsing will be available in a few minutes"
-                );
+            match self.setup_state() {
+                SetupState::Installing => {
+                    anyhow::bail!(
+                        "Docling dependencies are being installed in the background; document parsing will be available in a few minutes"
+                    );
+                }
+                SetupState::Failed => {
+                    // Surface the real reason and retry in the background.
+                    let reason = self
+                        .last_setup_error()
+                        .unwrap_or_else(|| "unknown error".to_string());
+                    Self::global().spawn_setup_and_service();
+                    anyhow::bail!(
+                        "Docling dependency installation failed ({}); retrying in the background. Check ~/.jcowork/logs/docling-setup.log",
+                        reason
+                    );
+                }
+                _ => {
+                    Self::global().spawn_setup_and_service();
+                    anyhow::bail!(
+                        "Docling dependencies are being installed in the background; document parsing will be available in a few minutes"
+                    );
+                }
             }
-            Self::global().spawn_setup_and_service();
-            anyhow::bail!(
-                "Docling dependencies are being installed in the background; document parsing will be available in a few minutes"
-            );
         }
 
         // Locate prerequisites.
@@ -289,6 +315,76 @@ exit(0 if 'docling' in names and 'sentence_transformers' in names else 1)
             .unwrap_or(false)
     }
 
+    // ------------------------------------------------------------------
+    // Lightweight PDF fallback (pdftext)
+    // ------------------------------------------------------------------
+
+    /// True when the lightweight `pdftext` parser is usable.
+    ///
+    /// `pdftext` is installed in phase 1 of the bootstrap script (seconds),
+    /// long before the heavy Docling stack finishes downloading. When it is
+    /// available the app can still extract plain text from PDFs, so document
+    /// indexing degrades gracefully instead of failing outright on first run.
+    pub fn pdftext_ready(&self) -> bool {
+        let Some(python) = self.find_python_venv() else {
+            return false;
+        };
+        // Fast path: phase-1 marker written by the setup script.
+        if let Some(venv_dir) = python.parent().and_then(|p| p.parent()) {
+            if venv_dir.join(".docling-pdftext-ok").exists() {
+                return true;
+            }
+        }
+        // Fallback: probe the interpreter (hand-built venv without marker).
+        std::process::Command::new(&python)
+            .args(["-c", "import pdftext"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// Extract plain text from a PDF using `pdftext` (no ML models, offline).
+    ///
+    /// This is the graceful-degradation path used while the Docling service is
+    /// still installing. Returns the extracted text, or an error when the venv
+    /// or `pdftext` is unavailable / parsing fails.
+    pub async fn extract_text_with_pdftext(&self, pdf_path: &str) -> Result<String> {
+        const PDFT_EXT_SCRIPT: &str = r#"
+import sys
+from pdftext.extraction import plain_text_output
+try:
+    sys.stdout.write(plain_text_output(sys.argv[1]))
+except Exception as e:
+    print(f"pdftext error: {e}", file=sys.stderr)
+    sys.exit(1)
+"#;
+
+        let python = self
+            .find_python_venv()
+            .context("Python venv not found for pdftext fallback")?;
+
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            tokio::process::Command::new(&python)
+                .arg("-c")
+                .arg(PDFT_EXT_SCRIPT)
+                .arg(pdf_path)
+                .output(),
+        )
+        .await
+        .context("pdftext extraction timed out")?
+        .context("Failed to run pdftext extraction")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("pdftext extraction failed: {}", stderr.trim());
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
     /// Ensure the Python environment is set up, running the bootstrap
     /// script if necessary. Serialised by `setup_lock`; concurrent callers
     /// wait for the in-flight install instead of starting another one.
@@ -308,6 +404,10 @@ exit(0 if 'docling' in names and 'sentence_transformers' in names else 1)
 
         self.setup_state
             .store(SetupState::Installing.as_u8(), Ordering::SeqCst);
+        // Clear any stale error while a fresh attempt runs.
+        if let Ok(mut guard) = self.last_setup_error.lock() {
+            *guard = None;
+        }
         match self.run_setup().await {
             Ok(()) => {
                 self.setup_state.store(SetupState::Done.as_u8(), Ordering::SeqCst);
@@ -317,9 +417,17 @@ exit(0 if 'docling' in names and 'sentence_transformers' in names else 1)
             Err(e) => {
                 self.setup_state
                     .store(SetupState::Failed.as_u8(), Ordering::SeqCst);
+                if let Ok(mut guard) = self.last_setup_error.lock() {
+                    *guard = Some(e.to_string());
+                }
                 Err(e)
             }
         }
+    }
+
+    /// Most recent setup failure reason, if any.
+    pub fn last_setup_error(&self) -> Option<String> {
+        self.last_setup_error.lock().ok().and_then(|g| g.clone())
     }
 
     /// Start the service, installing dependencies first when missing.
@@ -411,14 +519,20 @@ exit(0 if 'docling' in names and 'sentence_transformers' in names else 1)
 
     /// Find a project-relative resource file, checking Tauri bundle layouts
     /// first, then dev/repo layouts relative to the executable and cwd.
+    ///
+    /// Bundle layouts per platform (Tauri encodes `..` as `_up_`):
+    ///   macOS:   Jcowork.app/Contents/Resources/_up_/_up_/<rel_path>
+    ///   Windows: InstallDir/_up_/_up_/<rel_path>   (resources beside the exe)
+    ///   Linux:   InstallDir/_up_/_up_/<rel_path>
+    ///   dev:     <project_root>/<rel_path>         (exe at target/{profile}/)
     fn find_resource_path(&self, rel_path: &str) -> Option<PathBuf> {
         let mut searched = Vec::new();
 
         if let Some(exe) = std::env::current_exe().ok() {
             if let Some(exe_dir) = exe.parent() {
+                // macOS bundle: exe in Contents/MacOS, resources in Contents/Resources
                 if let Some(contents) = exe_dir.parent() {
                     let res = contents.join("Resources");
-                    // Tauri encodes ".." as "_up_" in resource paths
                     for base in [
                         res.join("_up_/_up_"),
                         res.clone(),
@@ -430,6 +544,20 @@ exit(0 if 'docling' in names and 'sentence_transformers' in names else 1)
                         }
                     }
                 }
+
+                // Windows/Linux install: resources sit beside the executable.
+                // `../../scripts/x` is bundled as `<exe_dir>/_up_/_up_/scripts/x`.
+                for base in [
+                    exe_dir.join("_up_").join("_up_"),
+                    exe_dir.to_path_buf(),
+                ] {
+                    let p = base.join(rel_path);
+                    searched.push(p.clone());
+                    if p.exists() {
+                        return Some(p);
+                    }
+                }
+
                 // Dev build: exe at target/{profile}/jcowork-desktop
                 if let Some(project_root) = exe_dir.parent().and_then(|p| p.parent()) {
                     let p = project_root.join(rel_path);
@@ -507,10 +635,18 @@ exit(0 if 'docling' in names and 'sentence_transformers' in names else 1)
         let url = Self::service_url();
         let running = Self::check_health(&url).await;
         let setup = self.setup_state();
+        let pdftext_ready = self.pdftext_ready();
+        let setup_error = self.last_setup_error().unwrap_or_default();
         let message = if running {
             "Docling service is running".to_string()
         } else if setup == SetupState::Installing {
-            "Docling dependencies are being installed in the background".to_string()
+            if pdftext_ready {
+                "Installing Docling in the background; basic PDF text search is already available".to_string()
+            } else {
+                "Docling dependencies are being installed in the background".to_string()
+            }
+        } else if setup == SetupState::Failed {
+            format!("Docling dependency installation failed: {}", setup_error)
         } else {
             "Docling service is not running".to_string()
         };
@@ -520,6 +656,8 @@ exit(0 if 'docling' in names and 'sentence_transformers' in names else 1)
             service_url: url,
             message,
             setup,
+            pdftext_ready,
+            setup_error,
         }
     }
 
@@ -664,44 +802,55 @@ exit(0 if 'docling' in names and 'sentence_transformers' in names else 1)
     /// inside the resource directory.
     ///
     /// Search order:
-    /// 1. Tauri resource dir (encoded) — `Resources/_up_/_up_/services/docling/`
-    /// 2. Tauri resource dir (flat)    — `Resources/app.py`
-    /// 3. Tauri resource dir (nested)  — `Resources/services/docling/`
+    /// 1. macOS bundle  — `Contents/Resources/_up_/_up_/services/docling/`
+    /// 2. Windows/Linux — `<exe_dir>/_up_/_up_/services/docling/`
+    /// 3. Flat/nested placements under each resource root
     /// 4. Walk up from executable      — `exe/../../services/docling/`
     /// 5. Current working directory    — `./services/docling/`
     /// 6. Walk up from cwd
     fn find_docling_app(&self) -> Option<PathBuf> {
         let mut searched = Vec::new();
 
+        // Check one resource root for the three possible placements of app.py.
+        // Returns the first directory that actually contains app.py.
+        fn probe_root(root: &std::path::Path, searched: &mut Vec<PathBuf>) -> Option<PathBuf> {
+            // Tauri encodes ".." as "_up_" in resource paths
+            let encoded = root.join("_up_").join("_up_").join("services").join("docling");
+            searched.push(encoded.clone());
+            if encoded.join("app.py").exists() {
+                return Some(encoded);
+            }
+            // Nested placement
+            let nested = root.join("services").join("docling");
+            searched.push(nested.clone());
+            if nested.join("app.py").exists() {
+                return Some(nested);
+            }
+            // Flat placement (app.py directly under the resource root)
+            searched.push(root.to_path_buf());
+            if root.join("app.py").exists() {
+                return Some(root.to_path_buf());
+            }
+            None
+        }
+
         if let Some(exe) = std::env::current_exe().ok() {
             if let Some(exe_dir) = exe.parent() {
                 // macOS Tauri bundle: exe in Contents/MacOS, resources in Contents/Resources
                 if let Some(contents) = exe_dir.parent() {
                     let res = contents.join("Resources");
-
-                    // Tauri encodes ".." as "_up_" in resource paths
-                    let encoded = res.join("_up_/_up_/services/docling");
-                    searched.push(encoded.clone());
-                    if encoded.join("app.py").exists() {
-                        info!(path = %encoded.display(), "Found Docling app.py (Tauri encoded path)");
-                        return encoded.into();
+                    if res.is_dir() {
+                        if let Some(found) = probe_root(&res, &mut searched) {
+                            info!(path = %found.display(), "Found Docling app.py (macOS resource)");
+                            return Some(found);
+                        }
                     }
+                }
 
-                    // Flat placement
-                    let flat = res.clone();
-                    searched.push(flat.clone());
-                    if flat.join("app.py").exists() {
-                        info!(path = %flat.display(), "Found Docling app.py (flat resource)");
-                        return flat.into();
-                    }
-
-                    // Nested placement
-                    let nested = res.join("services/docling");
-                    searched.push(nested.clone());
-                    if nested.join("app.py").exists() {
-                        info!(path = %nested.display(), "Found Docling app.py (nested resource)");
-                        return nested.into();
-                    }
+                // Windows/Linux install: resources sit beside the executable.
+                if let Some(found) = probe_root(exe_dir, &mut searched) {
+                    info!(path = %found.display(), "Found Docling app.py (install dir)");
+                    return Some(found);
                 }
 
                 // Walk up from executable dir (project root for dev builds)
@@ -711,7 +860,7 @@ exit(0 if 'docling' in names and 'sentence_transformers' in names else 1)
                     searched.push(d.clone());
                     if d.join("app.py").exists() {
                         info!(path = %d.display(), "Found Docling app.py (project root from exe)");
-                        return d.into();
+                        return Some(d);
                     }
                 }
             }

@@ -11,6 +11,7 @@ $ErrorActionPreference = "Stop"
 
 $VenvDir = Join-Path $HOME ".jcowork\venv"
 $Marker = Join-Path $VenvDir ".docling-setup-ok"
+$PdfMarker = Join-Path $VenvDir ".docling-pdftext-ok"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 if (Test-Path $Marker) {
@@ -34,14 +35,41 @@ if (-not $ReqFile -or -not (Test-Path $ReqFile)) {
 }
 Write-Host "Using requirements file: $ReqFile"
 
-# Detect system Python (py launcher first, then PATH entries).
-$SysPython = $null
-foreach ($cmd in @("py", "python3", "python")) {
-    $found = Get-Command $cmd -ErrorAction SilentlyContinue
-    if ($found) { $SysPython = $found.Source; break }
+# Detect a *working* system Python. On Windows `Get-Command python` often
+# resolves to the Microsoft Store alias stub (WindowsApps\python.exe) which
+# merely opens the Store, so each candidate is validated with --version.
+function Find-WorkingPython {
+    foreach ($cmd in @("py", "python3", "python")) {
+        $found = Get-Command $cmd -ErrorAction SilentlyContinue
+        if (-not $found) { continue }
+        if ($found.Source -like "*\WindowsApps\*") { continue }  # Store stub
+        try {
+            $ver = & $found.Source --version 2>&1
+            if ($LASTEXITCODE -eq 0 -and "$ver" -match "Python\s+3\.") {
+                return $found.Source
+            }
+        } catch {}
+    }
+    return $null
 }
+
+$SysPython = Find-WorkingPython
+
+# No usable Python: install it automatically so the packaged app works on a
+# fresh machine (the Tauri installer does not run scripts/install.ps1).
 if (-not $SysPython) {
-    Write-Error "python not found. Install Python 3.10+ first."
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Write-Host "Python not found - installing Python 3.12 via winget..."
+        winget install --id Python.Python.3.12 -e --accept-source-agreements --accept-package-agreements --silent
+        # Refresh this session's PATH so the new interpreter is discoverable.
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
+                    [System.Environment]::GetEnvironmentVariable("Path", "User")
+        $SysPython = Find-WorkingPython
+    }
+}
+
+if (-not $SysPython) {
+    Write-Error "python not found and automatic install failed. Install Python 3.10+ from https://python.org manually, then restart the app."
     exit 1
 }
 Write-Host "Using system Python: $SysPython"
@@ -58,15 +86,26 @@ if (-not (Test-Path $VenvPython)) {
 Write-Host "Upgrading pip..."
 & $VenvPython -m pip install --upgrade pip --quiet
 
+# Phase 1 (fast): lightweight PDF text extraction.
+# pdftext (pypdfium2-based, no ML models) installs in seconds and lets the app
+# parse PDFs immediately, while the heavy Docling stack downloads in phase 2.
+# A partial marker is written so the backend can offer pdftext fallback early.
+Write-Host "Installing lightweight PDF parser (pdftext)..."
+& $VenvPython -m pip install --quiet pdftext
+if ($LASTEXITCODE -eq 0) {
+    New-Item -ItemType File -Force -Path $PdfMarker | Out-Null
+    Write-Host "pdftext ready - basic PDF parsing is now available."
+} else {
+    Write-Host "WARNING: pdftext install failed; continuing with Docling setup"
+}
+
+# Phase 1b: playwright (web_search tool). Skipped when a system Chrome exists.
+Write-Host "Installing playwright..."
+& $VenvPython -m pip install --quiet playwright
+
 Write-Host "Installing Docling service dependencies (this may take several minutes)..."
 & $VenvPython -m pip install --quiet -r $ReqFile
 if ($LASTEXITCODE -ne 0) { throw "Failed to install dependencies" }
-
-# Non-Docling tool dependencies that share this venv:
-# playwright -> web_search tool, pdftext -> pdf_parse tool.
-Write-Host "Installing tool dependencies (playwright, pdftext)..."
-& $VenvPython -m pip install --quiet playwright pdftext
-if ($LASTEXITCODE -ne 0) { throw "Failed to install tool dependencies" }
 
 # web_search.py prefers the system Chrome; only download Playwright's
 # Chromium when no system browser is available.

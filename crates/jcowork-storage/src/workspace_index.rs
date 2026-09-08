@@ -379,7 +379,28 @@ impl WorkspaceIndex {
                 }
                 Err(e) => {
                     warn!(file = %file_path, err = %e, "Failed to parse document with Docling");
-                    format!("[Document parse error: {}]", e)
+                    // Graceful degradation: while the Docling stack is still
+                    // installing on a fresh setup, fall back to the lightweight
+                    // pdftext parser so PDFs remain searchable instead of being
+                    // stored as an error placeholder. Word docs still need Docling.
+                    if ext == "pdf" {
+                        match self.parse_pdf_with_pdftext_fallback(&full_path.to_string_lossy()).await {
+                            Ok(text) if !text.trim().is_empty() => {
+                                info!(file = %file_path, "Indexed PDF via pdftext fallback (Docling unavailable)");
+                                text
+                            }
+                            Ok(_) => format!(
+                                "[Document parse pending: {} — no extractable text layer (likely a scanned PDF). Re-index once Docling finishes installing.]",
+                                e
+                            ),
+                            Err(fallback_err) => format!(
+                                "[Document parse pending: {} — pdftext fallback also unavailable ({}). Dependencies are still installing; re-index the file once installation completes.]",
+                                e, fallback_err
+                            ),
+                        }
+                    } else {
+                        format!("[Document parse error: {}]", e)
+                    }
                 }
             }
         } else if matches!(ext.as_str(), "md" | "markdown" | "html" | "htm" | "txt" | "csv" | "json" | "xml" | "yaml" | "yml" | "toml" | "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "css" | "sh" | "bash") {
@@ -767,6 +788,39 @@ impl WorkspaceIndex {
     }
 
     // ========== Docling Integration ==========
+
+    /// Lightweight PDF text extraction used while Docling is unavailable.
+    ///
+    /// On a fresh install the bootstrap script installs `pdftext` within the
+    /// first minute (phase 1), well before the multi-GB Docling stack finishes
+    /// (phase 2). If `pdftext` is not ready yet but setup is still running, we
+    /// wait briefly for it so the very first upload after install still yields
+    /// searchable text rather than an error placeholder.
+    async fn parse_pdf_with_pdftext_fallback(&self, pdf_path: &str) -> Result<String> {
+        let manager = crate::docling_manager::DoclingManager::global();
+
+        // Wait up to ~90s for pdftext to become available, but only while the
+        // dependency setup is actively installing. If setup already failed or
+        // was never started, do not block the request.
+        if !manager.pdftext_ready() {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(90);
+            while tokio::time::Instant::now() < deadline {
+                use crate::docling_manager::SetupState;
+                match manager.setup_state() {
+                    SetupState::Installing | SetupState::NotStarted => {
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                        if manager.pdftext_ready() {
+                            break;
+                        }
+                    }
+                    // Done/Failed/NotNeeded: stop waiting and try once below.
+                    _ => break,
+                }
+            }
+        }
+
+        manager.extract_text_with_pdftext(pdf_path).await
+    }
 
     /// Parse a PDF or Word file using the Docling HTTP service.
     ///

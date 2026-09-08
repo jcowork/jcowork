@@ -13,6 +13,7 @@ set -euo pipefail
 
 VENV_DIR="${HOME}/.jcowork/venv"
 MARKER="${VENV_DIR}/.docling-setup-ok"
+PDF_MARKER="${VENV_DIR}/.docling-pdftext-ok"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Resolve requirements.txt: explicit arg > next to this script (bundled
@@ -64,15 +65,24 @@ fi
 echo "Upgrading pip..."
 "${VENV_DIR}/bin/python" -m pip install --upgrade pip --quiet
 
+# Phase 1 (fast): lightweight PDF text extraction.
+# pdftext (pypdfium2-based, no ML models) installs in seconds and lets the app
+# parse PDFs immediately, while the heavy Docling stack downloads in phase 2.
+# A partial marker is written so the backend can offer pdftext fallback early.
+echo "Installing lightweight PDF parser (pdftext)..."
+if "${VENV_DIR}/bin/python" -m pip install --quiet pdftext; then
+    touch "${PDF_MARKER}"
+    echo "pdftext ready - basic PDF parsing is now available."
+else
+    echo "WARNING: pdftext install failed; continuing with Docling setup"
+fi
+
+# Phase 1b: playwright (web_search tool).
+echo "Installing playwright..."
+"${VENV_DIR}/bin/python" -m pip install --quiet playwright
+
 echo "Installing Docling service dependencies (this may take several minutes)..."
 "${VENV_DIR}/bin/python" -m pip install --quiet -r "${REQ_FILE}"
-
-# Non-Docling tool dependencies that share this venv:
-# playwright -> web_search tool, pdftext -> pdf_parse tool.
-# They are not part of the Docling requirements (which stay pinned for
-# determinism), but missing them breaks the tools at runtime.
-echo "Installing tool dependencies (playwright, pdftext)..."
-"${VENV_DIR}/bin/python" -m pip install --quiet playwright pdftext
 
 # web_search.py prefers the system Chrome/Chromium; only download
 # Playwright's Chromium when no system browser is available.
