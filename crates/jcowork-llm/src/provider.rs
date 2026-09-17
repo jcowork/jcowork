@@ -20,6 +20,11 @@ pub struct ChatMessage {
     /// Must be preserved and sent back in subsequent requests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// Image attachments (data URLs) for vision-capable models.
+    /// Serialized into OpenAI multimodal content parts by the provider;
+    /// never sent as a plain field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<String>>,
 }
 
 /// A tool call from the LLM.
@@ -158,6 +163,7 @@ impl LlmProvider for MockLlmProvider {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
+                images: None,
             },
             usage: Usage {
                 prompt_tokens: 10,

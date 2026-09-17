@@ -56,9 +56,35 @@ impl OpenAiProvider {
         tools: &[ToolDefinition],
         stream: bool,
     ) -> serde_json::Value {
+        // Serialize messages, expanding image attachments into OpenAI
+        // multimodal content parts (text + image_url) when present.
+        let messages_json: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| {
+                let mut v = serde_json::to_value(m).unwrap_or_default();
+                if let Some(obj) = v.as_object_mut() {
+                    obj.remove("images");
+                }
+                if let Some(images) = m.images.as_ref().filter(|imgs| !imgs.is_empty()) {
+                    let mut parts = vec![serde_json::json!({
+                        "type": "text",
+                        "text": m.content,
+                    })];
+                    for url in images {
+                        parts.push(serde_json::json!({
+                            "type": "image_url",
+                            "image_url": { "url": url },
+                        }));
+                    }
+                    v["content"] = serde_json::json!(parts);
+                }
+                v
+            })
+            .collect();
+
         let mut body = serde_json::json!({
             "model": self.config.model,
-            "messages": messages,
+            "messages": messages_json,
             "stream": stream,
         });
 
@@ -204,6 +230,7 @@ impl LlmProvider for OpenAiProvider {
             }),
             tool_call_id: None,
             reasoning_content: choice.message.reasoning_content,
+            images: None,
         };
 
         let usage = completion

@@ -215,6 +215,7 @@ async fn execute_cron_task(
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            images: None,
         },
         jcowork_llm::provider::ChatMessage {
             role: "user".to_string(),
@@ -222,6 +223,7 @@ async fn execute_cron_task(
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            images: None,
         },
     ];
 

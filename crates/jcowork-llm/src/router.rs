@@ -14,6 +14,9 @@ pub struct ModelInfo {
     pub id: String,
     pub name: String,
     pub context_length: usize,
+    /// Whether the model accepts multimodal (image) input.
+    #[serde(default)]
+    pub vision: bool,
 }
 
 /// Provider config entry (loaded from providers.json).
@@ -285,6 +288,44 @@ impl LlmRouter {
         }
     }
 
+    /// Check whether a "provider:model" string refers to a vision-capable model
+    /// (per the `vision` flag in providers.json).
+    pub fn model_supports_vision(&self, model: &str) -> bool {
+        let (provider_name, model_name) = match model.find(':') {
+            Some(pos) => (&model[..pos], &model[pos + 1..]),
+            None => ("openai", model),
+        };
+        self.provider_configs
+            .iter()
+            .filter(|c| c.id == provider_name)
+            .flat_map(|c| c.models.iter())
+            .any(|m| m.id == model_name && m.vision)
+    }
+
+    /// Find a vision-capable model among registered providers.
+    ///
+    /// If `preferred` (a "provider:model" string) is already vision-capable,
+    /// it is returned as-is; otherwise the first vision-flagged model of any
+    /// registered provider is returned. Returns `None` when no vision model
+    /// is available.
+    pub fn find_vision_model(&self, preferred: &str) -> Option<String> {
+        if self.model_supports_vision(preferred) {
+            return Some(preferred.to_string());
+        }
+        let mut candidates: Vec<&ProviderConfig> = self
+            .provider_configs
+            .iter()
+            .filter(|c| self.providers.contains_key(&c.id))
+            .collect();
+        candidates.sort_by(|a, b| a.id.cmp(&b.id));
+        for config in candidates {
+            if let Some(m) = config.models.iter().find(|m| m.vision) {
+                return Some(format!("{}:{}", config.id, m.id));
+            }
+        }
+        None
+    }
+
     /// List all registered provider names.
     pub fn available_providers(&self) -> Vec<&str> {
         let mut names: Vec<&str> = self.providers.keys().map(|s| s.as_str()).collect();
@@ -315,5 +356,107 @@ impl LlmRouter {
 impl Default for LlmRouter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_entries() -> Vec<ProviderEntry> {
+        vec![
+            ProviderEntry {
+                id: "moonshot".to_string(),
+                name: "Moonshot".to_string(),
+                api_key: "test-key".to_string(),
+                base_url: "https://api.moonshot.cn/v1".to_string(),
+                default_model: "kimi-k2.7-code".to_string(),
+                context_length: 256000,
+                models: vec![
+                    ModelInfo { id: "kimi-k2.6".to_string(), name: "Kimi K2.6".to_string(), context_length: 256000, vision: true },
+                    ModelInfo { id: "kimi-k3".to_string(), name: "Kimi K3".to_string(), context_length: 256000, vision: true },
+                    ModelInfo { id: "kimi-k2.7-code".to_string(), name: "Kimi K2.7".to_string(), context_length: 256000, vision: false },
+                ],
+            },
+            ProviderEntry {
+                id: "llamacpp".to_string(),
+                name: "Local".to_string(),
+                api_key: String::new(),
+                base_url: "http://localhost:20261/v1".to_string(),
+                default_model: "qwen3.5-35b-a3b".to_string(),
+                context_length: 131072,
+                models: vec![
+                    ModelInfo { id: "qwen3.5-35b-a3b".to_string(), name: "Qwen3.5 35B-A3B".to_string(), context_length: 131072, vision: false },
+                ],
+            },
+        ]
+    }
+
+    #[test]
+    fn vision_flag_roundtrips_through_file() {
+        let dir = std::env::temp_dir().join(format!("jcowork-router-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("providers.json").to_str().unwrap().to_string();
+
+        let entries = sample_entries();
+        save_entries_to_file_static(&path, &entries).unwrap();
+
+        let loaded = LlmRouter::load_entries_from_file(&path).unwrap();
+        assert!(loaded[0].models[0].vision, "kimi-k2.6 vision should survive save/load");
+        assert!(loaded[0].models[1].vision, "kimi-k3 vision should survive save/load");
+        assert!(!loaded[0].models[2].vision);
+        assert!(!loaded[1].models[0].vision);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn save_entries_to_file_static(path: &str, entries: &[ProviderEntry]) -> Result<()> {
+        LlmRouter::save_entries_to_file(path, entries)
+    }
+
+    #[test]
+    fn rebuild_from_entries_enables_vision_lookup() {
+        let router = LlmRouter::rebuild_from_entries(&sample_entries());
+
+        assert!(router.model_supports_vision("moonshot:kimi-k2.6"));
+        assert!(router.model_supports_vision("moonshot:kimi-k3"));
+        assert!(!router.model_supports_vision("moonshot:kimi-k2.7-code"));
+        assert!(!router.model_supports_vision("moonshot:nonexistent"));
+
+        // Preferred model is vision-capable → returned as-is
+        assert_eq!(router.find_vision_model("moonshot:kimi-k2.6"), Some("moonshot:kimi-k2.6".to_string()));
+        // Preferred model is text-only → falls back to the first vision model
+        assert_eq!(router.find_vision_model("moonshot:kimi-k2.7-code"), Some("moonshot:kimi-k2.6".to_string()));
+    }
+
+    #[test]
+    fn find_vision_model_returns_none_when_no_vision_model() {
+        let mut entries = sample_entries();
+        for e in &mut entries {
+            for m in &mut e.models {
+                m.vision = false;
+            }
+        }
+        let router = LlmRouter::rebuild_from_entries(&entries);
+        assert_eq!(router.find_vision_model("moonshot:kimi-k2.7-code"), None);
+    }
+
+    #[test]
+    fn legacy_entries_without_vision_field_default_to_false() {
+        let legacy = r#"[{
+            "id": "moonshot",
+            "name": "Moonshot",
+            "api_key": "test-key",
+            "base_url": "https://api.moonshot.cn/v1",
+            "default_model": "kimi-k2.6",
+            "context_length": 256000,
+            "models": [{
+                "id": "kimi-k2.6",
+                "name": "Kimi K2.6",
+                "context_length": 256000
+            }]
+        }]"#;
+        let entries: Vec<ProviderEntry> = serde_json::from_str(legacy).unwrap();
+        assert!(!entries[0].models[0].vision, "missing vision field must default to false");
     }
 }

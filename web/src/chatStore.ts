@@ -11,6 +11,8 @@ export interface Message {
   timestamp: number;
   streaming?: boolean;
   details?: string;
+  images?: string[]; // data URLs of attached images (user messages)
+  kind?: string; // 'image_html' marks assistant messages that deliver converted image HTML
 }
 
 export interface Conversation {

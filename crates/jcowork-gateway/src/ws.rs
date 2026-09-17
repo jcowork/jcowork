@@ -45,6 +45,14 @@ pub struct WsInput {
     pub model: Option<String>,
     pub context_documents: Option<Vec<ContextDocument>>,
     pub history: Option<Vec<HistoryMessage>>,
+    pub images: Option<Vec<ImageAttachment>>,
+}
+
+/// An image attached to a chat message (data = data URL, e.g. "data:image/png;base64,...").
+#[derive(Debug, Deserialize)]
+pub struct ImageAttachment {
+    pub name: String,
+    pub data: String,
 }
 
 /// A reference document provided as context for a chat message.
@@ -60,6 +68,9 @@ pub struct ContextDocument {
 pub struct HistoryMessage {
     pub role: String,
     pub content: String,
+    /// Message kind carried over from the client store; "image_html" marks
+    /// assistant messages that deliver converted image HTML (not answers).
+    pub kind: Option<String>,
 }
 
 /// Outgoing WebSocket message to client.
@@ -292,6 +303,17 @@ pub async fn ws_handler(
     // Conversation history for this connection
     let mut history: Vec<jcowork_llm::provider::ChatMessage> = Vec::new();
 
+    // HTML contexts converted from uploaded images (name, html).
+    // Re-injected into the system prompt on every message since the
+    // system prompt is reset each turn.
+    let mut image_html_contexts: Vec<(String, String)> = Vec::new();
+
+    // Contents of assistant messages that deliver converted image HTML to
+    // the chat. The client persists them (kind: "image_html") and they are
+    // NOT answers — a reconnect must not mistake them for the response when
+    // deciding whether the background task's answer was missed.
+    let mut delivered_html_messages: Vec<String> = Vec::new();
+
     // System prompt
     let system_prompt =
         agent_loop::build_system_prompt_with_identity(custom_identity.as_deref(), &skill_prompt);
@@ -301,6 +323,7 @@ pub async fn ws_handler(
         tool_calls: None,
         tool_call_id: None,
         reasoning_content: None,
+        images: None,
     });
 
     // Subscribe to reminder notifications for this user
@@ -396,12 +419,18 @@ pub async fn ws_handler(
                                     if m.content.trim().is_empty() {
                                         continue;
                                     }
+                                    if m.role == "assistant" && m.kind.as_deref() == Some("image_html") {
+                                        // Converted-HTML delivery message restored from the
+                                        // client's persisted history.
+                                        delivered_html_messages.push(m.content.clone());
+                                    }
                                     history.push(jcowork_llm::provider::ChatMessage {
                                         role: m.role,
                                         content: m.content,
                                         tool_calls: None,
                                         tool_call_id: None,
                                         reasoning_content: None,
+                                        images: None,
                                     });
                                 }
                             }
@@ -416,9 +445,18 @@ pub async fn ws_handler(
                             let mut attached = false;
                             if let Some(task) = session_manager.get_task(&conv) {
                                 if let Some(idx) = history.iter().rposition(|m| m.role == "user") {
-                                    let missed_response = !history[idx + 1..]
-                                        .iter()
-                                        .any(|m| m.role == "assistant");
+                                    // An assistant message only counts as the response if it
+                                    // is not a converted-HTML delivery message.
+                                    let missed_response = !history[idx + 1..].iter().any(|m| {
+                                        m.role == "assistant"
+                                            && !delivered_html_messages.iter().any(|h| h == &m.content)
+                                    });
+                                    tracing::info!(
+                                        missed_response,
+                                        delivered_count = delivered_html_messages.len(),
+                                        tail = ?history[idx + 1..].iter().map(|m| (m.role.as_str(), m.content.len())).collect::<Vec<_>>(),
+                                        "re-attach check"
+                                    );
                                     if missed_response && history[idx].content == task.start_message {
                                         let _ = ws_sender.send(Message::Text(
                                             serde_json::json!({"type": "task_resume"}).to_string().into(),
@@ -452,6 +490,9 @@ pub async fn ws_handler(
 
                         let user_content = input.content.clone().unwrap_or_default();
 
+                        // Resolve model early — image handling needs it too
+                        let model_str = input.model.as_deref().unwrap_or(&default_model);
+
                         // Reject a new task while one is already running for this
                         // conversation; adopt the finished task's history so
                         // follow-up messages keep the right context.
@@ -477,6 +518,197 @@ pub async fn ws_handler(
                         // Reset system prompt (in case previous message had docs appended)
                         if !history.is_empty() {
                             history[0].content = system_prompt.clone();
+                        }
+
+                        // ── Handle image attachments: convert to HTML via a vision model ──
+                        // Snapshot how many HTML delivery messages we already have:
+                        // entries added while handling this message get pushed into
+                        // the history right after the user message below.
+                        let html_msgs_base = delivered_html_messages.len();
+                        if let Some(imgs) = &input.images {
+                            if !imgs.is_empty() {
+                                // Live re-check skill enablement and read the skill config
+                                // (enabled_skill_ids is computed once at connection start
+                                // and may be stale).
+                                let memory_entries = memory_manager
+                                    .recall_all(&user_id)
+                                    .await
+                                    .unwrap_or_default();
+                                let image_skill_enabled = memory_entries
+                                    .iter()
+                                    .any(|e| e.category == "skill_enabled" && e.content == "builtin:image_to_html");
+                                if !image_skill_enabled {
+                                    let _ = ws_sender.send(Message::Text(
+                                        serde_json::json!({"type": "error", "message": "无法处理图片输入：请先在「技能」页面开启「图片转HTML」技能"})
+                                            .to_string().into(),
+                                    )).await;
+                                    continue;
+                                }
+                                // VL model chosen for this skill in the skills page (may be unset)
+                                let configured_vl_model = memory_entries
+                                    .into_iter()
+                                    .find(|e| e.category == "skill_config:builtin:image_to_html")
+                                    .map(|e| e.content);
+
+                                // Resolve the vision model: user-configured one first, then auto-pick.
+                                // The read guard must not live across the awaits below, so both
+                                // outcomes are computed inside the block and handled after it.
+                                let (vision_model, configured_invalid) = {
+                                    let router = llm_router.read().unwrap();
+                                    match &configured_vl_model {
+                                        Some(m) if router.model_supports_vision(m) => (Some(m.clone()), None),
+                                        Some(m) => (None, Some(m.clone())),
+                                        None => (router.find_vision_model(model_str), None),
+                                    }
+                                };
+                                if let Some(bad) = configured_invalid {
+                                    let _ = ws_sender.send(Message::Text(
+                                        serde_json::json!({"type": "error", "message": format!("技能「图片转HTML」选择的视觉模型 {} 已不可用或不支持视觉输入，请到「技能」页面重新选择", bad)})
+                                            .to_string().into(),
+                                    )).await;
+                                    continue;
+                                }
+                                let vision_model = match vision_model {
+                                    Some(m) => m,
+                                    None => {
+                                        let _ = ws_sender.send(Message::Text(
+                                            serde_json::json!({"type": "error", "message": "没有可用的多模态模型：请在 providers 中为支持视觉的模型添加 \"vision\": true 标记"})
+                                                .to_string().into(),
+                                        )).await;
+                                        continue;
+                                    }
+                                };
+
+                                let vision_provider = {
+                                    let router = llm_router.read().unwrap();
+                                    router.get_provider(&vision_model)
+                                };
+                                let vision_provider = match vision_provider {
+                                    Ok(p) => p,
+                                    Err(e) => {
+                                        let _ = ws_sender.send(Message::Text(
+                                            serde_json::json!({"type": "error", "message": format!("多模态模型不可用: {}", e)})
+                                                .to_string().into(),
+                                        )).await;
+                                        continue;
+                                    }
+                                };
+
+                                let mut conversion_failed = false;
+                                for img in imgs {
+                                    let _ = ws_sender.send(Message::Text(
+                                        serde_json::json!({"type": "status", "message": format!("🖼 正在用 {} 将图片 {} 转换为 HTML ...", vision_model, img.name)})
+                                            .to_string().into(),
+                                    )).await;
+
+                                    let convert_msgs = vec![jcowork_llm::provider::ChatMessage {
+                                        role: "user".to_string(),
+                                        content: agent_loop::build_image_to_html_prompt(),
+                                        tool_calls: None,
+                                        tool_call_id: None,
+                                        reasoning_content: None,
+                                        images: Some(vec![img.data.clone()]),
+                                    }];
+
+                                    // Run the conversion while keeping the connection loop
+                                    // responsive: a stop signal cancels the conversion, other
+                                    // messages get a busy notice, and a closed socket ends the handler.
+                                    let convert_future = async {
+                                        match tokio::time::timeout(
+                                            std::time::Duration::from_secs(600),
+                                            vision_provider.chat(&convert_msgs, &[]),
+                                        ).await {
+                                            Ok(Ok(resp)) => {
+                                                let html = agent_loop::strip_html_fences(&resp.message.content);
+                                                if html.is_empty() {
+                                                    Err("模型返回为空".to_string())
+                                                } else {
+                                                    Ok(html)
+                                                }
+                                            }
+                                            Ok(Err(e)) => Err(e.to_string()),
+                                            Err(_) => Err("转换超时，请重试".to_string()),
+                                        }
+                                    };
+                                    tokio::pin!(convert_future);
+
+                                    let mut stopped = false;
+                                    let html_result: Result<String, String> = loop {
+                                        tokio::select! {
+                                            r = &mut convert_future => break r,
+                                            inc = ws_receiver.next() => match inc {
+                                                Some(Ok(Message::Text(text))) => {
+                                                    match serde_json::from_str::<WsInput>(&text) {
+                                                        Ok(inp) if inp.msg_type.as_deref() == Some("stop") => {
+                                                            // Dropping the future below cancels the in-flight request
+                                                            stopped = true;
+                                                        }
+                                                        _ => {
+                                                            let _ = ws_sender.send(Message::Text(
+                                                                serde_json::json!({"type": "error", "message": "正在转换图片，请稍候再发送"})
+                                                                    .to_string().into(),
+                                                            )).await;
+                                                        }
+                                                    }
+                                                }
+                                                // Connection gone: cancel the conversion and end this handler
+                                                Some(Ok(Message::Close(_))) | None => return,
+                                                Some(Err(_)) => return,
+                                                _ => {}
+                                            }
+                                        }
+                                        if stopped {
+                                            let _ = ws_sender.send(Message::Text(
+                                                serde_json::json!({"type": "stopped"}).to_string().into(),
+                                            )).await;
+                                            break Err("stopped".to_string());
+                                        }
+                                    };
+
+                                    match html_result {
+                                        Ok(html) => {
+                                            image_html_contexts.push((img.name.clone(), html.clone()));
+                                            // Deliver the converted HTML to the chat as its
+                                            // own assistant message BEFORE the answer turn:
+                                            // the client shows and persists it immediately,
+                                            // and it stays in history as ground truth for
+                                            // follow-up questions (also across reconnects).
+                                            let html_message = format!(
+                                                "图片 {} 已转换为 HTML：\n\n```html\n{}\n```",
+                                                img.name, html
+                                            );
+                                            delivered_html_messages.push(html_message.clone());
+                                            let _ = ws_sender.send(Message::Text(
+                                                serde_json::json!({"type": "image_html", "name": img.name, "html": html})
+                                                    .to_string().into(),
+                                            )).await;
+                                            let _ = ws_sender.send(Message::Text(
+                                                serde_json::json!({"type": "status", "message": format!("✅ 图片 {} 已转换为 HTML，并加入上下文", img.name)})
+                                                    .to_string().into(),
+                                            )).await;
+                                        }
+                                        Err(e) => {
+                                            if !stopped {
+                                                let _ = ws_sender.send(Message::Text(
+                                                    serde_json::json!({"type": "error", "message": format!("图片 {} 转换失败: {}", img.name, e)})
+                                                        .to_string().into(),
+                                                )).await;
+                                            }
+                                            conversion_failed = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if conversion_failed {
+                                    continue;
+                                }
+                            }
+                        }
+
+                        // Re-inject converted image HTML context every message
+                        // (survives the system prompt reset above)
+                        if !image_html_contexts.is_empty() {
+                            agent_loop::inject_image_html_context(&mut history, &image_html_contexts);
                         }
 
                         // Inject context documents into system prompt
@@ -510,16 +742,41 @@ pub async fn ws_handler(
                         }
 
                         // Add user message to history
+                        let user_content = if user_content.trim().is_empty()
+                            && input.images.as_ref().map(|v| !v.is_empty()).unwrap_or(false)
+                        {
+                            "请基于图片转换得到的 HTML，介绍图片的内容。".to_string()
+                        } else {
+                            user_content
+                        };
                         history.push(jcowork_llm::provider::ChatMessage {
                             role: "user".to_string(),
                             content: user_content.clone(),
                             tool_calls: None,
                             tool_call_id: None,
                             reasoning_content: None,
+                            images: None,
                         });
 
-                        // Resolve model
-                        let model_str = input.model.as_deref().unwrap_or(&default_model);
+                        // Record the converted HTML as the assistant's own messages right
+                        // after the user message: the answering model sees its prior output,
+                        // and clients that reconnect receive the HTML back via load_history.
+                        for html_msg in &delivered_html_messages[html_msgs_base..] {
+                            history.push(jcowork_llm::provider::ChatMessage {
+                                role: "assistant".to_string(),
+                                content: html_msg.clone(),
+                                tool_calls: None,
+                                tool_call_id: None,
+                                // Thinking-mode providers (e.g. DeepSeek v4) reject any
+                                // assistant message without `reasoning_content` when tools
+                                // are passed. This turn has no real reasoning, but the
+                                // field must be present — an empty string is accepted.
+                                reasoning_content: Some(String::new()),
+                                images: None,
+                            });
+                        }
+
+                        // Resolve provider
                         let provider = {
                             let router = llm_router.read().unwrap();
                             router.get_provider(model_str)
@@ -531,7 +788,12 @@ pub async fn ws_handler(
                                     serde_json::json!({"type": "error", "message": e.to_string()})
                                         .to_string().into(),
                                 )).await;
-                                history.pop();
+                                // Roll back everything this message added: the HTML
+                                // delivery messages (if any) and the user message.
+                                let added = delivered_html_messages.len() - html_msgs_base;
+                                for _ in 0..=added {
+                                    history.pop();
+                                }
                                 continue;
                             }
                         };
@@ -668,6 +930,7 @@ pub async fn ws_handler(
                                     tool_calls: None,
                                     tool_call_id: None,
                                     reasoning_content: None,
+                                    images: None,
                                 });
 
                                 let provider = {

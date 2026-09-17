@@ -7,8 +7,8 @@
     "default_model": "deepseek-v4-flash",
     "context_length": 131072,
     "models": [
-      { "id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "context_length": 131072 },
-      { "id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "context_length": 131072 }
+      { "id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "context_length": 131072, "vision": true },
+      { "id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "context_length": 131072, "vision": false }
     ]
   },
   {
@@ -19,8 +19,8 @@
     "default_model": "kimi-k2.6",
     "context_length": 256000,
     "models": [
-      { "id": "kimi-k2.6", "name": "Kimi K2.6", "context_length": 256000 },
-      { "id": "kimi-k3", "name": "Kimi K3", "context_length": 1000000 }
+      { "id": "kimi-k2.6", "name": "Kimi K2.6", "context_length": 256000, "vision": true },
+      { "id": "kimi-k3", "name": "Kimi K3", "context_length": 1000000, "vision": true }
     ]
   },
   {
@@ -31,7 +31,7 @@
     "default_model": "qwen3.5-35b-a3b",
     "context_length": 131072,
     "models": [
-      { "id": "qwen3.5-35b-a3b", "name": "Qwen3.5 35B-A3B", "context_length": 131072 }
+      { "id": "qwen3.5-35b-a3b", "name": "Qwen3.5 35B-A3B", "context_length": 131072, "vision": false }
     ]
   }
 

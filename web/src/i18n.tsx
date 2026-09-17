@@ -73,6 +73,9 @@ const translations = {
     toolCompleted: '工具完成',
     stop: '停止',
     generationStopped: '已停止生成',
+    attachImage: '附加图片',
+    imageSkillRequired: '无法处理图片输入：请先在「技能」页面开启「图片转HTML」技能', 
+    imageHtmlConverted: '已转换为 HTML：',
 
     // Documents
     newFolder: '新建文件夹',
@@ -214,6 +217,10 @@ const translations = {
     skillInstructions: '技能指令（启用后注入到系统提示词）',
     clickToCollapse: '点击收起',
     clickToPreview: '点击预览指令',
+    vlModel: '视觉模型',
+    vlModelAuto: '自动选择',
+    vlModelRequired: '技能已启用但尚未选择视觉模型，建议选择一个 VL 模型用于图片转换',
+    vlModelNone: '没有可选的视觉模型：请到「设置 → 管理提供商」为支持视觉的模型勾选「视觉」并保存',
 
     // Settings
     modelProvider: '模型提供商',
@@ -271,6 +278,8 @@ const translations = {
     modelContextLength: '上下文长度',
     addModel: '添加模型',
     removeModel: '移除',
+    vision: '视觉',
+    visionTooltip: '支持图片（多模态）输入，可用于图片转 HTML',
     saveProvider: '保存',
     cancelProvider: '取消',
     providersSaved: '提供商已保存',
@@ -403,6 +412,9 @@ const translations = {
     toolCompleted: 'Tool completed',
     stop: 'Stop',
     generationStopped: 'Generation stopped',
+    attachImage: 'Attach image',
+    imageSkillRequired: 'Cannot process image input: please enable the "Image to HTML" skill on the Skills page first', 
+    imageHtmlConverted: 'Converted to HTML:',
 
     // Documents
     newFolder: 'New Folder',
@@ -544,6 +556,10 @@ const translations = {
     skillInstructions: 'Skill instructions (injected into system prompt when enabled)',
     clickToCollapse: 'Click to collapse',
     clickToPreview: 'Click to preview instructions',
+    vlModel: 'Vision model',
+    vlModelAuto: 'Auto select',
+    vlModelRequired: 'Skill is enabled but no vision model selected — please choose a VL model for image conversion',
+    vlModelNone: 'No vision model available — tick "Vision" for a capable model under Settings → Manage Providers and save',
 
     // Settings
     modelProvider: 'Model Provider',
@@ -601,6 +617,8 @@ const translations = {
     modelContextLength: 'Context Length',
     addModel: 'Add Model',
     removeModel: 'Remove',
+    vision: 'Vision',
+    visionTooltip: 'Supports image (multimodal) input, used for image-to-HTML conversion',
     saveProvider: 'Save',
     cancelProvider: 'Cancel',
     providersSaved: 'Providers saved',

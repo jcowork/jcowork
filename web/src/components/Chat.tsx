@@ -17,6 +17,11 @@ interface ContextDoc {
   content: string;
 }
 
+interface SelectedImage {
+  name: string;
+  data: string; // data URL
+}
+
 interface ChatProps {
   userId: string;
   token: string;
@@ -166,6 +171,10 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
   const [urlFetching, setUrlFetching] = useState(false);
   const urlInputRef = useRef<HTMLDivElement>(null);
 
+  // Image attachment state
+  const [selectedImages, setSelectedImages] = useState<SelectedImage[]>([]);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+
   // Reset conversation-scoped state when switching to a different conversation
   // (clicking "+" for a new task chat, or picking a history item). The Chat
   // instance stays mounted per account, so a `conversationId` prop change must
@@ -180,6 +189,7 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
     setInput('');
     setStatusMsg('');
     setSelectedDocs([]);
+    setSelectedImages([]);
     setStreaming(false);
     setShowDocPicker(false);
     setShowUrlInput(false);
@@ -204,7 +214,7 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
       // the model inherits the historical topic when continuing a chat.
       const hist = loadMessages(userId, conversationId)
         .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content.trim())
-        .map((m) => ({ role: m.role, content: m.content }));
+        .map((m) => ({ role: m.role, content: m.content, kind: m.kind }));
       if (hist.length > 0) {
         ws.send(JSON.stringify({ type: 'load_history', history: hist }));
       }
@@ -240,6 +250,19 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
             { role: 'assistant', content: data.content, timestamp: Date.now(), streaming: true } as Message,
           ];
         });
+      } else if (data.type === 'image_html') {
+        // Converted image HTML is delivered as its own finalized assistant
+        // message BEFORE the answer turn starts. It persists via the normal
+        // save path and is reloaded as conversation context on reconnect.
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            content: `🖼️ \`${data.name}\` ${t('imageHtmlConverted')}\n\n\`\`\`html\n${data.html}\n\`\`\``,
+            timestamp: Date.now(),
+            kind: 'image_html',
+          } as Message,
+        ]);
       } else if (data.type === 'done') {
         setStreaming(false);
         setStatusMsg('');
@@ -279,11 +302,14 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
         // The server re-attached this connection to a background task that
         // was started before a disconnect (e.g. app switch). Drop any partial
         // replay from a previous attempt, then let the replayed events
-        // rebuild the streaming message.
+        // rebuild the streaming message. Converted-HTML delivery messages
+        // (kind: 'image_html') are final, not part of the replay — keep them.
         setStreaming(true);
         setMessages((prev) => {
           const lastUser = prev.map((m) => m.role).lastIndexOf('user');
-          return lastUser >= 0 ? prev.slice(0, lastUser + 1) : prev;
+          if (lastUser < 0) return prev;
+          const kept = prev.slice(lastUser + 1).filter((m) => m.kind === 'image_html');
+          return [...prev.slice(0, lastUser + 1), ...kept];
         });
       } else if (data.type === 'reminder') {
         setMessages((prev) => [
@@ -462,10 +488,37 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
     wsRef.current?.send(JSON.stringify({ type: 'stop' }));
   };
 
-  const sendMessage = () => {
-    if (!input.trim() || !connected || streaming) return;
+  const sendMessage = async () => {
+    if ((!input.trim() && selectedImages.length === 0) || !connected || streaming) return;
 
-    const msg: Message = { role: 'user', content: input, timestamp: Date.now() };
+    // Images require the image_to_html skill to be enabled
+    if (selectedImages.length > 0) {
+      let skillEnabled = false;
+      try {
+        const res = await fetch('/api/skills/all', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.ok) {
+          const skills: { id: string; enabled: boolean }[] = await res.json();
+          skillEnabled = skills.some((s) => s.id === 'builtin:image_to_html' && s.enabled);
+        }
+      } catch {}
+      if (!skillEnabled) {
+        setMessages((prev) => [
+          ...prev,
+          { role: 'system', content: `⚠️ ${t('imageSkillRequired')}`, timestamp: Date.now() },
+        ]);
+        return;
+      }
+    }
+
+    const images = selectedImages.length > 0 ? selectedImages : undefined;
+    const msg: Message = {
+      role: 'user',
+      content: input,
+      timestamp: Date.now(),
+      images: images?.map((img) => img.data),
+    };
     setMessages((prev) => [...prev, msg]);
     setStreaming(true);
 
@@ -492,10 +545,31 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
       : undefined;
 
     wsRef.current?.send(
-      JSON.stringify({ content: input, model, context_documents })
+      JSON.stringify({ content: input, model, context_documents, images })
     );
     setInput('');
+    setSelectedImages([]);
     // Keep selected docs visible until the user manually removes them
+  };
+
+  // Read chosen image files as data URLs and add them as attachments
+  const handleImageFiles = (files: FileList | null) => {
+    if (!files) return;
+    Array.from(files).forEach((file) => {
+      if (!file.type.startsWith('image/')) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const data = reader.result as string;
+        setSelectedImages((prev) =>
+          prev.some((img) => img.data === data) ? prev : [...prev, { name: file.name, data }]
+        );
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const removeImage = (index: number) => {
+    setSelectedImages((prev) => prev.filter((_, i) => i !== index));
   };
 
   // Fetch workspace files for the doc picker
@@ -684,6 +758,18 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
               }}
             >
               <div style={{ userSelect: 'text', WebkitUserSelect: 'text' }}>
+                {msg.images && msg.images.length > 0 && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: msg.content ? 6 : 0 }}>
+                    {msg.images.map((img, j) => (
+                      <img
+                        key={j}
+                        src={img}
+                        alt="attached"
+                        style={{ maxWidth: 200, maxHeight: 160, borderRadius: 6, border: '1px solid rgba(255,255,255,0.2)' }}
+                      />
+                    ))}
+                  </div>
+                )}
                 {isUser || isSystem ? (
                   <>
                     <span style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</span>
@@ -853,6 +939,47 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
                 </button>
               )}
             </div>
+          </div>
+        )}
+
+        {/* Selected images chips */}
+        {selectedImages.length > 0 && (
+          <div style={{ marginBottom: 8, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {selectedImages.map((img, i) => (
+              <div
+                key={i}
+                style={{ position: 'relative', width: 56, height: 56, borderRadius: 8, overflow: 'hidden', border: '1px solid #2d5a8a', flexShrink: 0 }}
+                title={img.name}
+              >
+                <img src={img.data} alt={img.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                <button
+                  onClick={() => removeImage(i)}
+                  title="Remove this image"
+                  style={{
+                    position: 'absolute',
+                    top: 2,
+                    right: 2,
+                    width: 16,
+                    height: 16,
+                    borderRadius: '50%',
+                    border: 'none',
+                    background: 'rgba(0,0,0,0.6)',
+                    color: '#fff',
+                    cursor: 'pointer',
+                    fontSize: 10,
+                    lineHeight: 1,
+                    padding: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.background = '#e53935'; }}
+                  onMouseLeave={e => { e.currentTarget.style.background = 'rgba(0,0,0,0.6)'; }}
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
           </div>
         )}
 
@@ -1031,6 +1158,34 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
             )}
           </div>
 
+          {/* Image attach button */}
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            style={{ display: 'none' }}
+            onChange={e => { handleImageFiles(e.target.files); e.target.value = ''; }}
+          />
+          <button
+            onClick={() => imageInputRef.current?.click()}
+            disabled={!connected || streaming}
+            title={t('attachImage')}
+            style={{
+              padding: '8px 10px',
+              borderRadius: 8,
+              border: '1px solid #555',
+              background: selectedImages.length > 0 ? '#1e3a5a' : '#1a1a1a',
+              color: selectedImages.length > 0 ? '#8ab4f8' : '#aaa',
+              cursor: 'pointer',
+              fontSize: 14,
+              lineHeight: 1,
+              flexShrink: 0,
+            }}
+          >
+            🖼
+          </button>
+
           {/* Text input */}
           <input
             type="text"
@@ -1068,14 +1223,14 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
           ) : (
             <button
               onClick={sendMessage}
-              disabled={!connected || !input.trim()}
+              disabled={!connected || (!input.trim() && selectedImages.length === 0)}
               style={{
                 padding: '8px 20px',
                 borderRadius: 8,
                 border: 'none',
-                background: connected && input.trim() ? '#1a73e8' : '#555',
+                background: connected && (input.trim() || selectedImages.length > 0) ? '#1a73e8' : '#555',
                 color: '#fff',
-                cursor: connected && input.trim() ? 'pointer' : 'not-allowed',
+                cursor: connected && (input.trim() || selectedImages.length > 0) ? 'pointer' : 'not-allowed',
               }}
             >
               {t('send')}

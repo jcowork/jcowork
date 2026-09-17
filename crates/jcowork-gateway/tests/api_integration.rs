@@ -90,6 +90,7 @@ impl TestApp {
             log_writer,
             feishu_config_store,
             feishu_client_cache: Arc::new(dashmap::DashMap::new()),
+            reset_codes: Arc::new(dashmap::DashMap::new()),
             data_dir: data_dir.clone(),
         };
 
@@ -245,6 +246,107 @@ async fn test_providers_list_with_auth() {
     // Verify response structure
     assert!(resp.get("providers").is_some());
     assert!(resp.get("default_model").is_some());
+}
+
+#[tokio::test]
+async fn test_providers_save_add_modify_and_vision_flag() {
+    let mut app = TestApp::new().await;
+    app.register_and_login("provideradmin", "pass123").await;
+
+    // Save two providers: one with a vision-capable model, one local without
+    let save_body = json!({
+        "entries": [{
+            "id": "moonshot",
+            "name": "Moonshot",
+            "api_key": "sk-test-key",
+            "base_url": "https://api.moonshot.cn/v1",
+            "default_model": "kimi-k2.7-code",
+            "context_length": 256000,
+            "models": [
+                {"id": "kimi-k2.6", "name": "Kimi K2.6", "context_length": 256000, "vision": true},
+                {"id": "kimi-k2.7-code", "name": "Kimi K2.7", "context_length": 256000}
+            ]
+        }, {
+            "id": "llamacpp",
+            "name": "Local",
+            "api_key": "",
+            "base_url": "http://localhost:20261/v1",
+            "default_model": "qwen3.5-35b-a3b",
+            "context_length": 131072,
+            "models": [
+                {"id": "qwen3.5-35b-a3b", "name": "Qwen3.5 35B-A3B", "context_length": 131072, "vision": false}
+            ]
+        }]
+    });
+    let res = app.make_request("POST", "/api/providers", Some(save_body)).await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // GET /api/providers/entries: vision flags must be persisted, key masked
+    let res = app.make_request("GET", "/api/providers/entries", None).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let resp: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let entries = resp["entries"].as_array().expect("entries array");
+    assert_eq!(entries.len(), 2);
+
+    let moonshot = entries.iter().find(|e| e["id"] == "moonshot").unwrap();
+    assert_eq!(moonshot["api_key"], "*******-key", "api key must be masked");
+    let models = moonshot["models"].as_array().unwrap();
+    let k26 = models.iter().find(|m| m["id"] == "kimi-k2.6").unwrap();
+    assert_eq!(k26["vision"], true, "vision flag must persist for kimi-k2.6");
+    let k27 = models.iter().find(|m| m["id"] == "kimi-k2.7-code").unwrap();
+    assert_eq!(k27["vision"], false, "missing vision flag must default to false");
+
+    // GET /api/providers: the rebuilt router must expose vision in model info
+    let res = app.make_request("GET", "/api/providers", None).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let resp: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let providers = resp["providers"].as_array().expect("providers array");
+    let moonshot = providers.iter().find(|p| p["id"] == "moonshot").unwrap();
+    let models = moonshot["models"].as_array().unwrap();
+    let k26 = models.iter().find(|m| m["id"] == "kimi-k2.6").unwrap();
+    assert_eq!(k26["vision"], true, "rebuilt router must keep vision flag");
+
+    // Modify: toggle kimi-k2.7-code to vision, add a new provider, drop llamacpp
+    let save_body = json!({
+        "entries": [{
+            "id": "moonshot",
+            "name": "Moonshot",
+            "api_key": "sk-test-key",
+            "base_url": "https://api.moonshot.cn/v1",
+            "default_model": "kimi-k2.7-code",
+            "context_length": 256000,
+            "models": [
+                {"id": "kimi-k2.6", "name": "Kimi K2.6", "context_length": 256000, "vision": true},
+                {"id": "kimi-k2.7-code", "name": "Kimi K2.7", "context_length": 256000, "vision": true}
+            ]
+        }, {
+            "id": "newprovider",
+            "name": "New Provider",
+            "api_key": "sk-new-key",
+            "base_url": "https://api.example.com/v1",
+            "default_model": "vision-model",
+            "context_length": 128000,
+            "models": [
+                {"id": "vision-model", "name": "Vision Model", "context_length": 128000, "vision": true}
+            ]
+        }]
+    });
+    let res = app.make_request("POST", "/api/providers", Some(save_body)).await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Verify modification took effect everywhere
+    let res = app.make_request("GET", "/api/providers", None).await;
+    let body_bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let resp: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let providers = resp["providers"].as_array().unwrap();
+    assert!(providers.iter().any(|p| p["id"] == "newprovider"), "new provider must appear");
+    assert!(!providers.iter().any(|p| p["id"] == "llamacpp"), "removed provider must be gone");
+    let moonshot = providers.iter().find(|p| p["id"] == "moonshot").unwrap();
+    let k27 = moonshot["models"].as_array().unwrap().iter()
+        .find(|m| m["id"] == "kimi-k2.7-code").unwrap();
+    assert_eq!(k27["vision"], true, "toggled vision flag must take effect");
 }
 
 #[tokio::test]
@@ -482,4 +584,53 @@ async fn test_connector_validation_errors() {
         serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
             .unwrap();
     assert_eq!(body.as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn test_skill_config_save_get_clear() {
+    let mut app = TestApp::new().await;
+    app.register_and_login("skillcfg", "pass123").await;
+
+    let skill_id = "builtin:image_to_html";
+    let cfg_url = format!("/api/skills/{}/config", skill_id);
+
+    // Initially unset
+    let res = app.make_request("GET", &cfg_url, None).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(body["vl_model"], serde_json::Value::Null);
+
+    // Save a VL model selection
+    let res = app
+        .make_request("PUT", &cfg_url, Some(json!({"vl_model": "moonshot:kimi-k2.6"})))
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = app.make_request("GET", &cfg_url, None).await;
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(body["vl_model"], "moonshot:kimi-k2.6");
+
+    // Overwrite with another model: exactly one entry must remain
+    let res = app
+        .make_request("PUT", &cfg_url, Some(json!({"vl_model": "moonshot:kimi-k3"})))
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app.make_request("GET", &cfg_url, None).await;
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(body["vl_model"], "moonshot:kimi-k3");
+
+    // Clear the selection (null), and empty string also clears
+    let res = app.make_request("PUT", &cfg_url, Some(json!({"vl_model": null}))).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app.make_request("GET", &cfg_url, None).await;
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(body["vl_model"], serde_json::Value::Null);
 }

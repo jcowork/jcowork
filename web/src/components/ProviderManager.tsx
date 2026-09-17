@@ -7,6 +7,7 @@ interface ModelInfo {
   id: string;
   name: string;
   context_length: number;
+  vision?: boolean; // supports multimodal (image) input
 }
 
 interface ProviderEntry {
@@ -169,7 +170,7 @@ export default function ProviderManager({ token, onClose, onSaved }: ProviderMan
     if (!editing) return;
     setEditing({
       ...editing,
-      models: [...editing.models, { id: '', name: '', context_length: editing.context_length }],
+      models: [...editing.models, { id: '', name: '', context_length: editing.context_length, vision: false }],
     });
   };
 
@@ -179,7 +180,7 @@ export default function ProviderManager({ token, onClose, onSaved }: ProviderMan
     setEditing({ ...editing, models: newModels });
   };
 
-  const updateModel = (idx: number, field: keyof ModelInfo, value: string | number) => {
+  const updateModel = (idx: number, field: keyof ModelInfo, value: string | number | boolean) => {
     if (!editing) return;
     const newModels = editing.models.map((m, i) => i === idx ? { ...m, [field]: value } : m);
     setEditing({ ...editing, models: newModels });
@@ -316,6 +317,9 @@ export default function ProviderManager({ token, onClose, onSaved }: ProviderMan
                       </div>
                       <div style={{ fontSize: 11, color: '#666', marginTop: 2 }}>
                         {entry.id} · {entry.models.length} {t('models')} · {formatContext(entry.context_length)} ctx
+                        {entry.models.some(m => m.vision) && (
+                          <span style={{ color: '#58a6ff' }}> · 👁 {entry.models.filter(m => m.vision).length} {t('vision')}</span>
+                        )}
                       </div>
                     </div>
                     <div style={{ display: 'flex', gap: 6 }}>
@@ -443,7 +447,7 @@ export default function ProviderManager({ token, onClose, onSaved }: ProviderMan
                     {editing.models.map((model, idx) => (
                       <div key={idx} style={{
                         display: 'grid',
-                        gridTemplateColumns: '1fr 1fr 100px 30px',
+                        gridTemplateColumns: '1fr 1fr 90px 64px 30px',
                         gap: 6,
                         marginBottom: 6,
                         alignItems: 'center',
@@ -468,6 +472,26 @@ export default function ProviderManager({ token, onClose, onSaved }: ProviderMan
                           title={t('modelContextLength')}
                           style={{ ...inputStyle, fontSize: 12, padding: '6px 8px' }}
                         />
+                        <label
+                          title={t('visionTooltip')}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: 4,
+                            fontSize: 11,
+                            color: model.vision ? '#58a6ff' : '#666',
+                            cursor: 'pointer',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={!!model.vision}
+                            onChange={e => updateModel(idx, 'vision', e.target.checked)}
+                          />
+                          {t('vision')}
+                        </label>
                         <button onClick={() => removeModel(idx)} style={{
                           background: 'none', border: 'none', color: '#f87171', cursor: 'pointer', fontSize: 14,
                         }}>✕</button>

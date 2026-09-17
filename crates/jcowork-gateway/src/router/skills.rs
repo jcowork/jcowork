@@ -111,3 +111,57 @@ pub(crate) async fn toggle_skill(
         (StatusCode::OK, Json(serde_json::json!({ "status": "disabled" })))
     }
 }
+
+/// Memory category prefix for per-skill configuration entries.
+/// One entry per skill: category = "skill_config:{skill_id}", content = config value.
+fn skill_config_category(skill_id: &str) -> String {
+    format!("skill_config:{}", skill_id)
+}
+
+/// GET /api/skills/{id}/config — returns the skill's config (e.g. selected VL model).
+pub(crate) async fn get_skill_config(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Path(skill_id): Path<String>,
+) -> impl IntoResponse {
+    let vl_model = state
+        .memory_manager
+        .recall_all(&auth_user.user_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|e| e.category == skill_config_category(&skill_id))
+        .map(|e| e.content);
+    (StatusCode::OK, Json(serde_json::json!({ "vl_model": vl_model })))
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct SaveSkillConfigRequest {
+    /// "provider:model" string, or null/empty to clear the selection.
+    vl_model: Option<String>,
+}
+
+/// PUT /api/skills/{id}/config — save or clear the skill's config.
+pub(crate) async fn save_skill_config(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Path(skill_id): Path<String>,
+    Json(req): Json<SaveSkillConfigRequest>,
+) -> impl IntoResponse {
+    let category = skill_config_category(&skill_id);
+
+    // Replace any existing config entry for this skill
+    if let Ok(entries) = state.memory_manager.recall_all(&auth_user.user_id).await {
+        for entry in entries.into_iter().filter(|e| e.category == category) {
+            let _ = state.memory_manager.delete(&auth_user.user_id, &entry.id).await;
+        }
+    }
+
+    match req.vl_model.filter(|m| !m.is_empty()) {
+        Some(model) => match state.memory_manager.save(&auth_user.user_id, &model, &category).await {
+            Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "status": "saved" }))),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))),
+        },
+        None => (StatusCode::OK, Json(serde_json::json!({ "status": "cleared" }))),
+    }
+}

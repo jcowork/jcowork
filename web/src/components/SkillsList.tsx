@@ -13,6 +13,8 @@ export interface SkillEntry {
 
 type FilterTab = 'all' | 'builtin' | 'user';
 
+const IMAGE_TO_HTML_ID = 'builtin:image_to_html';
+
 export default function SkillsList({ token, onCountChange }: {
   token: string;
   onCountChange?: (enabled: number, total: number) => void;
@@ -23,6 +25,11 @@ export default function SkillsList({ token, onCountChange }: {
   const [toggling, setToggling] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState<FilterTab>('all');
   const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  // Vision models offered to the image-to-HTML skill, and the user's selection
+  const [vlModels, setVlModels] = useState<string[]>([]);
+  const [vlModel, setVlModel] = useState('');
+  const [vlConfigLoaded, setVlConfigLoaded] = useState(false);
 
   const fetchSkills = useCallback(async () => {
     try {
@@ -43,6 +50,58 @@ export default function SkillsList({ token, onCountChange }: {
   useEffect(() => {
     fetchSkills();
   }, [fetchSkills]);
+
+  // Load vision-capable models and the saved VL model config for the skill
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [provRes, cfgRes] = await Promise.all([
+          fetch('/api/providers', { headers: { Authorization: `Bearer ${token}` } }),
+          fetch(`/api/skills/${encodeURIComponent(IMAGE_TO_HTML_ID)}/config`, {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+        ]);
+        if (cancelled) return;
+        if (provRes.ok) {
+          // GET /api/providers returns { providers: [...], default_model }
+          const data: { providers?: { id: string; models?: { id: string; vision?: boolean }[] }[] } = await provRes.json();
+          const visionModels: string[] = [];
+          for (const p of data.providers ?? []) {
+            for (const m of p.models ?? []) {
+              if (m.vision) visionModels.push(`${p.id}:${m.id}`);
+            }
+          }
+          setVlModels(visionModels);
+        }
+        if (cfgRes.ok) {
+          const cfg: { vl_model?: string | null } = await cfgRes.json();
+          setVlModel(cfg.vl_model ?? '');
+        }
+      } catch {
+        // ignore
+      } finally {
+        if (!cancelled) setVlConfigLoaded(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [token]);
+
+  const saveVlModel = async (value: string) => {
+    setVlModel(value);
+    try {
+      await fetch(`/api/skills/${encodeURIComponent(IMAGE_TO_HTML_ID)}/config`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ vl_model: value || null }),
+      });
+    } catch {
+      // ignore
+    }
+  };
 
   const enabledCount = skills.filter(s => s.enabled).length;
 
@@ -215,6 +274,45 @@ export default function SkillsList({ token, onCountChange }: {
                     </div>
                     <Toggle id={skill.id} enabled={skill.enabled} />
                   </div>
+
+                  {/* VL model selector + reminder for the image-to-HTML skill */}
+                  {skill.id === IMAGE_TO_HTML_ID && vlConfigLoaded && (
+                    <div
+                      onClick={e => e.stopPropagation()}
+                      style={{ display: 'flex', flexDirection: 'column', gap: 6 }}
+                    >
+                      <label style={{ fontSize: 12, color: '#888', display: 'flex', alignItems: 'center', gap: 8 }}>
+                        {t('vlModel')}
+                        <select
+                          value={vlModel}
+                          onChange={e => saveVlModel(e.target.value)}
+                          style={{
+                            background: '#0d1117',
+                            color: '#c9d1d9',
+                            border: '1px solid #30363d',
+                            borderRadius: 6,
+                            padding: '4px 8px',
+                            fontSize: 12,
+                            maxWidth: 220,
+                          }}
+                        >
+                          <option value="">{t('vlModelAuto')}</option>
+                          {vlModel && !vlModels.includes(vlModel) && (
+                            <option value={vlModel}>{vlModel}</option>
+                          )}
+                          {vlModels.map(m => (
+                            <option key={m} value={m}>{m}</option>
+                          ))}
+                        </select>
+                      </label>
+                      {skill.enabled && !vlModel && (
+                        <div style={{ fontSize: 12, color: '#d29922', display: 'flex', alignItems: 'flex-start', gap: 4 }}>
+                          <span>⚠️</span>
+                          <span>{vlModels.length === 0 ? t('vlModelNone') : t('vlModelRequired')}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {/* Expanded content preview */}
                   {isExpanded && (

@@ -129,6 +129,7 @@ impl AgentLoop {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
+                images: None,
             });
         } else {
             self.messages[0].content = system_prompt;
@@ -140,6 +141,7 @@ impl AgentLoop {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            images: None,
         });
 
         let mut turns = 0;
@@ -238,6 +240,7 @@ impl AgentLoop {
                 } else {
                     Some(reasoning_content)
                 },
+                images: None,
             });
 
             if tool_calls.is_empty() {
@@ -269,6 +272,7 @@ impl AgentLoop {
                     tool_calls: None,
                     tool_call_id: Some(tc.id.clone()),
                     reasoning_content: None,
+                    images: None,
                 });
             }
         }
@@ -557,6 +561,7 @@ pub async fn run_turn(opts: AgentTurnOptions<'_>) -> AgentTurnResult {
             } else {
                 Some(reasoning_content)
             },
+            images: None,
         });
 
         // If no tool calls, this is the final turn
@@ -592,6 +597,7 @@ pub async fn run_turn(opts: AgentTurnOptions<'_>) -> AgentTurnResult {
                     tool_calls: None,
                     tool_call_id: Some(tc.id.clone()),
                     reasoning_content: None,
+                    images: None,
                 });
                 continue;
             }
@@ -609,6 +615,7 @@ pub async fn run_turn(opts: AgentTurnOptions<'_>) -> AgentTurnResult {
                     tool_calls: None,
                     tool_call_id: Some(tc.id.clone()),
                     reasoning_content: None,
+                    images: None,
                 });
                 continue;
             }
@@ -664,6 +671,7 @@ pub async fn run_turn(opts: AgentTurnOptions<'_>) -> AgentTurnResult {
                 tool_calls: None,
                 tool_call_id: Some(tc.id.clone()),
                 reasoning_content: None,
+                images: None,
             });
 
             tool_results.push((
@@ -781,6 +789,79 @@ pub fn inject_documents_to_system_prompt(
         );
         history[0].content = format!("{}{}", history[0].content, doc_block);
     }
+}
+
+/// Inject converted image HTML into the system prompt (history[0]).
+///
+/// Called when the user has uploaded images that were pre-converted to HTML
+/// by a vision model (image_to_html skill). The HTML is appended to the
+/// system prompt as the ground truth of the image content, so all follow-up
+/// Q&A about the images is answered from it.
+pub fn inject_image_html_context(history: &mut Vec<ChatMessage>, images: &[(String, String)]) {
+    if images.is_empty() || history.is_empty() {
+        return;
+    }
+
+    let image_names: Vec<&str> = images.iter().map(|(name, _)| name.as_str()).collect();
+
+    let mut parts = Vec::new();
+    for (name, html) in images {
+        if !html.is_empty() {
+            parts.push(format!("=== 图片: {} ===\n{}\n=== END ===", name, html));
+        }
+    }
+
+    if !parts.is_empty() {
+        let block = format!(
+            "\n\n## 图片HTML上下文 (CONVERTED IMAGE CONTEXT)\n\
+             用户在本次会话中上传了 {} 张图片: {}\n\
+             每张图片已由多模态模型转换为高保真 HTML，内容如下。\n\n\
+             ⚠️ 规则：\n\
+             1. 下面的 HTML 是对应图片内容的权威还原（ground truth），回答关于图片的问题必须以它为依据。\n\
+             2. 用户要求查看 HTML 时，输出完整的 HTML 代码块，不要省略。\n\
+             3. 用户要求修改时，在该 HTML 基础上修改并输出完整的新 HTML。\n\n\
+             {}\n",
+            images.len(),
+            image_names.join(", "),
+            parts.join("\n\n")
+        );
+        history[0].content = format!("{}{}", history[0].content, block);
+    }
+}
+
+/// Build the prompt sent to the vision model to convert an image to HTML.
+pub fn build_image_to_html_prompt() -> String {
+    "你是一个图片转 HTML 的专家。请把这张图片转换为一个高保真的、自包含的 HTML 文件，目标是尽量 100% 还原图片的视觉效果。\n\
+     要求：\n\
+     1. 使用语义化 HTML5 + 内联 CSS，单文件自包含，不引用任何外部资源（图片、字体、JS、CSS）。\n\
+     2. 布局用 flex/grid/absolute 精确复现各元素的位置与大小；框图的矩形、圆角、边框、底色用 div+CSS 实现。\n\
+     3. 箭头、连线、曲线用内联 SVG 绘制，保持方向与连接关系正确。\n\
+     4. 图片上的所有文字逐字保留，不要意译或增删；字号、加粗、颜色尽量接近原图。\n\
+     5. 严禁新增图片中不存在的文字：若 logo、图标只有图形而无文字，就只用 CSS/SVG 画出图形，不要臆造品牌名、标签或说明文字。\n\
+     6. 文字的对齐方式（左对齐/居中/右对齐）和在页面中的位置必须与原图一致，不要自行改为居中或重新排版。\n\
+     7. 颜色用取自原图的近似十六进制色值，字体用系统近似字体；背景为渐变时，渐变方向与两端颜色要贴近原图的色相与饱和度，不要统一换成深色底。\n\
+     8. 无法精确还原的照片类区域，用带内容描述文字的占位块表示。\n\
+     只输出一个完整的 HTML 代码块（以 <!DOCTYPE html> 开头），不要输出其他解释文字。"
+        .to_string()
+}
+
+/// Strip markdown code fences that vision models often wrap HTML in.
+///
+/// Handles ```` ```html ```` / ```` ``` ```` openers and a trailing ```` ``` ````;
+/// input without fences is returned trimmed and unchanged.
+pub fn strip_html_fences(raw: &str) -> String {
+    let mut html = raw.trim().to_string();
+    if html.starts_with("```") {
+        match html.find('\n') {
+            Some(nl) => html = html[nl + 1..].trim().to_string(),
+            // Single-line fenced value, e.g. "```html" only
+            None => html = html.trim_start_matches('`').trim_start_matches("html").trim().to_string(),
+        }
+    }
+    if html.ends_with("```") {
+        html = html[..html.len() - 3].trim().to_string();
+    }
+    html
 }
 
 /// Build Excel analysis guidance to append to the system prompt.
@@ -912,6 +993,7 @@ pub fn build_reminder_context_msg(
         tool_calls: None,
         tool_call_id: None,
         reasoning_content: None,
+        images: None,
     })
 }
 
@@ -1017,4 +1099,76 @@ IMPORTANT: When the user asks to set a reminder or alarm, DO NOT give instructio
         current_year = now.format("%Y").to_string(),
         skill_prompt = skill_prompt
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_html_fences_removes_labelled_fence() {
+        let raw = "```html\n<!DOCTYPE html>\n<html></html>\n```";
+        assert_eq!(strip_html_fences(raw), "<!DOCTYPE html>\n<html></html>");
+    }
+
+    #[test]
+    fn strip_html_fences_removes_bare_fence_and_surrounding_whitespace() {
+        let raw = "\n\n```\n<!DOCTYPE html>\n<div>x</div>\n```\n\n";
+        assert_eq!(strip_html_fences(raw), "<!DOCTYPE html>\n<div>x</div>");
+    }
+
+    #[test]
+    fn strip_html_fences_keeps_plain_html_untouched() {
+        let raw = "<!DOCTYPE html>\n<html><body>hi</body></html>";
+        assert_eq!(strip_html_fences(raw), raw);
+    }
+
+    #[test]
+    fn strip_html_fences_keeps_inner_backticks() {
+        let raw = "```html\n<pre>```not a fence```</pre>\n```";
+        assert_eq!(strip_html_fences(raw), "<pre>```not a fence```</pre>");
+    }
+
+    #[test]
+    fn strip_html_fences_handles_degenerate_inputs() {
+        assert_eq!(strip_html_fences(""), "");
+        assert_eq!(strip_html_fences("   \n  "), "");
+        // Fence markers only, no content
+        assert_eq!(strip_html_fences("```html"), "");
+        assert_eq!(strip_html_fences("```\n```"), "");
+    }
+
+    #[test]
+    fn inject_image_html_context_appends_ground_truth_block() {
+        let mut history = vec![ChatMessage {
+            role: "system".to_string(),
+            content: "BASE PROMPT".to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            images: None,
+        }];
+        inject_image_html_context(
+            &mut history,
+            &[("12.png".to_string(), "<h1>智能座舱 AI 解决方案</h1>".to_string())],
+        );
+        let sys = &history[0].content;
+        assert!(sys.starts_with("BASE PROMPT"), "base prompt must be preserved");
+        assert!(sys.contains("=== 图片: 12.png ==="));
+        assert!(sys.contains("<h1>智能座舱 AI 解决方案</h1>"), "HTML must be injected verbatim");
+    }
+
+    #[test]
+    fn inject_image_html_context_skips_empty_html() {
+        let mut history = vec![ChatMessage {
+            role: "system".to_string(),
+            content: "BASE".to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            images: None,
+        }];
+        inject_image_html_context(&mut history, &[("a.png".to_string(), String::new())]);
+        assert_eq!(history[0].content, "BASE");
+    }
 }

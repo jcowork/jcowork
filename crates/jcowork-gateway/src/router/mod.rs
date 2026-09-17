@@ -205,6 +205,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/skills", post(skills::create_skill))
         .route("/api/skills/all", get(skills::list_all_skills))
         .route("/api/skills/{id}/toggle", put(skills::toggle_skill))
+        .route("/api/skills/{id}/config", get(skills::get_skill_config))
+        .route("/api/skills/{id}/config", put(skills::save_skill_config))
         .route("/api/memory", get(memory::list_memories))
         .route("/api/memory/search", get(memory::search_memories))
         .route("/api/memory/{id}", put(memory::update_memory))

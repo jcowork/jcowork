@@ -125,6 +125,7 @@ async fn handle_feishu_message(
         tool_calls: None,
         tool_call_id: None,
         reasoning_content: None,
+        images: None,
     }];
 
     // Add user message
@@ -134,6 +135,7 @@ async fn handle_feishu_message(
         tool_calls: None,
         tool_call_id: None,
         reasoning_content: None,
+        images: None,
     });
 
     // Resolve model
