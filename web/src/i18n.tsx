@@ -18,6 +18,8 @@ const translations = {
     historyChat: '历史任务对话',
     noHistoryChat: '暂无历史对话',
     historyHint: '所有历史对话自动保存',
+    expandMore: '展开更多',
+    collapseList: '收起',
     confirmDeleteChat: '删除该历史对话？删除后不可恢复。',
     settings: '设置',
     signedInAs: '已登录',
@@ -74,8 +76,11 @@ const translations = {
     stop: '停止',
     generationStopped: '已停止生成',
     attachImage: '附加图片',
-    imageSkillRequired: '无法处理图片输入：请先在「技能」页面开启「图片转HTML」技能', 
+    imageSkillRequired: '无法处理图片输入：请先在「技能」页面开启「图片转HTML」技能',
     imageHtmlConverted: '已转换为 HTML：',
+    expandEarlierPrefix: '展开更早的 ',
+    expandEarlierSuffix: ' 条消息',
+    collapseHistory: '收起消息记录',
 
     // Documents
     newFolder: '新建文件夹',
@@ -357,6 +362,8 @@ const translations = {
     historyChat: 'Historical Task Chats',
     noHistoryChat: 'No historical chats',
     historyHint: 'All historical chats are saved automatically',
+    expandMore: 'Show more',
+    collapseList: 'Show less',
     confirmDeleteChat: 'Delete this historical chat? This cannot be undone.',
     settings: 'Settings',
     signedInAs: 'Signed in as',
@@ -413,8 +420,11 @@ const translations = {
     stop: 'Stop',
     generationStopped: 'Generation stopped',
     attachImage: 'Attach image',
-    imageSkillRequired: 'Cannot process image input: please enable the "Image to HTML" skill on the Skills page first', 
+    imageSkillRequired: 'Cannot process image input: please enable the "Image to HTML" skill on the Skills page first',
     imageHtmlConverted: 'Converted to HTML:',
+    expandEarlierPrefix: 'Show ',
+    expandEarlierSuffix: ' earlier messages',
+    collapseHistory: 'Collapse messages',
 
     // Documents
     newFolder: 'New Folder',

@@ -31,6 +31,9 @@ export default function Sidebar({ accounts, activeUserId, streamingAccounts, unr
   const t = useT();
   const { lang, setLang } = useLang();
   const [historyOpen, setHistoryOpen] = useState(true);
+  // History list shows only the first few chats by default; the rest sit
+  // behind an expand toggle below the visible ones.
+  const [showAllHistory, setShowAllHistory] = useState(false);
   // window.confirm is unsupported in Tauri's WKWebView, use a custom modal
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   // Contacts section state
@@ -41,6 +44,12 @@ export default function Sidebar({ accounts, activeUserId, streamingAccounts, unr
   const historyConvs = conversations
     .filter((c) => c.messages.length > 0 && c.id !== activeConvId)
     .sort((a, b) => b.lastInputAt - a.lastInputAt);
+
+  // By default only the most recent HISTORY_CHAT_VISIBLE history chats
+  // render; an expand toggle below them reveals the rest.
+  const HISTORY_CHAT_VISIBLE = 3;
+  const hiddenHistoryCount = Math.max(0, historyConvs.length - HISTORY_CHAT_VISIBLE);
+  const visibleHistoryConvs = showAllHistory ? historyConvs : historyConvs.slice(0, HISTORY_CHAT_VISIBLE);
 
   const NAV_ITEMS = [
     { key: 'chat', label: t('chat') },
@@ -262,7 +271,7 @@ export default function Sidebar({ accounts, activeUserId, streamingAccounts, unr
                         {t('noHistoryChat')}
                       </div>
                     ) : (
-                      historyConvs.map((c) => (
+                      visibleHistoryConvs.map((c) => (
                         <div
                           key={c.id}
                           className={`hist-item${c.id === activeConvId ? ' hist-active' : ''}`}
@@ -310,6 +319,24 @@ export default function Sidebar({ accounts, activeUserId, streamingAccounts, unr
                           </button>
                         </div>
                       ))
+                    )}
+                    {hiddenHistoryCount > 0 && (
+                      <div style={{ padding: '2px 12px 4px 20px' }}>
+                        <button
+                          onClick={() => setShowAllHistory(!showAllHistory)}
+                          style={{
+                            padding: '2px 10px',
+                            borderRadius: 10,
+                            border: '1px solid #3a3a3a',
+                            background: 'transparent',
+                            color: '#8ab4f8',
+                            cursor: 'pointer',
+                            fontSize: 12,
+                          }}
+                        >
+                          {showAllHistory ? `▾ ${t('collapseList')}` : `▸ ${t('expandMore')}`}
+                        </button>
+                      </div>
                     )}
                     <div style={{ padding: '4px 12px 0 24px', fontSize: 11, color: '#555' }}>
                       {t('historyHint')}

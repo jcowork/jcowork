@@ -145,6 +145,9 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
   const [streaming, setStreaming] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string>('');
   const [alarmActive, setAlarmActive] = useState(false);
+  // History collapsing: by default only the most recent messages are shown;
+  // earlier ones sit behind a clickable expand toggle.
+  const [showFullHistory, setShowFullHistory] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const mountedRef = useRef(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -194,6 +197,7 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
     setShowDocPicker(false);
     setShowUrlInput(false);
     setUrlInput('');
+    setShowFullHistory(false);
   }
 
   const connect = useCallback(() => {
@@ -694,6 +698,12 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
     f.toLowerCase().includes(docPickerSearch.toLowerCase())
   );
 
+  // Older messages collapse behind an expand toggle; by default only the
+  // most recent HISTORY_VISIBLE_COUNT messages render.
+  const HISTORY_VISIBLE_COUNT = 3;
+  const collapsedCount = Math.max(0, messages.length - HISTORY_VISIBLE_COUNT);
+  const historyStartIdx = showFullHistory ? 0 : collapsedCount;
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       <div style={{ padding: '8px 16px', borderBottom: '1px solid #333', display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between' }}>
@@ -738,7 +748,28 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
 
       <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
         <div className="chat-messages-inner">
-        {messages.map((msg, i) => {
+        {collapsedCount > 0 && (
+          <div style={{ textAlign: 'center', marginBottom: 12 }}>
+            <button
+              onClick={() => setShowFullHistory(!showFullHistory)}
+              style={{
+                padding: '4px 14px',
+                borderRadius: 12,
+                border: '1px solid #444',
+                background: 'transparent',
+                color: '#8ab4f8',
+                cursor: 'pointer',
+                fontSize: 12,
+              }}
+            >
+              {showFullHistory
+                ? `▾ ${t('collapseHistory')}`
+                : `▸ ${t('expandEarlierPrefix')}${collapsedCount}${t('expandEarlierSuffix')}`}
+            </button>
+          </div>
+        )}
+        {messages.slice(historyStartIdx).map((msg, idx) => {
+          const i = historyStartIdx + idx;
           const isUser = msg.role === 'user';
           const isSystem = msg.role === 'system';
           return (
