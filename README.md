@@ -115,7 +115,7 @@ jcowork-server
 
 ## Desktop App (macOS / Windows)
 
-A native desktop application is available for macOS and Windows, powered by [Tauri v2](https://tauri.app/). The desktop app bundles the entire backend + frontend into a single installable package — no Docker, Python, or Node.js required.
+A native desktop application is available for macOS and Windows, powered by [Tauri v2](https://tauri.app/). The desktop app bundles the entire backend + frontend into a single installable package — no Docker or Node.js required. A local Python environment is still needed for web search and document parsing (see [Setup Python Environment](#3-setup-python-environment-for-web-search--document-parsing)).
 
 **Download pre-built installers:**
 
@@ -145,7 +145,7 @@ A native desktop application is available for macOS and Windows, powered by [Tau
 **Build from source:**
 
 ```bash
-# Prerequisites: Rust 1.85+, Node.js 20+
+# Prerequisites: Rust 1.85+, Node.js 20+, Python 3.12+ (installed in step 3)
 cargo install tauri-cli --version "^2"
 
 # 1. Build frontend (required — Tauri bundles web/dist/ into the app)
@@ -160,13 +160,20 @@ cargo tauri build
 # Output:
 #   target/release/bundle/dmg/Jcowork_0.2.11_aarch64.dmg       (macOS)
 #   target/release/bundle/msi/Jcowork_0.2.11_x64_en-US.msi     (Windows)
+
+# 3. Install the Python runtime environment (run once, required for web search,
+#    PDF parsing, and the Docling service)
+bash scripts/setup-python.sh                                          # Linux / macOS
+# powershell -ExecutionPolicy Bypass -File scripts\setup-python.ps1   # Windows
 ```
 
 > **Important:** Always run `npm run build` in `web/` before `cargo tauri build`. The Tauri bundler copies `web/dist/` into the app bundle — if the dist is stale or missing, the desktop app will show a blank screen.
 
 > **Note:** The desktop app requires at least one LLM API key configured in `.env`. The Docling PDF parsing service is optional and runs separately if available.
 >
-> **Web search prerequisite:** The web search feature (including searches inside periodic tasks) depends on a local Python environment. Install Python 3.12+ and run the setup script first (see [Setup Python Environment](#3-setup-python-environment-for-web-search--document-parsing)). Web search is unavailable without it.
+> **Important — Python runtime environment:** The desktop binary runs Rust code only; web search, PDF parsing, and the Docling service are driven by Python scripts through the venv at `~/.jcowork/venv` created by step 3 above (requires Python 3.12+; installs `playwright`, `pdftext`, `docling`, `sentence-transformers`, and downloads the Playwright Chromium browser — ~300MB on first run). Skip step 3 and web search fails with `ModuleNotFoundError: No module named 'playwright'`.
+>
+> Because the venv lives inside the app data directory, **deleting or recreating `~/.jcowork` also deletes it**. Re-run the setup script and restart the app to restore search. Details and verification: [Setup Python Environment](#3-setup-python-environment-for-web-search--document-parsing).
 
 **Desktop app architecture:**
 
@@ -261,7 +268,7 @@ The script also downloads the Chromium browser required by Playwright (~300MB). 
 # Expected output: a JSON array with title/url fields
 ```
 
-> **Troubleshooting:** if searches fail (the logs show `web_search: failed to spawn process`), the Python environment is missing or broken — re-run the setup script above and restart the app.
+> **Troubleshooting:** if searches fail with `web_search: failed to spawn process` or `ModuleNotFoundError: No module named 'playwright'`, the Python environment is missing or broken. This commonly happens after deleting or recreating the `~/.jcowork` data directory, which also removes the `~/.jcowork/venv` venv inside it. Re-run the setup script above and restart the app.
 
 ### 4. Start Docling Service (for document parsing & vector search)
 

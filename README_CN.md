@@ -113,7 +113,7 @@ jcowork-server
 
 ## 桌面应用（macOS / Windows）
 
-基于 [Tauri v2](https://tauri.app/) 构建的原生桌面应用，将完整的后端 + 前端打包为单一可安装程序 — 无需 Docker、Python 或 Node.js。
+基于 [Tauri v2](https://tauri.app/) 构建的原生桌面应用，将完整的后端 + 前端打包为单一可安装程序 — 无需 Docker 或 Node.js。网页搜索和文档解析仍需要本机 Python 环境（见[配置 Python 环境](#3-配置-python-环境用于网页搜索和-pdf-解析)）。
 
 **下载安装包：**
 
@@ -143,7 +143,7 @@ jcowork-server
 **从源码构建：**
 
 ```bash
-# 前置要求：Rust 1.85+、Node.js 20+
+# 前置要求：Rust 1.85+、Node.js 20+、Python 3.12+（见第 3 步）
 cargo install tauri-cli --version "^2"
 
 # 1. 构建前端（必须 — Tauri 将 web/dist/ 打包进应用）
@@ -158,13 +158,19 @@ cargo tauri build
 # 输出：
 #   target/release/bundle/dmg/Jcowork_0.2.11_aarch64.dmg       (macOS)
 #   target/release/bundle/msi/Jcowork_0.2.11_x64_en-US.msi     (Windows)
+
+# 3. 安装 Python 运行环境（首次使用前执行一次，联网搜索、PDF 解析、Docling 服务必需）
+bash scripts/setup-python.sh                                          # Linux / macOS
+# powershell -ExecutionPolicy Bypass -File scripts\setup-python.ps1   # Windows
 ```
 
 > **重要：** 执行 `cargo tauri build` 前务必先在 `web/` 目录下运行 `npm run build`。Tauri 会将 `web/dist/` 复制到应用包中 — 如果 dist 目录过期或缺失，桌面应用将显示白屏。
 
 > **注意：** 桌面应用需要在 `.env` 中配置至少一个 LLM API Key。Docling PDF 解析服务为可选，如可用会自动连接。
 >
-> **联网搜索前置安装：** 桌面应用的联网搜索功能（含周期任务中的搜索）依赖本机 Python 环境，需先安装 Python 3.12+ 并运行初始化脚本（见[配置 Python 环境](#3-配置-python-环境用于网页搜索和-pdf-解析)）。缺少该环境时搜索将不可用。
+> **重要 — Python 运行环境：** 桌面应用的二进制本身仅运行 Rust 代码；联网搜索、PDF 解析和 Docling 服务均由 Python 脚本驱动，依赖第 3 步创建的 `~/.jcowork/venv` 虚拟环境（要求 Python 3.12+，安装 `playwright`、`pdftext`、`docling`、`sentence-transformers`，并下载 Playwright 所需的 Chromium 浏览器，首次约 300MB）。未执行第 3 步时，联网搜索会报错 `ModuleNotFoundError: No module named 'playwright'`。
+>
+> 由于该虚拟环境位于应用数据目录内，**删除或重建 `~/.jcowork` 目录会将其一并删除**。此时重新运行安装脚本并重启应用即可恢复。详细说明与验证方式见[配置 Python 环境](#3-配置-python-环境用于网页搜索和-pdf-解析)。
 
 **桌面应用架构：**
 
@@ -258,7 +264,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-python.ps1
 # 预期输出：包含 title/url 字段的 JSON 数组
 ```
 
-> **故障排查：** 若 Agent 搜索时报错（日志中出现 `web_search: failed to spawn process`），说明 Python 环境缺失或损坏，重新运行上述安装脚本后重启应用即可。
+> **故障排查：** 若 Agent 搜索时报错（`web_search: failed to spawn process` 或 `ModuleNotFoundError: No module named 'playwright'`），说明 Python 环境缺失或损坏 —— 常见于删除或重建 `~/.jcowork` 应用数据目录后（`~/.jcowork/venv` 虚拟环境位于该目录内，会被一并删除）。重新运行上述安装脚本并重启应用即可恢复。
 
 ### 4. 启动 Docling 服务（用于文档解析与语义搜索）
 
