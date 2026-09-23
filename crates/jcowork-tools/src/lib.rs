@@ -10,6 +10,7 @@ pub mod excel_db;
 pub mod file_ops;
 pub mod memory;
 pub mod pdf_parse;
+pub mod public_docs;
 pub mod registry;
 pub mod shell;
 pub mod skill;

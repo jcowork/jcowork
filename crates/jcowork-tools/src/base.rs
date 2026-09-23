@@ -25,6 +25,11 @@ pub struct ToolParameter {
 pub struct ToolContext {
     pub user_id: String,
     pub workspace_root: String,
+    /// Public accounts @mentioned in the current conversation, as
+    /// `(user_id, username)` pairs. Empty when no public user was mentioned;
+    /// tools that access other users' public data must verify their target
+    /// is present in this list.
+    pub mentioned_public_users: Vec<(String, String)>,
 }
 
 /// Truncate a string to at most `max_bytes` bytes without splitting a

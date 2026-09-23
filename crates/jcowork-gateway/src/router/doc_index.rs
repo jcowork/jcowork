@@ -536,6 +536,79 @@ pub(crate) async fn reindex_workspace_dir(
     }))).into_response()
 }
 
+// --- Document Public Flag API ---
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct SetPublicRequest {
+    /// Workspace-relative file path of the indexed document.
+    path: String,
+    is_public: bool,
+}
+
+/// PUT /api/workspace/index/public — toggle a document's public flag.
+///
+/// Operates strictly on the requester's own index. If the file has no index
+/// row yet (e.g. uploaded but never indexed), it is indexed on demand so the
+/// flag can be persisted; the flag itself survives re-indexing.
+pub(crate) async fn set_document_public(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Json(body): Json<SetPublicRequest>,
+) -> impl IntoResponse {
+    let workspace_root = format!("{}/{}/workspace", state.data_dir, auth_user.user_id);
+    let store = FileStore::new(&workspace_root);
+    if let Err(e) = store.validate_path_public(&body.path) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("Invalid path: {}", e) })),
+        ).into_response();
+    }
+
+    let index = match WorkspaceIndex::cached(&state.data_dir, &auth_user.user_id).await {
+        Ok(idx) => idx,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Failed to open index: {}", e) })),
+            ).into_response();
+        }
+    };
+
+    // Ensure the file has an index row before flagging it.
+    match index.is_public(&body.path).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            if let Err(e) = index.add_document(&body.path, &workspace_root).await {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": format!("File not indexed and cannot be indexed: {}", e) })),
+                ).into_response();
+            }
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Failed to read index: {}", e) })),
+            ).into_response();
+        }
+    }
+
+    match index.set_public(&body.path, body.is_public).await {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "path": body.path, "is_public": body.is_public })),
+        ).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "Document not indexed" })),
+        ).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("Failed to set public flag: {}", e) })),
+        ).into_response(),
+    }
+}
+
 // --- Docling Service Management API ---
 
 /// Get the current status of the Docling service.

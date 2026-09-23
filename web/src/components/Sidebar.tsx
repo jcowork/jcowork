@@ -25,9 +25,14 @@ interface SidebarProps {
   onDeleteConversation: (id: string) => void;
   mobileOpen?: boolean;
   onClose?: () => void;
+  /** Public accounts visible from the active account (read-only). */
+  publicUsers?: { userId: string; username: string }[];
+  /** userId of the public account currently opened in the read-only profile view. */
+  viewingPublicUserId?: string | null;
+  onOpenPublicUser?: (user: { userId: string; username: string }) => void;
 }
 
-export default function Sidebar({ accounts, activeUserId, streamingAccounts, unreadAccounts, onSwitchAccount, onAddAccount, onRemoveAccount, onLogout, onChat, onSettings, onSchedule, onMemory, onSkills, onDocuments, currentView, conversations, activeConvId, onNewChat, onSelectConversation, onDeleteConversation, mobileOpen, onClose }: SidebarProps) {
+export default function Sidebar({ accounts, activeUserId, streamingAccounts, unreadAccounts, onSwitchAccount, onAddAccount, onRemoveAccount, onLogout, onChat, onSettings, onSchedule, onMemory, onSkills, onDocuments, currentView, conversations, activeConvId, onNewChat, onSelectConversation, onDeleteConversation, mobileOpen, onClose, publicUsers, viewingPublicUserId, onOpenPublicUser }: SidebarProps) {
   const t = useT();
   const { lang, setLang } = useLang();
   const [historyOpen, setHistoryOpen] = useState(true);
@@ -197,6 +202,48 @@ export default function Sidebar({ accounts, activeUserId, streamingAccounts, unr
                   </div>
                 );
               })}
+              {/* Public accounts (read-only) — merged into the contacts list */}
+              {(() => {
+                const visiblePublicUsers = (publicUsers ?? [])
+                  .filter((u) => !accounts.some((a) => a.userId === u.userId))
+                  .filter((u) => !contactsSearch || u.username.toLowerCase().includes(contactsSearch.toLowerCase()));
+                if (visiblePublicUsers.length === 0) return null;
+                return (
+                  <>
+                    <div style={{ color: '#666', fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.5px', margin: '8px 4px 4px' }}>
+                      {t('publicUsers')}
+                    </div>
+                    {visiblePublicUsers.map((u) => (
+                      <div
+                        key={u.userId}
+                        onClick={() => onOpenPublicUser?.(u)}
+                        style={{
+                          display: 'flex', alignItems: 'center', padding: '6px 8px',
+                          borderRadius: 6, cursor: 'pointer', marginBottom: 2,
+                          background: u.userId === viewingPublicUserId ? '#1a3a5a' : 'transparent',
+                        }}
+                      >
+                        <span style={{ fontSize: 12, marginRight: 6, flexShrink: 0 }}>🌐</span>
+                        <span style={{
+                          flex: 1, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                          color: u.userId === viewingPublicUserId ? '#eee' : '#999',
+                          fontWeight: u.userId === viewingPublicUserId ? 600 : 400,
+                        }}>
+                          {u.username}
+                        </span>
+                        <span style={{
+                          fontSize: 9, color: '#58a6ff', background: '#1f6feb22',
+                          border: '1px solid #1f6feb55', borderRadius: 8, padding: '0 6px',
+                          flexShrink: 0,
+                        }}>
+                          {t('publicBadge')}
+                        </span>
+                      </div>
+                    ))}
+                  </>
+                );
+              })()}
             </>
           )}
         </div>

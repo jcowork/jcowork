@@ -42,7 +42,7 @@ pub(crate) async fn register(
         }
     };
 
-    let user = match state.user_store.create_user(&req.username, &hash).await {
+    let user = match state.user_store.create_user(&req.username, &hash, req.is_public).await {
         Ok(u) => u,
         Err(e) => {
             return (
@@ -68,6 +68,7 @@ pub(crate) async fn register(
             "token": token,
             "user_id": user.id,
             "username": user.username,
+            "is_public": user.is_public,
         })),
     )
 }

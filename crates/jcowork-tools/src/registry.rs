@@ -181,6 +181,7 @@ mod tests {
         ToolContext {
             user_id: "u".to_string(),
             workspace_root: "/tmp".to_string(),
+            mentioned_public_users: Vec::new(),
         }
     }
 
@@ -193,6 +194,7 @@ mod tests {
         let ctx = ToolContext {
             user_id: "u".to_string(),
             workspace_root: "/tmp".to_string(),
+            mentioned_public_users: Vec::new(),
         };
 
         // A panicking tool becomes an Err instead of killing the caller

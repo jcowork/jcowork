@@ -13,6 +13,7 @@ use jcowork_llm::LlmRouter;
 use jcowork_logs::LogWriter;
 use jcowork_memory::MemoryManager;
 use jcowork_skills::SkillManager;
+use jcowork_storage::UserStore;
 use jcowork_tools::base::ToolContext;
 use jcowork_tools::cron::{
     CronAddTool, CronListTool, CronRemoveTool, ReminderAddTool, ReminderListTool,
@@ -30,6 +31,7 @@ use jcowork_tools::memory::{
     MemoryRecallTool, MemorySaveTool, MemorySearchTool, MemoryUpdateTool,
 };
 use jcowork_tools::pdf_parse::PdfParseTool;
+use jcowork_tools::public_docs::{PublicDocContentTool, PublicDocSearchTool};
 use jcowork_tools::registry::ToolRegistry;
 use jcowork_tools::shell::ShellTool;
 
@@ -130,6 +132,8 @@ pub fn build_tool_registry(
     registry.register(Arc::new(DocListTool));
     registry.register(Arc::new(DocRetrieveTool));
     registry.register(Arc::new(DocContentTool));
+    registry.register(Arc::new(PublicDocSearchTool));
+    registry.register(Arc::new(PublicDocContentTool));
     registry.register(Arc::new(ExcelDbTool));
     registry.register(Arc::new(ShellTool::new(120)));
     Arc::new(registry)
@@ -286,6 +290,7 @@ pub async fn ws_handler(
     log_writer: Arc<LogWriter>,
     memory_manager: Arc<MemoryManager>,
     skill_manager: Arc<SkillManager>,
+    user_store: Arc<UserStore>,
     data_dir: String,
 ) {
     let (mut ws_sender, mut ws_receiver) = ws.split();
@@ -799,7 +804,41 @@ pub async fn ws_handler(
                         };
 
                         // Filter tools by enabled skills
-                        let tools = agent_loop::filter_tools_by_skill(&tool_registry.all_schemas(), &enabled_skill_ids);
+                        let mut tools = agent_loop::filter_tools_by_skill(&tool_registry.all_schemas(), &enabled_skill_ids);
+
+                        // ── Public-account @mentions ──
+                        // Mentions persist across the conversation: scan every
+                        // user message in history (the current one is already
+                        // appended) against the list of public accounts.
+                        let public_users: Vec<(String, String)> = user_store
+                            .list_public_users()
+                            .await
+                            .map(|users| users.into_iter().map(|u| (u.id, u.username)).collect())
+                            .unwrap_or_default();
+                        let mut mentions: Vec<(String, String)> = Vec::new();
+                        for m in history.iter().filter(|m| m.role == "user") {
+                            for pair in agent_loop::extract_public_mentions(&m.content, &public_users) {
+                                if !mentions.iter().any(|(id, _)| id == &pair.0) {
+                                    mentions.push(pair);
+                                }
+                            }
+                        }
+                        // Without mentions the public tools are unavailable —
+                        // hide them from the model entirely.
+                        if mentions.is_empty() {
+                            tools.retain(|t| {
+                                t.function.name != "public_doc_search"
+                                    && t.function.name != "public_doc_content"
+                            });
+                        } else {
+                            let names: Vec<String> =
+                                mentions.iter().map(|(_, n)| format!("@{}", n)).collect();
+                            let _ = ws_sender.send(Message::Text(
+                                serde_json::json!({"type": "status", "message": format!("👤 已识别公开用户 {}，可检索其公开文档", names.join("、"))})
+                                    .to_string().into(),
+                            )).await;
+                        }
+                        let mention_ctx_msg = agent_loop::build_public_mention_context_msg(&mentions);
 
                         // Compute per-user workspace root
                         let workspace_root = format!("{}/{}/workspace", data_dir, user_id);
@@ -807,11 +846,15 @@ pub async fn ws_handler(
                         let tool_ctx = ToolContext {
                             user_id: user_id.clone(),
                             workspace_root,
+                            mentioned_public_users: mentions,
                         };
                         // Fetch active reminders/cron jobs for context injection
                         let active_reminders = cron_scheduler.list_reminders(&user_id).await;
                         let active_cron_jobs = cron_scheduler.list_cron_jobs(&user_id).await;
                         let reminder_ctx_msg = agent_loop::build_reminder_context_msg(&active_reminders, &active_cron_jobs);
+                        // Merge reminder + mention context into the single
+                        // pre_context slot of run_turn.
+                        let pre_context_msg = agent_loop::merge_context_msgs(reminder_ctx_msg, mention_ctx_msg);
 
                         // ── Run agent turn as a detached background task ──
                         // The task keeps running even if this WebSocket drops
@@ -850,7 +893,7 @@ pub async fn ws_handler(
                                 provider,
                                 tool_registry: tool_registry_task,
                                 tool_ctx: &tool_ctx,
-                                pre_context: reminder_ctx_msg.as_ref(),
+                                pre_context: pre_context_msg.as_ref(),
                                 max_turns: 10,
                                 llm_timeout_secs: 60,
                                 stream_timeout_secs: 120,
@@ -946,6 +989,7 @@ pub async fn ws_handler(
                                     let tool_ctx = ToolContext {
                                         user_id: user_id.clone(),
                                         workspace_root,
+                                        mentioned_public_users: Vec::new(),
                                     };
                                     let mut sink = WsSink {
                                         ws_sender: &mut ws_sender,

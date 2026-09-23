@@ -154,6 +154,8 @@ export default function Documents({ token }: DocumentsProps) {
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string>('');
+  // Paths of indexed documents currently marked public (owner's view)
+  const [publicPaths, setPublicPaths] = useState<Set<string>>(new Set());
   const [currentDir, setCurrentDir] = useState<string>('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<{ path: string; isDir: boolean; name: string } | null>(null);
@@ -495,6 +497,54 @@ export default function Documents({ token }: DocumentsProps) {
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
+  // Folders/files have no public state of their own — only indexed documents
+  // can be public. The index list is fetched alongside the workspace tree to
+  // build the path -> is_public map used for the globe badges/toggles.
+  const refreshPublicMap = useCallback(async () => {
+    try {
+      const res = await fetch('/api/workspace/index/list', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const paths = new Set<string>(
+          (data.documents || [])
+            .filter((d: { is_public?: boolean }) => d.is_public)
+            .map((d: { file_path: string }) => d.file_path),
+        );
+        setPublicPaths(paths);
+      }
+    } catch {
+      // Non-fatal: badges/toggles simply reflect the last known state
+    }
+  }, [token]);
+
+  // Toggle a document's public flag (owner side). The backend indexes the
+  // file on demand if it has no index row yet.
+  const togglePublic = async (filePath: string) => {
+    const makePublicNow = !publicPaths.has(filePath);
+    try {
+      const res = await fetch('/api/workspace/index/public', {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: filePath, is_public: makePublicNow }),
+      });
+      if (res.ok) {
+        setPublicPaths(prev => {
+          const next = new Set(prev);
+          if (makePublicNow) next.add(filePath);
+          else next.delete(filePath);
+          return next;
+        });
+      } else {
+        const err = await res.json().catch(() => null);
+        alert(err?.error || t('networkError'));
+      }
+    } catch {
+      alert(t('networkError'));
+    }
+  };
+
   const fetchDir = useCallback(async (path: string): Promise<FileEntry[]> => {
     const res = await fetch(`/api/workspace/files?path=${encodeURIComponent(path)}`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -518,7 +568,8 @@ export default function Documents({ token }: DocumentsProps) {
       children: e.type === 'dir' ? undefined : undefined,
     })));
     setLoading(false);
-  }, [fetchDir]);
+    refreshPublicMap();
+  }, [fetchDir, refreshPublicMap]);
 
   // Collect all expanded directory paths from the tree
   const getExpandedPaths = (nodes: TreeNode[]): string[] => {
@@ -565,7 +616,8 @@ export default function Documents({ token }: DocumentsProps) {
     }
     setTree(newTree);
     setLoading(false);
-  }, [tree, fetchDir]);
+    refreshPublicMap();
+  }, [tree, fetchDir, refreshPublicMap]);
 
   useEffect(() => {
     loadRoot();
@@ -953,6 +1005,30 @@ export default function Documents({ token }: DocumentsProps) {
               title="Download"
             >
               ⬇
+            </span>
+          )}
+          {/* Make-public action (hover, only while the file is not public) */}
+          {node.type === 'file' && !publicPaths.has(node.path) && (
+            <span
+              className="tree-icon-btn"
+              style={{
+                opacity: 0, fontSize: 12, flexShrink: 0, cursor: 'pointer',
+                transition: 'opacity 0.15s', color: '#888',
+              }}
+              onClick={(e) => { e.stopPropagation(); togglePublic(node.path); }}
+              title={t('makePublic')}
+            >
+              🌐
+            </span>
+          )}
+          {/* Persistent globe badge for public files — click to make private */}
+          {node.type === 'file' && publicPaths.has(node.path) && (
+            <span
+              style={{ fontSize: 11, flexShrink: 0, cursor: 'pointer', color: '#58a6ff', opacity: 0.9 }}
+              onClick={(e) => { e.stopPropagation(); togglePublic(node.path); }}
+              title={t('makePrivate')}
+            >
+              🌐
             </span>
           )}
           {node.type === 'file' && node.name.endsWith('.html') && (

@@ -21,9 +21,23 @@ pub(crate) async fn list_reminders(
 
 pub(crate) async fn remove_reminder(
     State(state): State<AppState>,
-    _auth: axum::Extension<AuthUser>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    // Ownership check: the reminder must belong to the requester.
+    let owned = state
+        .cron_scheduler
+        .list_reminders(&auth_user.user_id)
+        .await
+        .iter()
+        .any(|r| r.id == id);
+    if !owned {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Reminder not found"})),
+        );
+    }
+
     match state.cron_scheduler.remove_reminder(&id).await {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "removed"}))),
         Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e.to_string()}))),
@@ -40,9 +54,23 @@ pub(crate) async fn list_cron_jobs(
 
 pub(crate) async fn remove_cron_job(
     State(state): State<AppState>,
-    _auth: axum::Extension<AuthUser>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    // Ownership check: the job must belong to the requester.
+    let owned = state
+        .cron_scheduler
+        .list_cron_jobs(&auth_user.user_id)
+        .await
+        .iter()
+        .any(|j| j.id == id);
+    if !owned {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Cron job not found"})),
+        );
+    }
+
     match state.cron_scheduler.remove_cron_job(&id).await {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "removed"}))),
         Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e.to_string()}))),
@@ -191,11 +219,26 @@ pub(crate) async fn create_cron_job(
 /// GET /api/cron-jobs/{id}/results - get execution results for a task.
 pub(crate) async fn get_cron_job_results(
     State(state): State<AppState>,
-    _auth: axum::Extension<AuthUser>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    // Ownership check: results are only readable through a job the
+    // requester owns.
+    let owned = state
+        .cron_scheduler
+        .list_cron_jobs(&auth_user.user_id)
+        .await
+        .iter()
+        .any(|j| j.id == id);
+    if !owned {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Cron job not found"})),
+        );
+    }
+
     let results = state.cron_scheduler.list_task_results(&id).await;
-    (StatusCode::OK, Json(results))
+    (StatusCode::OK, Json(serde_json::json!(results)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -211,6 +254,21 @@ pub(crate) async fn store_cron_job_result(
     Path(id): Path<String>,
     Json(req): Json<StoreCronJobResultRequest>,
 ) -> impl IntoResponse {
+    // Ownership check: results can only be stored under a job the
+    // requester owns.
+    let owned = state
+        .cron_scheduler
+        .list_cron_jobs(&auth_user.user_id)
+        .await
+        .iter()
+        .any(|j| j.id == id);
+    if !owned {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Cron job not found"})),
+        );
+    }
+
     let result = TaskResult {
         id: uuid::Uuid::new_v4().to_string(),
         cron_job_id: id.clone(),

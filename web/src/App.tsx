@@ -6,6 +6,7 @@ import Schedule from './components/Schedule';
 import Sidebar from './components/Sidebar';
 import Settings from './components/Settings';
 import SkillsSquare from './components/SkillsSquare';
+import PublicProfile from './components/PublicProfile';
 import { I18nProvider, useT } from './i18n';
 import { API_BASE } from './config';
 import {
@@ -93,7 +94,7 @@ function AppInner() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConvId, setActiveConvIdState] = useState<string>('');
   const [, setTick] = useState(0); // periodic re-render for 1h history threshold
-  const [loginForm, setLoginForm] = useState({ username: '', password: '' });
+  const [loginForm, setLoginForm] = useState({ username: '', password: '', publicAccount: false });
   const [authView, setAuthView] = useState<'login' | 'register' | 'forgot'>('login');
   const [forgotStep, setForgotStep] = useState<'request' | 'reset'>('request');
   const [forgotUsername, setForgotUsername] = useState('');
@@ -113,6 +114,10 @@ function AppInner() {
   const [streamingAccounts, setStreamingAccounts] = useState<Set<string>>(new Set());
   // Accounts with completed-but-unread tasks (set when background task finishes, cleared on switch)
   const [unreadAccounts, setUnreadAccounts] = useState<Set<string>>(new Set());
+  // Public accounts visible to the active account (fetched with its token)
+  const [publicUsers, setPublicUsers] = useState<{ userId: string; username: string }[]>([]);
+  // Public account currently opened in the read-only profile view (null = normal views)
+  const [viewingPublicUser, setViewingPublicUser] = useState<{ userId: string; username: string } | null>(null);
 
   const activeAccount = accounts.find((a) => a.userId === activeUserId) ?? null;
 
@@ -176,6 +181,31 @@ function AppInner() {
     }
   }, [activeAccount?.userId]);
 
+  // Fetch public accounts for the active account's token. They show up in
+  // the contacts list and can be @mentioned in chat.
+  useEffect(() => {
+    if (!activeAccount) {
+      setPublicUsers([]);
+      return;
+    }
+    let cancelled = false;
+    fetch('/api/public-users', {
+      headers: { Authorization: `Bearer ${activeAccount.token}` },
+    })
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data) => {
+        if (cancelled) return;
+        setPublicUsers(
+          (Array.isArray(data) ? data : []).map((u: { user_id: string; username: string }) => ({
+            userId: u.user_id,
+            username: u.username,
+          })),
+        );
+      })
+      .catch(() => { if (!cancelled) setPublicUsers([]); });
+    return () => { cancelled = true; };
+  }, [activeAccount?.userId, activeAccount?.token]);
+
   // Re-evaluate the 1h history threshold every minute
   useEffect(() => {
     const iv = window.setInterval(() => setTick((v) => v + 1), 60_000);
@@ -185,6 +215,7 @@ function AppInner() {
   const switchToChatView = () => {
     setShowSettings(false); setShowSchedule(false); setShowMemory(false);
     setShowSkills(false); setShowDocuments(false);
+    setViewingPublicUser(null);
   };
 
   const handleNewChat = useCallback(() => {
@@ -223,12 +254,18 @@ function AppInner() {
     e.preventDefault();
     setAuthError('');
     setAuthSuccess('');
-    const endpoint = authView === 'register' ? '/api/auth/register' : '/api/auth/login';
+    const isRegister = authView === 'register';
+    const endpoint = isRegister ? '/api/auth/register' : '/api/auth/login';
     try {
       const res = await fetch(`${API_BASE}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(loginForm),
+        body: JSON.stringify({
+          username: loginForm.username,
+          password: loginForm.password,
+          // Register only: opt the new account into the public directory
+          is_public: isRegister ? loginForm.publicAccount : undefined,
+        }),
       });
       const data = await res.json();
       if (data.token) {
@@ -362,13 +399,14 @@ function AppInner() {
     // Reset tab state on account switch
     setShowSettings(false); setShowSchedule(false); setShowMemory(false);
     setShowSkills(false); setShowDocuments(false);
+    setViewingPublicUser(null);
   }, [activeUserId, activeAccount, conversations, activeConvId]);
 
   const handleAddAccount = useCallback(() => {
     setAddingAccount(true);
     setAuthView('login');
     setAuthError(''); setAuthSuccess('');
-    setLoginForm({ username: '', password: '' });
+    setLoginForm({ username: '', password: '', publicAccount: false });
   }, []);
 
   const handleRemoveAccount = useCallback((userId: string) => {
@@ -540,6 +578,24 @@ function AppInner() {
               onChange={(e) => { setLoginForm({ ...loginForm, password: e.target.value }); setAuthError(''); }}
               style={inputStyle}
             />
+            {authView === 'register' && (
+              <div style={{ marginBottom: 12 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 14, color: '#ccc' }}>
+                  <input
+                    type="checkbox"
+                    checked={loginForm.publicAccount}
+                    onChange={(e) => setLoginForm({ ...loginForm, publicAccount: e.target.checked })}
+                    style={{ width: 16, height: 16, accentColor: '#1a73e8', cursor: 'pointer', flexShrink: 0 }}
+                  />
+                  <span>🌐 {t('publicAccount')}</span>
+                </label>
+                {loginForm.publicAccount && (
+                  <p style={{ color: '#888', fontSize: 12, lineHeight: 1.5, margin: '6px 0 0' }}>
+                    {t('publicAccountHint')}
+                  </p>
+                )}
+              </div>
+            )}
             <button type="submit" style={{ ...btnStyle, marginBottom: 0 }}>
               {authView === 'register' ? t('register') : t('login')}
             </button>
@@ -570,7 +626,7 @@ function AppInner() {
   }
 
   // --- Authenticated view ---
-  const chatVisible = !showSettings && !showDocuments && !showSchedule && !showMemory && !showSkills;
+  const chatVisible = !showSettings && !showDocuments && !showSchedule && !showMemory && !showSkills && !viewingPublicUser;
 
   return (
     <div style={{ display: 'flex', height: '100vh', background: '#111', color: '#eee' }}>
@@ -583,12 +639,19 @@ function AppInner() {
         onAddAccount={handleAddAccount}
         onRemoveAccount={handleRemoveAccount}
         onLogout={logout}
-        onChat={() => { setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); }}
-        onDocuments={() => { setShowDocuments(true); setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); }}
-        onSettings={() => { setShowSettings(true); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); }}
-        onSchedule={() => { setShowSchedule(true); setShowSettings(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); }}
-        onMemory={() => { setShowMemory(true); setShowSchedule(false); setShowSettings(false); setShowSkills(false); setShowDocuments(false); }}
-        onSkills={() => { setShowSkills(true); setShowMemory(false); setShowSchedule(false); setShowSettings(false); setShowDocuments(false); }}
+        publicUsers={publicUsers}
+        viewingPublicUserId={viewingPublicUser?.userId ?? null}
+        onOpenPublicUser={(u) => {
+          setViewingPublicUser(u);
+          setShowSettings(false); setShowSchedule(false); setShowMemory(false);
+          setShowSkills(false); setShowDocuments(false);
+        }}
+        onChat={() => { setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); setViewingPublicUser(null); }}
+        onDocuments={() => { setShowDocuments(true); setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setViewingPublicUser(null); }}
+        onSettings={() => { setShowSettings(true); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); setViewingPublicUser(null); }}
+        onSchedule={() => { setShowSchedule(true); setShowSettings(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); setViewingPublicUser(null); }}
+        onMemory={() => { setShowMemory(true); setShowSchedule(false); setShowSettings(false); setShowSkills(false); setShowDocuments(false); setViewingPublicUser(null); }}
+        onSkills={() => { setShowSkills(true); setShowMemory(false); setShowSchedule(false); setShowSettings(false); setShowDocuments(false); setViewingPublicUser(null); }}
         currentView={showSettings ? 'settings' : showSchedule ? 'schedule' : showMemory ? 'memory' : showSkills ? 'skills' : showDocuments ? 'documents' : 'chat'}
         conversations={conversations}
         activeConvId={activeConvId}
@@ -631,7 +694,13 @@ function AppInner() {
               </div>
             );
           })}
-          {showSettings && activeAccount ? (
+          {viewingPublicUser && activeAccount ? (
+            <PublicProfile
+              viewerToken={activeAccount.token}
+              publicUser={viewingPublicUser}
+              onClose={() => setViewingPublicUser(null)}
+            />
+          ) : showSettings && activeAccount ? (
             <Settings onClose={() => setShowSettings(false)} userId={activeAccount.userId} token={activeAccount.token} />
           ) : showDocuments && activeAccount ? (
             <Documents userId={activeAccount.userId} token={activeAccount.token} />

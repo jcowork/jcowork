@@ -21,6 +21,7 @@ pub(crate) mod feishu;
 pub(crate) mod fetch_url;
 pub(crate) mod memory;
 pub(crate) mod providers;
+pub(crate) mod public_users;
 pub(crate) mod skills;
 pub(crate) mod upload;
 pub(crate) mod workspace;
@@ -98,6 +99,10 @@ pub struct UpdateMemoryRequest {
 pub struct RegisterRequest {
     pub username: String,
     pub password: String,
+    /// Opt-in public account flag, fixed at registration time.
+    /// Defaults to false so older clients keep registering private accounts.
+    #[serde(default)]
+    pub is_public: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -238,6 +243,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/workspace/save", post(workspace::save_workspace_file))
         .route("/api/workspace/index/search", get(doc_index::search_workspace_index))
         .route("/api/workspace/index/list", get(doc_index::list_workspace_index))
+        .route("/api/workspace/index/public", put(doc_index::set_document_public))
         .route("/api/workspace/index/content", get(doc_index::get_indexed_content))
         .route("/api/workspace/index/reindex", post(doc_index::reindex_workspace_dir))
         .route("/api/workspace/vector/search", get(doc_index::vector_search_chunks))
@@ -257,6 +263,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/connectors/{id}/tools", get(connectors::list_connector_tools))
         .route("/api/connectors/{id}/tools/{tool}/toggle", post(connectors::toggle_connector_tool))
         .route("/api/ws", get(ws_upgrade))
+        // Read-only cross-user endpoints for public accounts
+        .route("/api/public-users", get(public_users::list_public_users))
+        .route("/api/public-users/{user_id}/documents", get(public_users::list_public_documents))
+        .route("/api/public-users/{user_id}/documents/content", get(public_users::get_public_document_content))
+        .route("/api/public-users/{user_id}/cron-jobs", get(public_users::list_public_cron_jobs))
+        .route("/api/public-users/{user_id}/cron-jobs/{job_id}/results", get(public_users::get_public_cron_job_results))
         .layer(auth_mw)
         // Allow up to 50MB for file uploads (default axum limit is only 2MB)
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024));
@@ -420,10 +432,11 @@ async fn ws_upgrade(
     let log_writer = state.log_writer.clone();
     let memory_manager = state.memory_manager.clone();
     let skill_manager = state.skill_manager.clone();
+    let user_store = state.user_store.clone();
     let data_dir = state.data_dir.clone();
     let llm_router = state.llm_router.clone();
     ws.on_upgrade(move |socket| {
-        ws::ws_handler(socket, user_id, conv, state.session_manager, llm_router, default_model, tool_registry, cron_scheduler, log_writer, memory_manager, skill_manager, data_dir)
+        ws::ws_handler(socket, user_id, conv, state.session_manager, llm_router, default_model, tool_registry, cron_scheduler, log_writer, memory_manager, skill_manager, user_store, data_dir)
     })
 }
 

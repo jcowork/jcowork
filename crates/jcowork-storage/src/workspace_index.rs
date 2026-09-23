@@ -189,6 +189,13 @@ impl WorkspaceIndex {
             .await
             .ok(); // Ignore error if column already exists
 
+        // Add is_public column if it doesn't exist (public document flag).
+        // Documents default to private; users toggle this per document.
+        sqlx::query("ALTER TABLE documents ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await
+            .ok(); // Ignore error if column already exists
+
         // --- Vector search tables ---
         
         // Document chunks table (for semantic search)
@@ -610,6 +617,7 @@ impl WorkspaceIndex {
             r#"
             SELECT d.id, d.file_path, d.dir_path, d.filename, d.content_type, d.size, d.indexed_at,
                    snippet(documents_fts, 1, '>>>', '<<<', '...', 32) as snippet,
+                   d.is_public,
                    rank
             FROM documents_fts
             JOIN documents d ON d.id = documents_fts.rowid
@@ -634,6 +642,7 @@ impl WorkspaceIndex {
                 size: r.size,
                 indexed_at: r.indexed_at,
                 snippet: r.snippet,
+                is_public: r.is_public,
             })
             .collect())
     }
@@ -643,7 +652,7 @@ impl WorkspaceIndex {
         let docs = sqlx::query_as::<_, IndexedDocumentRow>(
             r#"
             SELECT id, file_path, dir_path, filename, content_type, size, indexed_at,
-                   substr(content_text, 1, 200) as snippet
+                   substr(content_text, 1, 200) as snippet, is_public
             FROM documents
             WHERE dir_path = ?1
             ORDER BY filename
@@ -664,6 +673,7 @@ impl WorkspaceIndex {
                 size: r.size,
                 indexed_at: r.indexed_at,
                 snippet: r.snippet,
+                is_public: r.is_public,
             })
             .collect())
     }
@@ -742,7 +752,7 @@ impl WorkspaceIndex {
             sqlx::query_as::<_, IndexedDocumentRow>(
                 r#"
                 SELECT id, file_path, dir_path, filename, content_type, size, indexed_at,
-                       substr(content_text, 1, 200) as snippet
+                       substr(content_text, 1, 200) as snippet, is_public
                 FROM documents
                 WHERE dir_path LIKE ?1 OR dir_path = ?1
                 ORDER BY dir_path, filename
@@ -755,7 +765,7 @@ impl WorkspaceIndex {
             sqlx::query_as::<_, IndexedDocumentRow>(
                 r#"
                 SELECT id, file_path, dir_path, filename, content_type, size, indexed_at,
-                       substr(content_text, 1, 200) as snippet
+                       substr(content_text, 1, 200) as snippet, is_public
                 FROM documents
                 ORDER BY dir_path, filename
                 "#,
@@ -775,16 +785,251 @@ impl WorkspaceIndex {
                 size: r.size,
                 indexed_at: r.indexed_at,
                 snippet: r.snippet,
+                is_public: r.is_public,
             })
             .collect())
     }
 
-    /// Get the count of indexed documents.
+   /// Get the count of indexed documents.
     pub async fn count(&self) -> Result<i64> {
         let row = sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM documents")
             .fetch_one(&self.pool)
             .await?;
         Ok(row.0)
+    }
+
+    // ========== Public document access ==========
+
+    /// Read the public flag of an indexed document.
+    /// Returns None when the document is not indexed.
+    pub async fn is_public(&self, file_path: &str) -> Result<Option<bool>> {
+        let row = sqlx::query_as::<_, (bool,)>(
+            "SELECT is_public FROM documents WHERE file_path = ?1",
+        )
+        .bind(file_path)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| r.0))
+    }
+
+    /// Set the public flag of an indexed document.
+    /// Returns false when the document is not indexed.
+    pub async fn set_public(&self, file_path: &str, is_public: bool) -> Result<bool> {
+        let result = sqlx::query("UPDATE documents SET is_public = ?2 WHERE file_path = ?1")
+            .bind(file_path)
+            .bind(is_public)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// List public documents only (optionally filtered by directory prefix).
+    ///
+    /// Used for cross-user access to a public account's index; private
+    /// documents are never returned.
+    pub async fn list_public(&self, dir_prefix: Option<&str>) -> Result<Vec<IndexedDocument>> {
+        let docs = if let Some(prefix) = dir_prefix {
+            let pattern = format!("{}%", prefix);
+            sqlx::query_as::<_, IndexedDocumentRow>(
+                r#"
+                SELECT id, file_path, dir_path, filename, content_type, size, indexed_at,
+                       substr(content_text, 1, 200) as snippet, is_public
+                FROM documents
+                WHERE is_public = 1 AND (dir_path LIKE ?1 OR dir_path = ?1)
+                ORDER BY dir_path, filename
+                "#,
+            )
+            .bind(&pattern)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, IndexedDocumentRow>(
+                r#"
+                SELECT id, file_path, dir_path, filename, content_type, size, indexed_at,
+                       substr(content_text, 1, 200) as snippet, is_public
+                FROM documents
+                WHERE is_public = 1
+                ORDER BY dir_path, filename
+                "#,
+            )
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        Ok(docs
+            .into_iter()
+            .map(|r| IndexedDocument {
+                id: r.id,
+                file_path: r.file_path,
+                dir_path: r.dir_path,
+                filename: r.filename,
+                content_type: r.content_type,
+                size: r.size,
+                indexed_at: r.indexed_at,
+                snippet: r.snippet,
+                is_public: r.is_public,
+            })
+            .collect())
+    }
+
+    /// Keyword search (FTS5) restricted to public documents.
+    ///
+    /// Unlike [`WorkspaceIndex::search`], matching private documents are
+    /// filtered out at the SQL level.
+    pub async fn search_public(&self, query: &str, limit: u32) -> Result<Vec<IndexedDocument>> {
+        let docs = sqlx::query_as::<_, IndexedDocumentRow>(
+            r#"
+            SELECT d.id, d.file_path, d.dir_path, d.filename, d.content_type, d.size, d.indexed_at,
+                   snippet(documents_fts, 1, '>>>', '<<<', '...', 32) as snippet,
+                   d.is_public,
+                   rank
+            FROM documents_fts
+            JOIN documents d ON d.id = documents_fts.rowid
+            WHERE documents_fts MATCH ?1 AND d.is_public = 1
+            ORDER BY rank
+            LIMIT ?2
+            "#,
+        )
+        .bind(query)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(docs
+            .into_iter()
+            .map(|r| IndexedDocument {
+                id: r.id,
+                file_path: r.file_path,
+                dir_path: r.dir_path,
+                filename: r.filename,
+                content_type: r.content_type,
+                size: r.size,
+                indexed_at: r.indexed_at,
+                snippet: r.snippet,
+                is_public: r.is_public,
+            })
+            .collect())
+    }
+
+    /// Set of file paths currently marked public.
+    async fn public_file_paths(&self) -> Result<std::collections::HashSet<String>> {
+        let rows = sqlx::query_as::<_, (String,)>(
+            "SELECT file_path FROM documents WHERE is_public = 1",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(|r| r.0).collect())
+    }
+
+    /// Semantic chunk search restricted to public documents.
+    ///
+    /// Mirrors the retrieval approach used by the `doc_retrieve` tool:
+    /// generate a query embedding, run vector search over the whole index
+    /// (no file filter), then post-filter chunks to the set of public
+    /// `file_path`s and truncate to `top_k`. Falls back to a public-only
+    /// FTS chunk search when the embedding service is unavailable.
+    pub async fn search_chunks_public(&self, query: &str, top_k: u32) -> Result<Vec<ScoredChunk>> {
+        let public_paths = self.public_file_paths().await?;
+        if public_paths.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let embedding_client = EmbeddingClient::shared();
+        match embedding_client.embed_query(query).await {
+            Ok(query_embedding) => {
+                // Over-fetch so post-filtering still leaves enough candidates.
+                let results = self.vector_search(&query_embedding, top_k * 4, None).await?;
+                let mut filtered: Vec<ScoredChunk> = results
+                    .into_iter()
+                    .filter(|c| public_paths.contains(&c.file_path))
+                    .collect();
+                filtered.truncate(top_k as usize);
+                if !filtered.is_empty() {
+                    return Ok(filtered);
+                }
+                // Public documents may have no embeddings (service was down
+                // at index time) — fall back to keyword search.
+                tracing::info!("Vector search found no public chunks, falling back to public FTS chunk search");
+                self.fts_chunk_search_public(query, top_k).await
+            }
+            Err(e) => {
+                tracing::info!(err = %e, "Embedding failed, falling back to public FTS chunk search");
+                self.fts_chunk_search_public(query, top_k).await
+            }
+        }
+    }
+
+    /// FTS5 chunk search restricted to public documents (fallback for
+    /// [`WorkspaceIndex::search_chunks_public`] when embeddings are
+    /// unavailable).
+    async fn fts_chunk_search_public(&self, query: &str, top_k: u32) -> Result<Vec<ScoredChunk>> {
+        let rows = sqlx::query_as::<_, DocChunkRow>(
+            r#"
+            SELECT c.id, c.file_path, c.chunk_type, c.content, c.heading, c.chunk_index, c.image_path, c.created_at
+            FROM doc_chunks_fts fts
+            JOIN doc_chunks c ON c.id = fts.rowid
+            JOIN documents d ON d.file_path = c.file_path
+            WHERE doc_chunks_fts MATCH ?1 AND d.is_public = 1
+            ORDER BY rank
+            LIMIT ?2
+            "#,
+        )
+        .bind(query)
+        .bind(top_k as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(|r| {
+            let chunk: DocChunk = r.into();
+            ScoredChunk {
+                id: chunk.chunk_index as i64,
+                file_path: chunk.file_path,
+                chunk_type: chunk.chunk_type,
+                content: chunk.content,
+                heading: chunk.heading,
+                chunk_index: chunk.chunk_index,
+                image_path: chunk.image_path,
+                score: 1.0,
+            }
+        }).collect())
+    }
+
+    /// Get the full indexed content of a document, only when it is public.
+    /// Returns None when the file is not indexed or not public.
+    pub async fn get_content_public(&self, file_path: &str) -> Result<Option<String>> {
+        let row = sqlx::query_as::<_, (String,)>(
+            "SELECT content_text FROM documents WHERE file_path = ?1 AND is_public = 1"
+        )
+        .bind(file_path)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| r.0))
+    }
+
+    /// Get a character-based slice of a public document's indexed content,
+    /// for paginated cross-user preview. Same semantics as
+    /// [`WorkspaceIndex::get_content_slice`] but returns None for
+    /// non-public documents.
+    pub async fn get_content_slice_public(
+        &self,
+        file_path: &str,
+        offset: i64,
+        limit: i64,
+    ) -> Result<Option<(String, i64)>> {
+        let row = sqlx::query_as::<_, (String, i64)>(
+            "SELECT substr(content_text, ?2 + 1, ?3), length(content_text) FROM documents WHERE file_path = ?1 AND is_public = 1"
+        )
+        .bind(file_path)
+        .bind(offset)
+        .bind(limit)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
     }
 
     // ========== Docling Integration ==========
@@ -1296,6 +1541,8 @@ pub struct IndexedDocument {
     pub size: i64,
     pub indexed_at: String,
     pub snippet: String,
+    /// Whether the document is marked public by its owner.
+    pub is_public: bool,
 }
 
 /// Internal row type for SQL query results.
@@ -1309,6 +1556,7 @@ struct IndexedDocumentRow {
     size: i64,
     indexed_at: String,
     snippet: String,
+    is_public: bool,
 }
 
 /// Row type for doc_chunks queries.
@@ -1630,5 +1878,142 @@ mod tests {
         // Removing the file also removes the database
         index.remove_file("库存表.xlsx").await.unwrap();
         assert!(!db_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_public_document_visibility() {
+        let (index, dir) = setup_test_index().await;
+
+        let workspace = dir.path().join("test-workspace");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        tokio::fs::write(
+            workspace.join("public.md"),
+            "# Public\nshareable knowledge content about rust",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            workspace.join("private.md"),
+            "# Private\nhidden content about rust and secrets",
+        )
+        .await
+        .unwrap();
+
+        let ws_str = workspace.to_string_lossy().to_string();
+        index.add_document("public.md", &ws_str).await.unwrap();
+        index.add_document("private.md", &ws_str).await.unwrap();
+
+        // Default state: everything private
+        assert_eq!(index.is_public("public.md").await.unwrap(), Some(false));
+        assert_eq!(index.is_public("nope.md").await.unwrap(), None);
+        assert!(index.list_public(None).await.unwrap().is_empty());
+        assert!(index.get_content_public("public.md").await.unwrap().is_none());
+        assert!(index
+            .get_content_slice_public("public.md", 0, 100)
+            .await
+            .unwrap()
+            .is_none());
+
+        // Flag one document public; unknown files report false
+        assert!(index.set_public("public.md", true).await.unwrap());
+        assert!(!index.set_public("nope.md", true).await.unwrap());
+        assert_eq!(index.is_public("public.md").await.unwrap(), Some(true));
+
+        // list_public shows only the public document
+        let docs = index.list_public(None).await.unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].filename, "public.md");
+        assert!(docs[0].is_public);
+
+        // FTS search only returns public docs (both match "rust")
+        let results = index.search_public("rust", 10).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].filename, "public.md");
+
+        // Content access is gated on the flag
+        assert!(index.get_content_public("public.md").await.unwrap().is_some());
+        assert!(index.get_content_public("private.md").await.unwrap().is_none());
+        let slice = index
+            .get_content_slice_public("public.md", 0, 100)
+            .await
+            .unwrap();
+        assert!(slice.is_some());
+        assert!(index
+            .get_content_slice_public("private.md", 0, 100)
+            .await
+            .unwrap()
+            .is_none());
+
+        // Re-index preserves the flag (UPSERT does not touch is_public)
+        index.add_document("public.md", &ws_str).await.unwrap();
+        assert_eq!(index.is_public("public.md").await.unwrap(), Some(true));
+
+        // Toggle back to private
+        assert!(index.set_public("public.md", false).await.unwrap());
+        assert!(index.list_public(None).await.unwrap().is_empty());
+        assert!(index.search_public("rust", 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_search_chunks_public_gates_on_flag() {
+        let (index, dir) = setup_test_index().await;
+
+        let workspace = dir.path().join("test-workspace");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        tokio::fs::write(
+            workspace.join("public.md"),
+            "# Public\npublic sharing knowledge content",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            workspace.join("private.md"),
+            "# Private\nprivate sharing knowledge content",
+        )
+        .await
+        .unwrap();
+
+        let ws_str = workspace.to_string_lossy().to_string();
+        index.add_document("public.md", &ws_str).await.unwrap();
+        index.add_document("private.md", &ws_str).await.unwrap();
+
+        // Insert chunk rows directly: the embedding service may be
+        // unavailable in tests, in which case add_document stores no chunks.
+        // The FTS triggers keep doc_chunks_fts in sync, so the fallback
+        // path stays exerciseable either way.
+        for (path, text) in [
+            ("public.md", "public sharing knowledge content"),
+            ("private.md", "private sharing knowledge content"),
+        ] {
+            sqlx::query(
+                "INSERT INTO doc_chunks (file_path, chunk_type, content, heading, chunk_index) VALUES (?1, 'text', ?2, '', 0)",
+            )
+            .bind(path)
+            .bind(text)
+            .execute(&index.pool)
+            .await
+            .unwrap();
+        }
+
+        // Without public documents, chunk search short-circuits to empty
+        assert!(index.search_chunks_public("sharing", 5).await.unwrap().is_empty());
+        // FTS chunk search (embedding-unavailable fallback) also gates on the flag
+        assert!(index.fts_chunk_search_public("sharing", 5).await.unwrap().is_empty());
+
+        index.set_public("public.md", true).await.unwrap();
+
+        let fts = index.fts_chunk_search_public("sharing", 5).await.unwrap();
+        assert!(!fts.is_empty(), "public chunks should be retrievable");
+        assert!(fts.iter().all(|c| c.file_path == "public.md"));
+
+        // search_chunks_public never returns chunks of private documents,
+        // whether the vector or the FTS fallback path serves the query.
+        let results = index.search_chunks_public("sharing", 5).await.unwrap();
+        assert!(results.iter().all(|c| c.file_path == "public.md"));
+
+        // Toggling the document private hides its chunks again
+        index.set_public("public.md", false).await.unwrap();
+        assert!(index.search_chunks_public("sharing", 5).await.unwrap().is_empty());
+        assert!(index.fts_chunk_search_public("sharing", 5).await.unwrap().is_empty());
     }
 }

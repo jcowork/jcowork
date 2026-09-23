@@ -250,6 +250,7 @@ impl AgentLoop {
             let tool_ctx = ToolContext {
                 user_id: self.config.user_id.clone(),
                 workspace_root: self.config.workspace_root.clone(),
+                mentioned_public_users: Vec::new(),
             };
             for tc in &tool_calls {
                 let result = self
@@ -997,6 +998,83 @@ pub fn build_reminder_context_msg(
     })
 }
 
+/// Extract which public accounts are @mentioned in a message.
+///
+/// `public_users` is the list of public accounts as `(user_id, username)`
+/// pairs. Matching is a plain substring test for `@{username}`. Usernames are
+/// checked longest-first and each matched span is consumed, so a username
+/// that is a prefix of another (e.g. `alice` vs `alice2`) cannot shadow the
+/// longer match. Returns the mentioned `(user_id, username)` pairs, deduped.
+pub fn extract_public_mentions(
+    text: &str,
+    public_users: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut sorted: Vec<&(String, String)> = public_users.iter().collect();
+    sorted.sort_by(|a, b| b.1.chars().count().cmp(&a.1.chars().count()));
+
+    let mut remaining = text.to_string();
+    let mut mentions: Vec<(String, String)> = Vec::new();
+    for (user_id, username) in sorted {
+        let token = format!("@{}", username);
+        if remaining.contains(&token) {
+            // Consume the matched occurrences so shorter usernames that are
+            // prefixes of this one cannot match the same text again.
+            remaining = remaining.replace(&token, "");
+            if !mentions.iter().any(|(id, _)| id == user_id) {
+                mentions.push((user_id.clone(), username.clone()));
+            }
+        }
+    }
+    mentions
+}
+
+/// Build a context message listing the public accounts mentioned in this
+/// conversation, and how the model may access their public documents.
+/// Returns None when no public account was mentioned.
+pub fn build_public_mention_context_msg(mentions: &[(String, String)]) -> Option<ChatMessage> {
+    if mentions.is_empty() {
+        return None;
+    }
+
+    let names: Vec<String> = mentions.iter().map(|(_, n)| format!("@{}", n)).collect();
+    let username_args: Vec<String> = mentions
+        .iter()
+        .map(|(_, n)| format!("username=\"{}\"", n))
+        .collect();
+
+    Some(ChatMessage {
+        role: "user".to_string(),
+        content: format!(
+            "[Context] The user mentioned the following public account(s) in this conversation: {}.\n\
+             Only their PUBLIC documents can be accessed, via the public_doc_search and public_doc_content tools (pass {}).\n\
+             Rules: private documents of mentioned accounts are NOT accessible; documents of accounts not listed here are NOT accessible; do not call these tools when the user's request is unrelated to a mentioned account's documents.",
+            names.join(", "),
+            username_args.join(" or ")
+        ),
+        tool_calls: None,
+        tool_call_id: None,
+        reasoning_content: None,
+        images: None,
+    })
+}
+
+/// Merge two optional `[Context]` messages into one by concatenating their
+/// contents, so mention and reminder context can share a single
+/// `pre_context` slot of [`run_turn`].
+pub fn merge_context_msgs(
+    a: Option<ChatMessage>,
+    b: Option<ChatMessage>,
+) -> Option<ChatMessage> {
+    match (a, b) {
+        (Some(mut a), Some(b)) => {
+            a.content = format!("{}\n\n{}", a.content, b.content);
+            Some(a)
+        }
+        (Some(a), None) => Some(a),
+        (None, b) => b,
+    }
+}
+
 /// Build the system prompt with custom identity and skill prompt.
 ///
 /// This is the canonical system prompt builder used by all transports.
@@ -1170,5 +1248,85 @@ mod tests {
         }];
         inject_image_html_context(&mut history, &[("a.png".to_string(), String::new())]);
         assert_eq!(history[0].content, "BASE");
+    }
+
+    fn public_users() -> Vec<(String, String)> {
+        vec![
+            ("id-alice".to_string(), "alice".to_string()),
+            ("id-alice2".to_string(), "alice2".to_string()),
+            ("id-bob".to_string(), "bob".to_string()),
+        ]
+    }
+
+    #[test]
+    fn extract_mentions_matches_at_username() {
+        let users = public_users();
+
+        let got = extract_public_mentions("@alice 帮我看下你的公开文档", &users);
+        assert_eq!(got, vec![("id-alice".to_string(), "alice".to_string())]);
+
+        // No mention
+        assert!(extract_public_mentions("hello world", &users).is_empty());
+        // Plain username without @ does not count
+        assert!(extract_public_mentions("alice just said hi", &users).is_empty());
+        // Non-public user cannot be matched
+        assert!(extract_public_mentions("@carol hi", &users).is_empty());
+    }
+
+    #[test]
+    fn extract_mentions_longest_username_first_no_shadowing() {
+        let users = public_users();
+
+        // "@alice2" must resolve to alice2 only, not to alice
+        let got = extract_public_mentions("@alice2 please share", &users);
+        assert_eq!(got, vec![("id-alice2".to_string(), "alice2".to_string())]);
+
+        // Both mentioned: each resolves to itself, deduped even when repeated
+        let got = extract_public_mentions("@alice and @alice2 and @alice again", &users);
+        assert_eq!(got.len(), 2);
+        assert!(got.contains(&("id-alice".to_string(), "alice".to_string())));
+        assert!(got.contains(&("id-alice2".to_string(), "alice2".to_string())));
+    }
+
+    #[test]
+    fn build_public_mention_context_lists_users_and_gates() {
+        assert!(build_public_mention_context_msg(&[]).is_none());
+
+        let msg = build_public_mention_context_msg(&[("id-alice".to_string(), "alice".to_string())])
+            .expect("non-empty mentions must produce a context message");
+        assert_eq!(msg.role, "user");
+        assert!(msg.content.starts_with("[Context]"));
+        assert!(msg.content.contains("@alice"));
+        assert!(msg.content.contains("public_doc_search"));
+        assert!(msg.content.contains("public_doc_content"));
+        assert!(msg.content.contains("username=\"alice\""));
+    }
+
+    #[test]
+    fn merge_context_msgs_concatenates_contents() {
+        fn ctx_msg(text: &str) -> ChatMessage {
+            ChatMessage {
+                role: "user".to_string(),
+                content: text.to_string(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                images: None,
+            }
+        }
+
+        // Both None
+        assert!(merge_context_msgs(None, None).is_none());
+
+        // Only one side
+        let only_a = merge_context_msgs(Some(ctx_msg("[Context] A")), None).unwrap();
+        assert_eq!(only_a.content, "[Context] A");
+        let only_b = merge_context_msgs(None, Some(ctx_msg("[Context] B"))).unwrap();
+        assert_eq!(only_b.content, "[Context] B");
+
+        // Both: contents concatenated into one message
+        let both = merge_context_msgs(Some(ctx_msg("[Context] A")), Some(ctx_msg("[Context] B")))
+            .unwrap();
+        assert_eq!(both.content, "[Context] A\n\n[Context] B");
     }
 }

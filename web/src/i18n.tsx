@@ -58,6 +58,21 @@ const translations = {
     resetCodeExpired: '验证码已过期，请重新获取',
     networkError: '网络错误，请稍后重试',
 
+    // Public accounts
+    publicAccount: '公开账户',
+    publicAccountHint: '公开账户会显示在所有用户的联系人列表中；他人只能只读查看你标记为公开的文档内容和周期任务结果，不能修改',
+    publicUsers: '公开用户',
+    publicBadge: '公开',
+    readOnly: '只读',
+    publicDocs: '公开文档',
+    publicTasks: '周期任务',
+    noPublicDocs: '暂无公开文档',
+    noPublicTasks: '暂无周期任务',
+    makePublic: '设为公开',
+    makePrivate: '设为私有',
+    mentionHint: '提及公开用户',
+    loadMore: '加载更多',
+
     // Chat
     typeMessage: '输入消息...',
     send: '发送',
@@ -401,6 +416,21 @@ const translations = {
     invalidResetCode: 'Invalid reset code',
     resetCodeExpired: 'Reset code expired. Please request a new one.',
     networkError: 'Network error. Please try again.',
+
+    // Public accounts
+    publicAccount: 'Public account',
+    publicAccountHint: 'Public accounts appear in every user\'s contacts. Others can only read-view the documents and periodic task results you mark as public; they cannot modify anything',
+    publicUsers: 'Public Users',
+    publicBadge: 'Public',
+    readOnly: 'Read-only',
+    publicDocs: 'Public Documents',
+    publicTasks: 'Periodic Tasks',
+    noPublicDocs: 'No public documents',
+    noPublicTasks: 'No periodic tasks',
+    makePublic: 'Make public',
+    makePrivate: 'Make private',
+    mentionHint: 'Mention a public user',
+    loadMore: 'Load more',
 
     // Chat
     typeMessage: 'Type a message...',

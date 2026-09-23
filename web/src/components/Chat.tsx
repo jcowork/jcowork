@@ -131,6 +131,10 @@ function getFileIcon(name: string): string {
   }
 }
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function loadMessages(userId: string, conversationId: string): Message[] {
   const conv = loadConversations(userId).find((c) => c.id === conversationId);
   // Filter out streaming messages from previous sessions
@@ -141,6 +145,10 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
   const t = useT();
   const [messages, setMessages] = useState<Message[]>(() => loadMessages(userId, conversationId));
   const [input, setInput] = useState('');
+  // Public users available for @mention autocomplete
+  const [publicUsers, setPublicUsers] = useState<{ userId: string; username: string }[]>([]);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const [mentionDismissed, setMentionDismissed] = useState(false);
   const [connected, setConnected] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string>('');
@@ -362,6 +370,26 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
   useEffect(() => {
     visibleRef.current = visible;
   }, [visible]);
+
+  // Fetch public accounts for @mention autocomplete (token-scoped)
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/public-users', {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data) => {
+        if (cancelled) return;
+        setPublicUsers(
+          (Array.isArray(data) ? data : []).map((u: { user_id: string; username: string }) => ({
+            userId: u.user_id,
+            username: u.username,
+          })),
+        );
+      })
+      .catch(() => { if (!cancelled) setPublicUsers([]); });
+    return () => { cancelled = true; };
+  }, [token]);
 
   // Notify parent when streaming state changes (for background task indicators)
   useEffect(() => {
@@ -704,6 +732,56 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
   const collapsedCount = Math.max(0, messages.length - HISTORY_VISIBLE_COUNT);
   const historyStartIdx = showFullHistory ? 0 : collapsedCount;
 
+  // ── @mention autocomplete ──
+  // Active while the input ends with (start-of-line or whitespace) + @token.
+  const mentionMatch = input.match(/(^|\s)@(\S*)$/);
+  const mentionCandidates = mentionMatch
+    ? publicUsers.filter((u) => u.username.toLowerCase().includes(mentionMatch[2].toLowerCase()))
+    : [];
+  const effectiveMentionIndex = Math.min(mentionIndex, Math.max(0, mentionCandidates.length - 1));
+  const mentionOpen = !!mentionMatch && mentionCandidates.length > 0 && !mentionDismissed && connected && !streaming;
+
+  // Replace the partial @token with the canonical @username mention syntax
+  // (the backend matches plain "@username" substrings).
+  const selectMention = (username: string) => {
+    setInput((prev) => prev.replace(/@\S*$/, () => `@${username} `));
+    setMentionIndex(0);
+    setMentionDismissed(false);
+  };
+
+  // Highlight known public-user mentions in rendered user messages
+  const renderUserContent = (content: string): React.ReactNode => {
+    if (publicUsers.length === 0 || !content.includes('@')) {
+      return <span style={{ whiteSpace: 'pre-wrap' }}>{content}</span>;
+    }
+    // Longest usernames first so prefixes don't shadow longer names
+    const names = [...publicUsers.map((u) => u.username)].sort((a, b) => b.length - a.length);
+    const pattern = names.map((n) => `@${escapeRegExp(n)}`).join('|');
+    const re = new RegExp(pattern, 'g');
+    const parts: React.ReactNode[] = [];
+    let lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(content)) !== null) {
+      if (m.index > lastIndex) {
+        parts.push(<span key={`t${lastIndex}`} style={{ whiteSpace: 'pre-wrap' }}>{content.slice(lastIndex, m.index)}</span>);
+      }
+      parts.push(
+        <span
+          key={`m${m.index}`}
+          style={{ background: 'rgba(255,255,255,0.24)', borderRadius: 4, padding: '0 3px', fontWeight: 600 }}
+        >
+          {m[0]}
+        </span>,
+      );
+      lastIndex = m.index + m[0].length;
+    }
+    if (lastIndex === 0) {
+      return <span style={{ whiteSpace: 'pre-wrap' }}>{content}</span>;
+    }
+    parts.push(<span key={`t${lastIndex}`} style={{ whiteSpace: 'pre-wrap' }}>{content.slice(lastIndex)}</span>);
+    return <>{parts}</>;
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       <div style={{ padding: '8px 16px', borderBottom: '1px solid #333', display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between' }}>
@@ -803,7 +881,7 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
                 )}
                 {isUser || isSystem ? (
                   <>
-                    <span style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</span>
+                    {isUser ? renderUserContent(msg.content) : <span style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</span>}
                     {msg.details && (
                       <pre
                         style={{
@@ -1217,25 +1295,95 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
             🖼
           </button>
 
-          {/* Text input */}
-          <input
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
-            placeholder={connected ? t('typeMessage') : t('loading')}
-            disabled={!connected || streaming}
-            style={{
-              flex: 1,
-              padding: '8px 12px',
-              borderRadius: 8,
-              border: '1px solid #555',
-              background: '#1a1a1a',
-              color: '#eee',
-              fontSize: 14,
-              outline: 'none',
-            }}
-          />
+          {/* Text input + @mention autocomplete */}
+          <div style={{ position: 'relative', flex: 1, display: 'flex', minWidth: 0 }}>
+            {mentionOpen && (
+              <div
+                style={{
+                  position: 'absolute',
+                  bottom: '100%',
+                  left: 0,
+                  right: 0,
+                  marginBottom: 4,
+                  background: '#1a1a1a',
+                  border: '1px solid #333',
+                  borderRadius: 8,
+                  boxShadow: '0 4px 16px rgba(0,0,0,0.5)',
+                  overflow: 'hidden',
+                  zIndex: 100,
+                }}
+              >
+                <div style={{
+                  padding: '5px 10px', fontSize: 10, color: '#666',
+                  textTransform: 'uppercase', letterSpacing: '0.5px',
+                  borderBottom: '1px solid #2a2a2a',
+                }}>
+                  {t('mentionHint')}
+                </div>
+                {mentionCandidates.map((u, idx) => (
+                  <div
+                    key={u.userId}
+                    onMouseDown={(e) => { e.preventDefault(); selectMention(u.username); }}
+                    onMouseEnter={() => setMentionIndex(idx)}
+                    style={{
+                      padding: '7px 10px', display: 'flex', alignItems: 'center', gap: 8,
+                      cursor: 'pointer', fontSize: 13,
+                      background: idx === effectiveMentionIndex ? '#1e3a5a' : 'transparent',
+                      color: idx === effectiveMentionIndex ? '#eee' : '#bbb',
+                    }}
+                  >
+                    <span style={{ fontSize: 12 }}>🌐</span>
+                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {u.username}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <input
+              type="text"
+              value={input}
+              onChange={(e) => { setInput(e.target.value); setMentionDismissed(false); }}
+              onKeyDown={(e) => {
+                if (mentionOpen) {
+                  if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    setMentionIndex((prev) => Math.min(prev + 1, mentionCandidates.length - 1));
+                    return;
+                  }
+                  if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    setMentionIndex((prev) => Math.max(prev - 1, 0));
+                    return;
+                  }
+                  if (e.key === 'Enter' || e.key === 'Tab') {
+                    e.preventDefault();
+                    selectMention(mentionCandidates[effectiveMentionIndex].username);
+                    return;
+                  }
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    setMentionDismissed(true);
+                    return;
+                  }
+                }
+                if (e.key === 'Enter') sendMessage();
+              }}
+              placeholder={connected ? t('typeMessage') : t('loading')}
+              disabled={!connected || streaming}
+              style={{
+                flex: 1,
+                padding: '8px 12px',
+                borderRadius: 8,
+                border: '1px solid #555',
+                background: '#1a1a1a',
+                color: '#eee',
+                fontSize: 14,
+                outline: 'none',
+                minWidth: 0,
+              }}
+            />
+          </div>
           {streaming ? (
             <button
               onClick={stopGeneration}

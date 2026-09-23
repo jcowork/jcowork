@@ -153,6 +153,7 @@ async fn handle_feishu_message(
     let tool_ctx = ToolContext {
         user_id: user_id.clone(),
         workspace_root,
+        mentioned_public_users: Vec::new(),
     };
 
     // Fetch active reminders/cron jobs for context

@@ -17,6 +17,10 @@ pub struct User {
     pub password_hash: String,
     pub feishu_open_id: Option<String>,
     pub created_at: String,
+    /// Public account flag (chosen at registration). Public accounts are
+    /// visible in every user's contacts list and their public documents /
+    /// periodic-task results are readable by other users.
+    pub is_public: bool,
 }
 
 /// Manages the global user accounts database.
@@ -53,7 +57,8 @@ impl UserStore {
                 username TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
                 feishu_open_id TEXT UNIQUE,
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                is_public INTEGER NOT NULL DEFAULT 0
             )
             "#,
         )
@@ -69,6 +74,14 @@ impl UserStore {
         .execute(&pool)
         .await; // Ignore error if column already exists
 
+        // Add is_public column if it doesn't exist (migration for existing DBs).
+        // Existing accounts default to private; the flag is chosen at registration.
+        let _ = sqlx::query(
+            "ALTER TABLE users ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&pool)
+        .await; // Ignore error if column already exists
+
         let _ = sqlx::query(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_feishu_open_id ON users(feishu_open_id)",
         )
@@ -79,14 +92,16 @@ impl UserStore {
     }
 
     /// Create a new user. Returns error if username already exists.
-    pub async fn create_user(&self, username: &str, password_hash: &str) -> Result<User> {
+    /// `is_public` is chosen at registration and cannot be changed afterwards.
+    pub async fn create_user(&self, username: &str, password_hash: &str, is_public: bool) -> Result<User> {
         let id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
-            "INSERT INTO users (id, username, password_hash) VALUES (?, ?, ?)",
+            "INSERT INTO users (id, username, password_hash, is_public) VALUES (?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(username)
         .bind(password_hash)
+        .bind(is_public)
         .execute(&self.pool)
         .await
         .map_err(|e| {
@@ -103,13 +118,14 @@ impl UserStore {
             password_hash: password_hash.to_string(),
             feishu_open_id: None,
             created_at: chrono::Utc::now().naive_utc().to_string(),
+            is_public,
         })
     }
 
     /// Look up a user by username.
     pub async fn get_user_by_username(&self, username: &str) -> Result<Option<User>> {
         let user = sqlx::query_as::<_, User>(
-            "SELECT id, username, password_hash, feishu_open_id, created_at FROM users WHERE username = ?",
+            "SELECT id, username, password_hash, feishu_open_id, created_at, is_public FROM users WHERE username = ?",
         )
         .bind(username)
         .fetch_optional(&self.pool)
@@ -121,13 +137,25 @@ impl UserStore {
     /// Look up a user by ID.
     pub async fn get_user_by_id(&self, user_id: &str) -> Result<Option<User>> {
         let user = sqlx::query_as::<_, User>(
-            "SELECT id, username, password_hash, feishu_open_id, created_at FROM users WHERE id = ?",
+            "SELECT id, username, password_hash, feishu_open_id, created_at, is_public FROM users WHERE id = ?",
         )
         .bind(user_id)
         .fetch_optional(&self.pool)
         .await?;
 
         Ok(user)
+    }
+
+    /// List all public accounts, ordered by username.
+    /// Callers must only expose safe fields (never `password_hash`).
+    pub async fn list_public_users(&self) -> Result<Vec<User>> {
+        let users = sqlx::query_as::<_, User>(
+            "SELECT id, username, password_hash, feishu_open_id, created_at, is_public FROM users WHERE is_public = 1 ORDER BY username",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(users)
     }
 
     /// Update a user's password hash.
@@ -147,7 +175,7 @@ impl UserStore {
     /// Look up a user by Feishu open_id.
     pub async fn get_user_by_feishu_open_id(&self, open_id: &str) -> Result<Option<User>> {
         let user = sqlx::query_as::<_, User>(
-            "SELECT id, username, password_hash, feishu_open_id, created_at FROM users WHERE feishu_open_id = ?",
+            "SELECT id, username, password_hash, feishu_open_id, created_at, is_public FROM users WHERE feishu_open_id = ?",
         )
         .bind(open_id)
         .fetch_optional(&self.pool)
@@ -187,6 +215,7 @@ impl UserStore {
             password_hash,
             feishu_open_id: Some(open_id.to_string()),
             created_at: chrono::Utc::now().naive_utc().to_string(),
+            is_public: false,
         })
     }
 }

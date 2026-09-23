@@ -241,6 +241,7 @@ async fn execute_cron_task(
     let tool_ctx = ToolContext {
         user_id: user_id.to_string(),
         workspace_root,
+        mentioned_public_users: Vec::new(),
     };
 
     let mut sink = LogSink::new();
