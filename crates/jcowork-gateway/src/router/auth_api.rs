@@ -69,6 +69,7 @@ pub(crate) async fn register(
             "user_id": user.id,
             "username": user.username,
             "is_public": user.is_public,
+            "is_admin": user.is_admin,
         })),
     )
 }
@@ -93,6 +94,14 @@ pub(crate) async fn login(
             );
         }
     };
+
+    // Recycle-bin accounts cannot log in until restored by the admin.
+    if user.deleted_at.is_some() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Account has been deleted"})),
+        );
+    }
 
     // Verify password
     match auth::verify_password(&req.password, &user.password_hash) {
@@ -128,6 +137,7 @@ pub(crate) async fn login(
             "token": token,
             "user_id": user.id,
             "username": user.username,
+            "is_admin": user.is_admin,
         })),
     )
 }
@@ -152,6 +162,14 @@ pub(crate) async fn forgot_password(
             );
         }
     };
+
+    // Recycle-bin accounts cannot request a password reset either.
+    if user.deleted_at.is_some() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Account has been deleted"})),
+        );
+    }
 
     // Generate 6-digit reset code
     let mut bytes = [0u8; 4];

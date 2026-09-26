@@ -32,6 +32,8 @@ struct TestApp {
     _temp_dir: TempDir,
     router: Router,
     token: Option<String>,
+    /// Shared handle to the user store (for seeding/purge assertions).
+    user_store: Arc<UserStore>,
 }
 
 impl TestApp {
@@ -73,6 +75,8 @@ impl TestApp {
         let mock_provider = Arc::new(MockLlmProvider::new());
         let llm_router = LlmRouter::from_mock(mock_provider);
 
+        let user_store_handle = user_store.clone();
+
         let state = AppState {
             session_manager,
             auth_config: AuthConfig {
@@ -100,6 +104,7 @@ impl TestApp {
             _temp_dir: temp_dir,
             router,
             token: None,
+            user_store: user_store_handle,
         }
     }
 
@@ -148,13 +153,18 @@ impl TestApp {
         self.token = Some(login_resp["token"].as_str().unwrap().to_string());
     }
 
-    /// Make an authenticated request
+    /// Make an authenticated request using the fixture's current token
     async fn make_request(&self, method: &str, path: &str, body: Option<serde_json::Value>) -> axum::http::Response<Body> {
+        self.make_request_with_token(self.token.as_deref(), method, path, body).await
+    }
+
+    /// Make a request with an explicit bearer token (None = unauthenticated)
+    async fn make_request_with_token(&self, token: Option<&str>, method: &str, path: &str, body: Option<serde_json::Value>) -> axum::http::Response<Body> {
         use tower::ServiceExt;
-        
+
         let mut req_builder = Request::builder().method(method).uri(path);
 
-        if let Some(token) = &self.token {
+        if let Some(token) = token {
             req_builder = req_builder.header("Authorization", format!("Bearer {}", token));
         }
 
@@ -169,6 +179,68 @@ impl TestApp {
             .unwrap();
 
         self.router.clone().oneshot(req).await.unwrap()
+    }
+
+    /// Register a new user (asserting success) and return its user_id.
+    async fn register_user(&self, username: &str, password: &str, is_public: bool) -> String {
+        use tower::ServiceExt;
+
+        let register_req = Request::builder()
+            .method("POST")
+            .uri("/api/auth/register")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "username": username,
+                    "password": password,
+                    "is_public": is_public
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let res = self.router.clone().oneshot(register_req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "register should succeed for {}", username);
+        let body_bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let resp: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        resp["user_id"].as_str().unwrap().to_string()
+    }
+
+    /// Attempt a login and return (status, body).
+    async fn login_raw(&self, username: &str, password: &str) -> (StatusCode, serde_json::Value) {
+        use tower::ServiceExt;
+
+        let login_req = Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({ "username": username, "password": password }).to_string(),
+            ))
+            .unwrap();
+
+        let res = self.router.clone().oneshot(login_req).await.unwrap();
+        let status = res.status();
+        let body_bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let resp: serde_json::Value =
+            serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
+        (status, resp)
+    }
+
+    /// Seed the default admin account and return the admin's token.
+    async fn seed_and_login_admin(&self) -> String {
+        jcowork_gateway::auth::ensure_default_admin(&self.user_store)
+            .await
+            .expect("failed to seed default admin");
+        let (status, resp) = self
+            .login_raw(
+                jcowork_gateway::auth::DEFAULT_ADMIN_USERNAME,
+                jcowork_gateway::auth::DEFAULT_ADMIN_PASSWORD,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "admin login should succeed");
+        assert_eq!(resp["is_admin"], json!(true), "admin login should report is_admin");
+        resp["token"].as_str().unwrap().to_string()
     }
 }
 
@@ -633,4 +705,262 @@ async fn test_skill_config_save_get_clear() {
         serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
             .unwrap();
     assert_eq!(body["vl_model"], serde_json::Value::Null);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Admin user management & recycle bin
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Full lifecycle: trash → login blocked → restore → login works → purge record.
+#[tokio::test]
+async fn test_admin_user_management_flow() {
+    let app = TestApp::new().await;
+    let admin_token = app.seed_and_login_admin().await;
+
+    // A regular user cannot access the admin API
+    let victim_id = app.register_user("victim", "victimpass1", false).await;
+    let (status, victim_login) = app.login_raw("victim", "victimpass1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(victim_login["is_admin"], json!(false));
+    let victim_token = victim_login["token"].as_str().unwrap().to_string();
+
+    let res = app
+        .make_request_with_token(Some(&victim_token), "GET", "/api/admin/users", None)
+        .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN, "non-admin must be rejected");
+
+    // Admin sees the victim in the active list, without any password hash
+    let res = app
+        .make_request_with_token(Some(&admin_token), "GET", "/api/admin/users?status=active", None)
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    let items = body.as_array().unwrap();
+    assert!(items.iter().any(|u| u["user_id"] == json!(victim_id)));
+    assert!(items.iter().all(|u| u.get("password_hash").is_none()));
+
+    // Move the victim to the trash
+    let trash_url = format!("/api/admin/users/{}/trash", victim_id);
+    let res = app
+        .make_request_with_token(Some(&admin_token), "POST", &trash_url, None)
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Trashed user cannot log in, and the old token is rejected
+    let (status, resp) = app.login_raw("victim", "victimpass1").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "trashed user login must fail");
+    assert_eq!(resp["error"], json!("Account has been deleted"));
+    let res = app
+        .make_request_with_token(Some(&victim_token), "GET", "/api/providers", None)
+        .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN, "trashed user token must be rejected");
+
+    // The trash list shows the victim with days_left and deleted_at
+    let res = app
+        .make_request_with_token(Some(&admin_token), "GET", "/api/admin/users?status=trash", None)
+        .await;
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    let trashed = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["user_id"] == json!(victim_id))
+        .expect("victim should be in the trash list");
+    assert_eq!(trashed["days_left"], json!(7));
+    assert!(!trashed["deleted_at"].is_null());
+
+    // Trashing again conflicts
+    let res = app
+        .make_request_with_token(Some(&admin_token), "POST", &trash_url, None)
+        .await;
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+
+    // The admin account itself can never be trashed
+    let res = app
+        .make_request_with_token(Some(&admin_token), "GET", "/api/admin/users?status=active", None)
+        .await;
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    let admin_id = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["username"] == json!("admin"))
+        .unwrap()["user_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let res = app
+        .make_request_with_token(
+            Some(&admin_token),
+            "POST",
+            &format!("/api/admin/users/{}/trash", admin_id),
+            None,
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // Restore: the victim can log in again with the same token flow
+    let restore_url = format!("/api/admin/users/{}/restore", victim_id);
+    let res = app
+        .make_request_with_token(Some(&admin_token), "POST", &restore_url, None)
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let (status, _) = app.login_raw("victim", "victimpass1").await;
+    assert_eq!(status, StatusCode::OK, "restored user must be able to log in");
+    let res = app
+        .make_request_with_token(Some(&victim_token), "GET", "/api/providers", None)
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "old token must work again after restore");
+
+    // Permanently delete the account; login falls back to invalid credentials
+    let res = app
+        .make_request_with_token(Some(&admin_token), "DELETE", &format!("/api/admin/users/{}", victim_id), None)
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let (status, _) = app.login_raw("victim", "victimpass1").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "deleted account must not exist");
+    let res = app
+        .make_request_with_token(Some(&admin_token), "DELETE", &format!("/api/admin/users/{}", admin_id), None)
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST, "admin account cannot be deleted");
+}
+
+/// Trashed public accounts disappear from the public directory and 404 on profile access.
+#[tokio::test]
+async fn test_public_users_excludes_trashed() {
+    let app = TestApp::new().await;
+    let admin_token = app.seed_and_login_admin().await;
+
+    let pub_id = app.register_user("pubvictim", "pubpass1234", true).await;
+    app.register_user("regular", "regularpass1", false).await;
+    let (status, regular_login) = app.login_raw("regular", "regularpass1").await;
+    assert_eq!(status, StatusCode::OK);
+    let regular_token = regular_login["token"].as_str().unwrap().to_string();
+
+    // Public directory contains the user while active
+    let res = app
+        .make_request_with_token(Some(&regular_token), "GET", "/api/public-users", None)
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert!(body
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|u| u["user_id"] == json!(pub_id)));
+
+    // Trash the public user
+    let res = app
+        .make_request_with_token(
+            Some(&admin_token),
+            "POST",
+            &format!("/api/admin/users/{}/trash", pub_id),
+            None,
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Directory no longer lists it, and profile access returns 404
+    let res = app
+        .make_request_with_token(Some(&regular_token), "GET", "/api/public-users", None)
+        .await;
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert!(
+        !body
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|u| u["user_id"] == json!(pub_id)),
+        "trashed public user must be invisible in the directory"
+    );
+    let res = app
+        .make_request_with_token(
+            Some(&regular_token),
+            "GET",
+            &format!("/api/public-users/{}/documents", pub_id),
+            None,
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND, "trashed public profile must 404");
+
+    // Restore brings it back
+    let res = app
+        .make_request_with_token(
+            Some(&admin_token),
+            "POST",
+            &format!("/api/admin/users/{}/restore", pub_id),
+            None,
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app
+        .make_request_with_token(Some(&regular_token), "GET", "/api/public-users", None)
+        .await;
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert!(body
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|u| u["user_id"] == json!(pub_id)));
+}
+
+/// `purge_expired_trash` keeps fresh trashed users and deletes expired ones.
+#[tokio::test]
+async fn test_trash_purge_expired_trash() {
+    let app = TestApp::new().await;
+
+    // Create a user directly in the store and trash it
+    let hash = jcowork_gateway::auth::hash_password("purgepass123").unwrap();
+    let user = app.user_store.create_user("purgevictim", &hash, false).await.unwrap();
+    app.user_store.soft_delete_user(&user.id).await.unwrap();
+
+    // Fresh trash entry is NOT purged with the 7-day retention window
+    let purged = app.user_store.purge_expired_trash(7).await.unwrap();
+    assert_eq!(purged, 0, "fresh trash entry must survive the 7-day purge");
+    assert!(app.user_store.get_user_by_id(&user.id).await.unwrap().is_some());
+
+    // With a zero-day window the same entry counts as expired and is removed
+    let purged = app.user_store.purge_expired_trash(0).await.unwrap();
+    assert!(purged >= 1, "expired trash entry must be purged");
+    assert!(app.user_store.get_user_by_id(&user.id).await.unwrap().is_none());
+
+    // Active (non-trashed) users are never purged
+    let active = app.user_store.create_user("activeuser", &hash, false).await.unwrap();
+    let purged = app.user_store.purge_expired_trash(0).await.unwrap();
+    assert_eq!(purged, 0, "active users must never be purged");
+    assert!(app.user_store.get_user_by_id(&active.id).await.unwrap().is_some());
+}
+
+/// `ensure_default_admin` is idempotent and promotes an existing `admin` account.
+#[tokio::test]
+async fn test_ensure_default_admin_idempotent() {
+    let app = TestApp::new().await;
+
+    // Pre-create an account named "admin"; seeding must promote it, not duplicate
+    let hash = jcowork_gateway::auth::hash_password("someOtherPass").unwrap();
+    let existing = app.user_store.create_user("admin", &hash, false).await.unwrap();
+    assert!(!existing.is_admin);
+
+    jcowork_gateway::auth::ensure_default_admin(&app.user_store).await.unwrap();
+    let promoted = app.user_store.get_user_by_username("admin").await.unwrap().unwrap();
+    assert!(promoted.is_admin, "existing admin account must be promoted");
+    assert_eq!(promoted.id, existing.id, "no duplicate admin account may be created");
+
+    // Second call is a no-op
+    jcowork_gateway::auth::ensure_default_admin(&app.user_store).await.unwrap();
+    let again = app.user_store.get_user_by_username("admin").await.unwrap().unwrap();
+    assert!(again.is_admin);
+    assert_eq!(again.id, existing.id);
 }

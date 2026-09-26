@@ -177,10 +177,22 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Enables the get_web_access_url command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-web-access-url",
+          "markdownDescription": "Enables the get_web_access_url command without any pre-configured scope."
+        },
+        {
           "description": "Enables the open_in_browser command without any pre-configured scope.",
           "type": "string",
           "const": "allow-open-in-browser",
           "markdownDescription": "Enables the open_in_browser command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_web_access_url command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-web-access-url",
+          "markdownDescription": "Denies the get_web_access_url command without any pre-configured scope."
         },
         {
           "description": "Denies the open_in_browser command without any pre-configured scope.",

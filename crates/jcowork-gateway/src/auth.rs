@@ -82,6 +82,38 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool> {
         .is_ok())
 }
 
+/// Default super-user username (created/promoted on startup).
+pub const DEFAULT_ADMIN_USERNAME: &str = "admin";
+/// Default password for the seeded admin account. Change it after the first
+/// login via the "forgot password" flow.
+pub const DEFAULT_ADMIN_PASSWORD: &str = "admin123";
+
+/// Ensure the default admin account exists and is flagged as super user.
+///
+/// Called once at startup (server + desktop). If the `admin` account is
+/// missing it is created with the default password; if the username already
+/// exists it is promoted to admin. Only the seeded account is marked, so
+/// existing deployments do not gain an unexpected super user unless the
+/// username is actually free or already taken by "admin".
+pub async fn ensure_default_admin(user_store: &jcowork_storage::UserStore) -> Result<()> {
+    let hash = hash_password(DEFAULT_ADMIN_PASSWORD)?;
+    let created = user_store
+        .ensure_admin_user(DEFAULT_ADMIN_USERNAME, &hash)
+        .await?;
+    if created {
+        tracing::info!(
+            username = DEFAULT_ADMIN_USERNAME,
+            "Seeded default admin account — change the password after first login"
+        );
+    } else {
+        tracing::info!(
+            username = DEFAULT_ADMIN_USERNAME,
+            "Default admin account ensured (promoted if needed)"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

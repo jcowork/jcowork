@@ -22,6 +22,9 @@ use jcowork_server::config::ServerConfig;
 use jcowork_skills::SkillManager;
 use jcowork_storage::FeishuConfigStore;
 
+/// Port the embedded web server listens on (must match the frontend config).
+const WEB_PORT: u16 = 3000;
+
 /// Resolve the Tauri resource directory relative to the current executable.
 ///
 /// Layouts per platform:
@@ -318,6 +321,11 @@ async fn main() {
     };
     info!("User store initialized");
 
+    // ── 9b. Seed the default admin account (fixed username, idempotent) ──
+    if let Err(e) = jcowork_gateway::auth::ensure_default_admin(&user_store).await {
+        tracing::warn!(error = %e, "Failed to seed default admin account");
+    }
+
     // ── 10. Initialize log writer ──
     let log_dir = format!("{}/logs", data_dir);
     let log_writer = match LogWriter::new(log_dir.into()).await {
@@ -386,8 +394,18 @@ async fn main() {
         state.skill_manager.clone(),
         state.log_writer.clone(),
         state.data_dir.clone(),
+        state.user_store.clone(),
     );
     info!("Background cron executor spawned");
+
+    // ── 14b2. Spawn the trash purger ──
+    // Permanently removes account records that have been in the recycle bin
+    // for more than TRASH_RETENTION_DAYS days.
+    jcowork_gateway::cron_executor::spawn_trash_purger(
+        state.user_store.clone(),
+        std::time::Duration::from_secs(3600),
+    );
+    info!("Trash purger spawned");
 
     // ── 14c. Pre-warm the Docling service (PDF/Word parsing & embeddings) ──
     // Delay 10s so the app window opens first, then start the service in the
@@ -414,17 +432,19 @@ async fn main() {
         }
     });
 
-    // ── 15. Start Axum server on localhost:3000 in background ──
-    let addr = "127.0.0.1:3000";
-    let listener = match tokio::net::TcpListener::bind(addr).await {
+    // ── 15. Start Axum server in background ──
+    // Bind to 0.0.0.0 (not just 127.0.0.1) so the web app can also be reached
+    // from other devices on the LAN via the shared "Web访问" URL.
+    let bind_addr = format!("0.0.0.0:{}", WEB_PORT);
+    let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
         Ok(l) => l,
         Err(e) => {
-            error!(error = %e, addr = %addr, "Failed to bind server port");
-            show_error_and_exit(&format!("无法启动服务器 (端口 {} 可能被占用):\n\n{}", addr, e));
+            error!(error = %e, addr = %bind_addr, "Failed to bind server port");
+            show_error_and_exit(&format!("无法启动服务器 (端口 {} 可能被占用):\n\n{}", bind_addr, e));
             return;
         }
     };
-    info!(%addr, "Jcowork Desktop server listening");
+    info!(%bind_addr, "Jcowork Desktop server listening");
 
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
@@ -434,8 +454,9 @@ async fn main() {
 
     // ── 16. Wait for server to be ready ──
     // Poll until the Axum server actually accepts connections (not just bound).
+    let local_addr = format!("127.0.0.1:{}", WEB_PORT);
     for i in 0..40 {
-        if tokio::net::TcpStream::connect(addr).await.is_ok() {
+        if tokio::net::TcpStream::connect(&local_addr).await.is_ok() {
             break;
         }
         if i == 39 {
@@ -447,9 +468,9 @@ async fn main() {
     }
     info!("Server ready, launching Tauri window");
 
-    // ── 17. Launch Tauri desktop app ─
+    // ── 17. Launch Tauri desktop app ──
     if let Err(e) = tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![open_in_browser])
+        .invoke_handler(tauri::generate_handler![open_in_browser, get_web_access_url])
         .run(tauri::generate_context!()) {
         error!(error = %e, "Tauri application error");
         eprintln!("Tauri error: {}", e);
@@ -462,6 +483,26 @@ async fn main() {
 #[tauri::command]
 fn open_in_browser(url: String) -> Result<(), String> {
     open::that(&url).map_err(|e| format!("Failed to open browser: {}", e))
+}
+
+/// Return a browser-reachable URL for the embedded web app.
+///
+/// Uses the machine's LAN IP when detectable so the link can be opened from
+/// other devices; falls back to localhost (e.g. no default route / offline).
+#[tauri::command]
+fn get_web_access_url() -> String {
+    let host = detect_lan_ip().unwrap_or_else(|| "localhost".to_string());
+    format!("http://{}:{}", host, WEB_PORT)
+}
+
+/// Detect the LAN IP via a UDP socket on the default route.
+///
+/// UDP `connect` does not send any packets — it only asks the OS to resolve
+/// the local address used for the default route, which is the machine's LAN IP.
+fn detect_lan_ip() -> Option<String> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    socket.local_addr().ok().map(|a| a.ip().to_string())
 }
 
 /// Show a native error dialog and exit.

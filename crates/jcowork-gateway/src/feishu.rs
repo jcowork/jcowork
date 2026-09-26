@@ -97,6 +97,24 @@ async fn handle_feishu_message(
         .ok_or_else(|| anyhow::anyhow!("No jcowork user found for Feishu app_id: {}", app_id))?;
     let user_id = config.user_id.clone();
 
+    // Ignore messages when the owning account no longer exists or is in the
+    // recycle bin — trashed users must not run tasks.
+    match state.user_store.get_user_by_id(&user_id).await {
+        Ok(Some(user)) if user.deleted_at.is_none() => {}
+        Ok(Some(_)) => {
+            tracing::warn!(user_id = %user_id, "Feishu handler: owner is in the trash, ignoring message");
+            return Ok(());
+        }
+        Ok(None) => {
+            tracing::warn!(user_id = %user_id, "Feishu handler: owner account not found, ignoring message");
+            return Ok(());
+        }
+        Err(e) => {
+            tracing::warn!(user_id = %user_id, error = %e, "Feishu handler: failed to verify owner account, ignoring message");
+            return Ok(());
+        }
+    }
+
     // Get or create a FeishuClient for this app_id (cached)
     let feishu_client = state.feishu_client_cache
         .entry(app_id.to_string())

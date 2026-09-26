@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useT } from '../i18n';
+import { useT, useLang } from '../i18n';
 import ProviderManager from './ProviderManager';
 
 interface ModelInfo {
@@ -22,6 +22,7 @@ interface SettingsProps {
 
 export default function Settings({ onClose, userId, token }: SettingsProps) {
   const t = useT();
+  const { lang, setLang } = useLang();
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [selectedProvider, setSelectedProvider] = useState<string>('');
   const [selectedModel, setSelectedModel] = useState<string>('');
@@ -596,6 +597,39 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
             </div>
           </>
         )}
+      </div>
+
+      {/* Language Section */}
+      <div style={{ ...cardStyle, marginTop: 16 }}>
+        <h3 style={{ fontSize: 16, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 20 }}>🌐</span> {t('language')}
+        </h3>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {(['zh', 'en'] as const).map((l) => (
+            <button
+              key={l}
+              onClick={() => setLang(l)}
+              style={{
+                flex: 1,
+                padding: '10px 16px',
+                borderRadius: 8,
+                border: lang === l ? '1px solid #1f6feb' : '1px solid #444',
+                background: lang === l ? '#1f6feb22' : 'transparent',
+                color: lang === l ? '#58a6ff' : '#aaa',
+                cursor: 'pointer',
+                fontSize: 14,
+                fontWeight: lang === l ? 600 : 400,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 6,
+              }}
+            >
+              {l === 'zh' ? '🇨🇳 ' : '🇬🇧 '}
+              {l === 'zh' ? t('chinese') : t('english')}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Memory Section */}

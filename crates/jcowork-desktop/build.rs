@@ -6,7 +6,7 @@ fn main() {
     // denied by the IPC ACL check.
     tauri_build::try_build(
         tauri_build::Attributes::new().app_manifest(
-            tauri_build::AppManifest::new().commands(&["open_in_browser"]),
+            tauri_build::AppManifest::new().commands(&["open_in_browser", "get_web_access_url"]),
         ),
     )
     .expect("failed to run tauri build script");

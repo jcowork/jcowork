@@ -144,6 +144,11 @@ async fn main() -> Result<()> {
     let user_store = Arc::new(jcowork_storage::UserStore::new(&data_dir).await?);
     info!("User store initialized");
 
+    // Seed the default admin account (fixed username, idempotent)
+    if let Err(e) = jcowork_gateway::auth::ensure_default_admin(&user_store).await {
+        tracing::warn!(error = %e, "Failed to seed default admin account");
+    }
+
     // Initialize log writer
     let log_dir = format!("{}/logs", data_dir);
     let log_writer = Arc::new(LogWriter::new(log_dir.into()).await?);
@@ -202,8 +207,17 @@ async fn main() -> Result<()> {
         state.skill_manager.clone(),
         state.log_writer.clone(),
         state.data_dir.clone(),
+        state.user_store.clone(),
     );
     info!("Background cron executor spawned");
+
+    // Spawn the trash purger — permanently removes account records that have
+    // been in the recycle bin for more than TRASH_RETENTION_DAYS days.
+    jcowork_gateway::cron_executor::spawn_trash_purger(
+        state.user_store.clone(),
+        std::time::Duration::from_secs(3600),
+    );
+    info!("Trash purger spawned");
 
     // Bind and serve
     let addr = format!("{}:{}", config.host, config.port);

@@ -2,6 +2,7 @@
 //!
 //! Handlers are split into domain-specific submodules:
 //! - [`auth_api`] — registration, login, health
+//! - [`admin_users`] — super-user user management (search / trash / restore)
 //! - [`skills`] — skill listing / toggling
 //! - [`memory`] — memory CRUD + agent identity
 //! - [`cron`] — reminders and periodic tasks
@@ -13,6 +14,7 @@
 //! - [`doc_index`] — workspace index, vector search, excel preview, docling
 //! - [`connectors`] — user-managed API / MCP connector configuration
 
+pub(crate) mod admin_users;
 pub(crate) mod auth_api;
 pub(crate) mod connectors;
 pub(crate) mod cron;
@@ -177,6 +179,8 @@ pub struct AuthUser {
     pub user_id: String,
     pub username: String,
     pub token: String,
+    /// Super-user flag (resolved from the DB on every request, not from the JWT).
+    pub is_admin: bool,
 }
 
 /// Mask a secret string, showing only the last 4 characters.
@@ -263,6 +267,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/connectors/{id}/tools", get(connectors::list_connector_tools))
         .route("/api/connectors/{id}/tools/{tool}/toggle", post(connectors::toggle_connector_tool))
         .route("/api/ws", get(ws_upgrade))
+        // Admin (super-user) user management
+        .route("/api/admin/users", get(admin_users::list_users))
+        .route("/api/admin/users/{id}/trash", post(admin_users::trash_user))
+        .route("/api/admin/users/{id}/restore", post(admin_users::restore_user))
+        .route("/api/admin/users/{id}", delete(admin_users::permanently_delete_user))
         // Read-only cross-user endpoints for public accounts
         .route("/api/public-users", get(public_users::list_public_users))
         .route("/api/public-users/{user_id}/documents", get(public_users::list_public_documents))
@@ -377,13 +386,33 @@ async fn auth_middleware(
 
     match auth::verify_token(&state.auth_config, &token) {
         Ok(claims) => {
-            // Insert authenticated user into request extensions
-            req.extensions_mut().insert(AuthUser {
-                user_id: claims.sub,
-                username: claims.username,
-                token,
-            });
-            next.run(req).await
+            // Re-validate the account against the DB on every request so that
+            // permanently deleted users and recycle-bin (trashed) users are
+            // rejected immediately, even with a still-valid JWT.
+            match state.user_store.get_user_by_id(&claims.sub).await {
+                Ok(Some(user)) if user.deleted_at.is_none() => {
+                    // Insert authenticated user into request extensions
+                    req.extensions_mut().insert(AuthUser {
+                        user_id: user.id,
+                        username: user.username,
+                        token,
+                        is_admin: user.is_admin,
+                    });
+                    next.run(req).await
+                }
+                Ok(Some(_)) => (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"error": "Account has been deleted"})),
+                ).into_response(),
+                Ok(None) => (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({"error": "Account not found"})),
+                ).into_response(),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("Auth lookup failed: {}", e)})),
+                ).into_response(),
+            }
         }
         Err(e) => {
             (

@@ -7,6 +7,7 @@ import Sidebar from './components/Sidebar';
 import Settings from './components/Settings';
 import SkillsSquare from './components/SkillsSquare';
 import PublicProfile from './components/PublicProfile';
+import AdminUsers from './components/AdminUsers';
 import { I18nProvider, useT } from './i18n';
 import { API_BASE } from './config';
 import {
@@ -90,6 +91,8 @@ function AppInner() {
   const [showMemory, setShowMemory] = useState(false);
   const [showSkills, setShowSkills] = useState(false);
   const [showDocuments, setShowDocuments] = useState(false);
+  // Admin-only user management view (visible only when activeAccount.isAdmin)
+  const [showAdminUsers, setShowAdminUsers] = useState(false);
   const [mobileSidebar, setMobileSidebar] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConvId, setActiveConvIdState] = useState<string>('');
@@ -130,6 +133,7 @@ function AppInner() {
     if (raw.includes('Invalid or expired')) return t('invalidOrExpiredCode');
     if (raw.includes('Reset code has expired')) return t('resetCodeExpired');
     if (raw.includes('Invalid reset code')) return t('invalidResetCode');
+    if (raw.includes('Account has been deleted')) return t('accountDeletedMessage');
     return raw;
   };
 
@@ -273,6 +277,7 @@ function AppInner() {
           token: data.token,
           userId: data.user_id,
           username: data.username,
+          isAdmin: !!data.is_admin,
         };
         // Upsert into multi-account store
         const updated = upsertAccount(authState);
@@ -400,6 +405,7 @@ function AppInner() {
     setShowSettings(false); setShowSchedule(false); setShowMemory(false);
     setShowSkills(false); setShowDocuments(false);
     setViewingPublicUser(null);
+    setShowAdminUsers(false);
   }, [activeUserId, activeAccount, conversations, activeConvId]);
 
   const handleAddAccount = useCallback(() => {
@@ -626,7 +632,7 @@ function AppInner() {
   }
 
   // --- Authenticated view ---
-  const chatVisible = !showSettings && !showDocuments && !showSchedule && !showMemory && !showSkills && !viewingPublicUser;
+  const chatVisible = !showSettings && !showDocuments && !showSchedule && !showMemory && !showSkills && !showAdminUsers && !viewingPublicUser;
 
   return (
     <div style={{ display: 'flex', height: '100vh', background: '#111', color: '#eee' }}>
@@ -644,15 +650,17 @@ function AppInner() {
         onOpenPublicUser={(u) => {
           setViewingPublicUser(u);
           setShowSettings(false); setShowSchedule(false); setShowMemory(false);
-          setShowSkills(false); setShowDocuments(false);
+          setShowSkills(false); setShowDocuments(false); setShowAdminUsers(false);
         }}
-        onChat={() => { setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); setViewingPublicUser(null); }}
-        onDocuments={() => { setShowDocuments(true); setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setViewingPublicUser(null); }}
-        onSettings={() => { setShowSettings(true); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); setViewingPublicUser(null); }}
-        onSchedule={() => { setShowSchedule(true); setShowSettings(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); setViewingPublicUser(null); }}
-        onMemory={() => { setShowMemory(true); setShowSchedule(false); setShowSettings(false); setShowSkills(false); setShowDocuments(false); setViewingPublicUser(null); }}
-        onSkills={() => { setShowSkills(true); setShowMemory(false); setShowSchedule(false); setShowSettings(false); setShowDocuments(false); setViewingPublicUser(null); }}
-        currentView={showSettings ? 'settings' : showSchedule ? 'schedule' : showMemory ? 'memory' : showSkills ? 'skills' : showDocuments ? 'documents' : 'chat'}
+        isAdmin={activeAccount?.isAdmin}
+        onChat={() => { setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); setShowAdminUsers(false); setViewingPublicUser(null); }}
+        onDocuments={() => { setShowDocuments(true); setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowAdminUsers(false); setViewingPublicUser(null); }}
+        onSettings={() => { setShowSettings(true); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); setShowAdminUsers(false); setViewingPublicUser(null); }}
+        onSchedule={() => { setShowSchedule(true); setShowSettings(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); setShowAdminUsers(false); setViewingPublicUser(null); }}
+        onMemory={() => { setShowMemory(true); setShowSchedule(false); setShowSettings(false); setShowSkills(false); setShowDocuments(false); setShowAdminUsers(false); setViewingPublicUser(null); }}
+        onSkills={() => { setShowSkills(true); setShowMemory(false); setShowSchedule(false); setShowSettings(false); setShowDocuments(false); setShowAdminUsers(false); setViewingPublicUser(null); }}
+        onAdminUsers={() => { setShowAdminUsers(true); setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); setViewingPublicUser(null); }}
+        currentView={showSettings ? 'settings' : showSchedule ? 'schedule' : showMemory ? 'memory' : showSkills ? 'skills' : showDocuments ? 'documents' : showAdminUsers ? 'admin' : 'chat'}
         conversations={conversations}
         activeConvId={activeConvId}
         onNewChat={handleNewChat}
@@ -710,6 +718,8 @@ function AppInner() {
             <Memory userId={activeAccount.userId} token={activeAccount.token} />
           ) : showSkills && activeAccount ? (
             <SkillsSquare userId={activeAccount.userId} token={activeAccount.token} />
+          ) : showAdminUsers && activeAccount?.isAdmin ? (
+            <AdminUsers token={activeAccount.token} />
           ) : null}
         </div>
       </div>

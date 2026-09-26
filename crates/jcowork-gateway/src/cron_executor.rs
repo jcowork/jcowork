@@ -14,6 +14,8 @@ use jcowork_llm::LlmRouter;
 use jcowork_logs::LogWriter;
 use jcowork_memory::MemoryManager;
 use jcowork_skills::SkillManager;
+use jcowork_storage::user_store::TRASH_RETENTION_DAYS;
+use jcowork_storage::UserStore;
 use jcowork_tools::base::ToolContext;
 use jcowork_tools::registry::ToolRegistry;
 
@@ -95,6 +97,7 @@ pub fn spawn_cron_executor(
     skill_manager: Arc<SkillManager>,
     log_writer: Arc<LogWriter>,
     data_dir: String,
+    user_store: Arc<UserStore>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut reminder_rx = cron_scheduler.subscribe();
@@ -120,6 +123,38 @@ pub fn spawn_cron_executor(
             };
 
             let user_id = reminder.user_id.clone();
+
+            // Skip reminders whose owning account no longer exists or is in
+            // the recycle bin — trashed users must not run tasks.
+            match user_store.get_user_by_id(&user_id).await {
+                Ok(Some(user)) if user.deleted_at.is_none() => {}
+                Ok(Some(_)) => {
+                    tracing::warn!(
+                        cron_job_id = %cron_job_id,
+                        user_id = %user_id,
+                        "Cron executor: owner is in the trash, skipping execution"
+                    );
+                    continue;
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        cron_job_id = %cron_job_id,
+                        user_id = %user_id,
+                        "Cron executor: owner account not found, skipping execution"
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        cron_job_id = %cron_job_id,
+                        user_id = %user_id,
+                        error = %e,
+                        "Cron executor: failed to verify owner account, skipping execution"
+                    );
+                    continue;
+                }
+            }
+
             let prompt = reminder.prompt.clone().unwrap_or_else(|| reminder.message.clone());
             let model = reminder.model.clone().unwrap_or(default_model.clone());
 
@@ -295,4 +330,38 @@ async fn execute_cron_task(
     cron_scheduler.store_task_result(task_result).await;
 
     Ok(())
+}
+
+/// Spawn the background trash purger.
+///
+/// Runs once immediately at startup, then every `interval` (recommended:
+/// hourly): permanently deletes account records that have been in the
+/// recycle bin for more than `TRASH_RETENTION_DAYS` days. Only the `users`
+/// table rows are removed — per-user data directories stay on disk.
+pub fn spawn_trash_purger(
+    user_store: Arc<UserStore>,
+    interval: std::time::Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        tracing::info!(
+            retention_days = TRASH_RETENTION_DAYS,
+            "Trash purger started"
+        );
+
+        loop {
+            match user_store.purge_expired_trash(TRASH_RETENTION_DAYS).await {
+                Ok(count) if count > 0 => {
+                    tracing::info!(
+                        purged = count,
+                        "Trash purger: permanently removed expired trashed accounts"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!(error = %e, "Trash purger: purge failed");
+                }
+            }
+            tokio::time::sleep(interval).await;
+        }
+    })
 }

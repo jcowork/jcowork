@@ -8,6 +8,8 @@ export interface AuthState {
   token: string;
   userId: string;
   username: string;
+  /** Super user flag returned by the backend on login/register. */
+  isAdmin?: boolean;
 }
 
 const ACCOUNTS_KEY = 'jcowork_accounts';

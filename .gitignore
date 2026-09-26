@@ -19,10 +19,15 @@ web/dist/
 *.swp
 *.swo
 .qoder/
+.workbuddy-ai/
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Local runtime / scratch data
+documents_ws/
+screenshot_*.png
 
 # Python
 __pycache__/

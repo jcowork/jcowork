@@ -19,11 +19,12 @@ use jcowork_storage::WorkspaceIndex;
 
 /// Verify that `user_id` refers to an existing public account.
 ///
-/// Returns Ok(()) when the target exists and is public; otherwise an
-/// already-shaped error response (404 for missing/private users).
+/// Returns Ok(()) when the target exists, is public, and is not in the
+/// recycle bin; otherwise an already-shaped error response (404 for
+/// missing/private/trashed users).
 async fn ensure_public_user(state: &AppState, user_id: &str) -> Result<(), Response> {
     match state.user_store.get_user_by_id(user_id).await {
-        Ok(Some(u)) if u.is_public => Ok(()),
+        Ok(Some(u)) if u.is_public && u.deleted_at.is_none() => Ok(()),
         Ok(_) => Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "Public user not found" })),

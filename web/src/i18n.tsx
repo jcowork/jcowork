@@ -29,6 +29,9 @@ const translations = {
     addAccount: '添加账户',
     switchAccount: '切换账户',
     removeAccount: '移除账户',
+    webAccess: 'Web访问',
+    webAccessHint: '复制浏览器访问地址',
+    webAccessCopied: '已复制',
     searchContacts: '搜索联系人',
 
     // Login
@@ -362,6 +365,30 @@ const translations = {
     language: '语言',
     chinese: '中文',
     english: 'English',
+
+    // Admin user management
+    userManagement: '用户管理',
+    userListTab: '用户列表',
+    trashTab: '垃圾桶',
+    searchUsers: '搜索用户名...',
+    confirm: '确认',
+    adminBadge: '管理员',
+    cannotDeleteAdminAccount: '管理员账号不可删除',
+    createdAt: '注册时间',
+    deletedAt: '删除时间',
+    remainingDays: '剩余天数',
+    deleteUser: '移入垃圾桶',
+    confirmDeleteUser: '确认将该用户移入垃圾桶？7 天内未恢复将永久删除账号。',
+    userMovedToTrash: '该用户已移入垃圾桶',
+    restoreUser: '恢复',
+    userRestored: '该用户已恢复',
+    permanentlyDelete: '永久删除',
+    confirmPermanentDelete: '确认永久删除该账号？此操作不可恢复（用户的数据目录会保留）。',
+    userPermanentlyDeleted: '该账号已被永久删除',
+    noUsersFound: '未找到用户',
+    noTrashedUsers: '垃圾桶为空',
+    accountDeletedMessage: '该账号已被删除，无法登录',
+    operationFailed: '操作失败',
   },
   en: {
     // Sidebar
@@ -388,6 +415,9 @@ const translations = {
     addAccount: 'Add Account',
     switchAccount: 'Switch Account',
     removeAccount: 'Remove Account',
+    webAccess: 'Web Access',
+    webAccessHint: 'Copy browser access URL',
+    webAccessCopied: 'Copied',
     searchContacts: 'Search contacts',
 
     // Login
@@ -721,6 +751,30 @@ const translations = {
     language: 'Language',
     chinese: '中文',
     english: 'English',
+
+    // Admin user management
+    userManagement: 'User Management',
+    userListTab: 'Users',
+    trashTab: 'Trash',
+    searchUsers: 'Search username...',
+    confirm: 'Confirm',
+    adminBadge: 'Admin',
+    cannotDeleteAdminAccount: 'The admin account cannot be deleted',
+    createdAt: 'Registered',
+    deletedAt: 'Deleted',
+    remainingDays: 'Days left',
+    deleteUser: 'Move to Trash',
+    confirmDeleteUser: 'Move this user to the trash? The account will be permanently deleted after 7 days in the trash.',
+    userMovedToTrash: 'User moved to trash',
+    restoreUser: 'Restore',
+    userRestored: 'User restored',
+    permanentlyDelete: 'Delete Permanently',
+    confirmPermanentDelete: 'Permanently delete this account? This cannot be undone (the user data directory is kept).',
+    userPermanentlyDeleted: 'Account permanently deleted',
+    noUsersFound: 'No users found',
+    noTrashedUsers: 'Trash is empty',
+    accountDeletedMessage: 'This account has been deleted and cannot sign in',
+    operationFailed: 'Operation failed',
   },
 } as const;
 

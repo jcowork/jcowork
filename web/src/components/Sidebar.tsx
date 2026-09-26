@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { useLang, useT } from '../i18n';
+import { useT } from '../i18n';
+import { API_BASE } from '../config';
 import { type Conversation } from '../chatStore';
 
 interface SidebarProps {
@@ -30,11 +31,13 @@ interface SidebarProps {
   /** userId of the public account currently opened in the read-only profile view. */
   viewingPublicUserId?: string | null;
   onOpenPublicUser?: (user: { userId: string; username: string }) => void;
+  /** True when the active account is a super user — shows the admin nav entry. */
+  isAdmin?: boolean;
+  onAdminUsers?: () => void;
 }
 
-export default function Sidebar({ accounts, activeUserId, streamingAccounts, unreadAccounts, onSwitchAccount, onAddAccount, onRemoveAccount, onLogout, onChat, onSettings, onSchedule, onMemory, onSkills, onDocuments, currentView, conversations, activeConvId, onNewChat, onSelectConversation, onDeleteConversation, mobileOpen, onClose, publicUsers, viewingPublicUserId, onOpenPublicUser }: SidebarProps) {
+export default function Sidebar({ accounts, activeUserId, streamingAccounts, unreadAccounts, onSwitchAccount, onAddAccount, onRemoveAccount, onLogout, onChat, onSettings, onSchedule, onMemory, onSkills, onDocuments, currentView, conversations, activeConvId, onNewChat, onSelectConversation, onDeleteConversation, mobileOpen, onClose, publicUsers, viewingPublicUserId, onOpenPublicUser, isAdmin, onAdminUsers }: SidebarProps) {
   const t = useT();
-  const { lang, setLang } = useLang();
   const [historyOpen, setHistoryOpen] = useState(true);
   // History list shows only the first few chats by default; the rest sit
   // behind an expand toggle below the visible ones.
@@ -44,6 +47,8 @@ export default function Sidebar({ accounts, activeUserId, streamingAccounts, unr
   // Contacts section state
   const [contactsOpen, setContactsOpen] = useState(true);
   const [contactsSearch, setContactsSearch] = useState('');
+  // Whether the web access URL was just copied (shows "copied" feedback)
+  const [webCopied, setWebCopied] = useState(false);
 
   // Show all conversations with messages (except the currently active one)
   const historyConvs = conversations
@@ -62,18 +67,50 @@ export default function Sidebar({ accounts, activeUserId, streamingAccounts, unr
     { key: 'schedule', label: t('schedule') },
     { key: 'memory', label: t('navMemo') },
     { key: 'skills', label: t('navSkillsConnectors') },
+    // Super users get an extra entry for user management
+    ...(isAdmin ? [{ key: 'admin', label: t('userManagement') }] : []),
     { key: 'settings', label: t('settings') },
   ];
 
-  const navHandlers: Record<string, () => void> = { chat: onChat, documents: onDocuments, schedule: onSchedule, memory: onMemory, skills: onSkills, settings: onSettings };
+  const navHandlers: Record<string, () => void> = { chat: onChat, documents: onDocuments, schedule: onSchedule, memory: onMemory, skills: onSkills, settings: onSettings, admin: onAdminUsers ?? (() => {}) };
 
   const handleNav = (key: string) => {
     navHandlers[key]?.();
     onClose?.();
   };
 
-  const toggleLang = () => {
-    setLang(lang === 'zh' ? 'en' : 'zh');
+  // Copy the browser access URL to the clipboard so it can be opened locally
+  // or shared with other devices on the LAN.
+  const handleWebAccess = async () => {
+    let url = API_BASE || window.location.origin;
+    const tauri = (window as any).__TAURI__;
+    if (tauri) {
+      try {
+        // Backend resolves the LAN IP so the link also works from other computers.
+        url = await tauri.core.invoke('get_web_access_url');
+      } catch (err) {
+        console.error('get_web_access_url failed:', err);
+      }
+    }
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(url);
+      } else {
+        // Fallback for environments without the async clipboard API
+        const ta = document.createElement('textarea');
+        ta.value = url;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      setWebCopied(true);
+      window.setTimeout(() => setWebCopied(false), 2000);
+    } catch (err) {
+      console.error('copy to clipboard failed:', err);
+    }
   };
 
   return (
@@ -395,40 +432,39 @@ export default function Sidebar({ accounts, activeUserId, streamingAccounts, unr
           })}
         </div>
 
-        {/* Language toggle */}
-        <button
-          onClick={toggleLang}
-          style={{
-            padding: '8px 12px',
-            borderRadius: 6,
-            border: '1px solid #444',
-            background: '#222',
-            color: '#aaa',
-            cursor: 'pointer',
-            fontSize: 13,
-            marginBottom: 8,
-            display: 'flex',
-            alignItems: 'center',
-            gap: 6,
-          }}
-        >
-          🌐 {lang === 'zh' ? 'English' : '中文'}
-        </button>
-
-        <button
-          onClick={onLogout}
-          style={{
-            padding: '8px 12px',
-            borderRadius: 6,
-            border: '1px solid #555',
-            background: 'transparent',
-            color: '#eee',
-            cursor: 'pointer',
-            fontSize: 14,
-          }}
-        >
-          {t('removeAccount')}
-        </button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            onClick={handleWebAccess}
+            title={t('webAccessHint')}
+            style={{
+              flex: 1,
+              padding: '8px 12px',
+              borderRadius: 6,
+              border: '1px solid #555',
+              background: 'transparent',
+              color: '#eee',
+              cursor: 'pointer',
+              fontSize: 14,
+            }}
+          >
+            {webCopied ? t('webAccessCopied') : t('webAccess')}
+          </button>
+          <button
+            onClick={onLogout}
+            style={{
+              flex: 1,
+              padding: '8px 12px',
+              borderRadius: 6,
+              border: '1px solid #555',
+              background: 'transparent',
+              color: '#eee',
+              cursor: 'pointer',
+              fontSize: 14,
+            }}
+          >
+            {t('removeAccount')}
+          </button>
+        </div>
       </div>
 
       {/* Delete confirmation modal */}
