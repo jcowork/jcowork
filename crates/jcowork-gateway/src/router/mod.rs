@@ -271,6 +271,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/admin/users", get(admin_users::list_users))
         .route("/api/admin/users/{id}/trash", post(admin_users::trash_user))
         .route("/api/admin/users/{id}/restore", post(admin_users::restore_user))
+        .route("/api/admin/users/{id}/public", post(admin_users::set_user_public))
         .route("/api/admin/users/{id}", delete(admin_users::permanently_delete_user))
         // Read-only cross-user endpoints for public accounts
         .route("/api/public-users", get(public_users::list_public_users))

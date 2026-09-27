@@ -85,15 +85,19 @@ export default function AdminUsers({ token }: AdminUsersProps) {
     loadUsers();
   }, [loadUsers]);
 
-  // Run a destructive admin action against the given URL and refresh on success
-  const performAction = async (url: string, method: 'POST' | 'DELETE', successMessage: string, userId: string) => {
+  // Run an admin action against the given URL and refresh on success
+  const performAction = async (url: string, method: 'POST' | 'DELETE', successMessage: string, userId: string, body?: Record<string, unknown>) => {
     setError('');
     setNotice('');
     setBusyUserId(userId);
     try {
       const res = await fetch(url, {
         method,
-        headers: { Authorization: `Bearer ${token}` },
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
       });
       const data = await res.json().catch(() => null);
       if (res.ok) {
@@ -106,6 +110,18 @@ export default function AdminUsers({ token }: AdminUsersProps) {
       setError(t('networkError'));
     }
     setBusyUserId(null);
+  };
+
+  // Flip a user's public flag (public ↔ private)
+  const togglePublic = async (u: AdminUserRow) => {
+    const next = !u.is_public;
+    await performAction(
+      `/api/admin/users/${encodeURIComponent(u.user_id)}/public`,
+      'POST',
+      next ? t('userMadePublic') : t('userMadePrivate'),
+      u.user_id,
+      { is_public: next },
+    );
   };
 
   const handleConfirm = async () => {
@@ -255,11 +271,44 @@ export default function AdminUsers({ token }: AdminUsersProps) {
                 </div>
 
                 {/* Actions */}
-                {!u.is_admin && (
-                  <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-                    {tab === 'active' ? (
+                <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                  {tab === 'active' && (
+                    <button
+                      onClick={() => togglePublic(u)}
+                      disabled={busyUserId === u.user_id}
+                      style={{
+                        ...actionButtonStyle,
+                        borderColor: '#1f6feb88',
+                        color: busyUserId === u.user_id ? '#666' : '#58a6ff',
+                      }}
+                    >
+                      {u.is_public ? t('makePrivate') : t('makePublic')}
+                    </button>
+                  )}
+                  {!u.is_admin && tab === 'active' && (
+                    <button
+                      onClick={() => setConfirmAction({ type: 'trash', user: u })}
+                      disabled={busyUserId === u.user_id}
+                      style={{
+                        ...actionButtonStyle,
+                        borderColor: '#e5393588',
+                        color: busyUserId === u.user_id ? '#666' : '#e57373',
+                      }}
+                    >
+                      {t('deleteUser')}
+                    </button>
+                  )}
+                  {!u.is_admin && tab === 'trash' && (
+                    <>
                       <button
-                        onClick={() => setConfirmAction({ type: 'trash', user: u })}
+                        onClick={() => performAction(`/api/admin/users/${encodeURIComponent(u.user_id)}/restore`, 'POST', t('userRestored'), u.user_id)}
+                        disabled={busyUserId === u.user_id}
+                        style={{ ...actionButtonStyle, color: busyUserId === u.user_id ? '#666' : '#81c784', borderColor: '#81c78488' }}
+                      >
+                        {t('restoreUser')}
+                      </button>
+                      <button
+                        onClick={() => setConfirmAction({ type: 'purge', user: u })}
                         disabled={busyUserId === u.user_id}
                         style={{
                           ...actionButtonStyle,
@@ -267,32 +316,11 @@ export default function AdminUsers({ token }: AdminUsersProps) {
                           color: busyUserId === u.user_id ? '#666' : '#e57373',
                         }}
                       >
-                        {t('deleteUser')}
+                        {t('permanentlyDelete')}
                       </button>
-                    ) : (
-                      <>
-                        <button
-                          onClick={() => performAction(`/api/admin/users/${encodeURIComponent(u.user_id)}/restore`, 'POST', t('userRestored'), u.user_id)}
-                          disabled={busyUserId === u.user_id}
-                          style={{ ...actionButtonStyle, color: busyUserId === u.user_id ? '#666' : '#81c784', borderColor: '#81c78488' }}
-                        >
-                          {t('restoreUser')}
-                        </button>
-                        <button
-                          onClick={() => setConfirmAction({ type: 'purge', user: u })}
-                          disabled={busyUserId === u.user_id}
-                          style={{
-                            ...actionButtonStyle,
-                            borderColor: '#e5393588',
-                            color: busyUserId === u.user_id ? '#666' : '#e57373',
-                          }}
-                        >
-                          {t('permanentlyDelete')}
-                        </button>
-                      </>
-                    )}
-                  </div>
-                )}
+                    </>
+                  )}
+                </div>
               </div>
             ))}
           </div>

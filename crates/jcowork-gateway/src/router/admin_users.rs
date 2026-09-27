@@ -253,3 +253,69 @@ pub(crate) async fn permanently_delete_user(
             .into_response(),
     }
 }
+
+/// Request body for the public-flag toggle.
+#[derive(Debug, Deserialize)]
+pub(crate) struct SetPublicRequest {
+    pub is_public: bool,
+}
+
+/// POST /api/admin/users/{id}/public — set or clear a user's public flag.
+///
+/// Making an account private immediately hides it (and its shared content)
+/// from every other user; making it public re-publishes it.
+pub(crate) async fn set_user_public(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Path(user_id): Path<String>,
+    Json(req): Json<SetPublicRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = ensure_admin(&auth_user) {
+        return resp;
+    }
+
+    // Verify the target exists (any account, including admin, may be toggled)
+    let target = match state.user_store.get_user_by_id(&user_id).await {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "User not found" })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    match state.user_store.set_user_public(&user_id, req.is_public).await {
+        Ok(()) => {
+            tracing::info!(
+                user_id = %user_id,
+                username = %target.username,
+                is_public = req.is_public,
+                "Admin updated user public flag"
+            );
+            let message = if req.is_public {
+                "User is now public"
+            } else {
+                "User is now private"
+            };
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "message": message, "is_public": req.is_public })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}

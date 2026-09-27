@@ -964,3 +964,92 @@ async fn test_ensure_default_admin_idempotent() {
     assert!(again.is_admin);
     assert_eq!(again.id, existing.id);
 }
+
+/// Admin can flip a user's public flag in both directions.
+#[tokio::test]
+async fn test_admin_toggles_user_public_flag() {
+    let app = TestApp::new().await;
+    let admin_token = app.seed_and_login_admin().await;
+
+    // A private target user and an unrelated observer
+    let target_id = app.register_user("toggleuser", "togglepass1", false).await;
+    app.register_user("observer", "observerpass1", false).await;
+    let (status, observer_login) = app.login_raw("observer", "observerpass1").await;
+    assert_eq!(status, StatusCode::OK);
+    let observer_token = observer_login["token"].as_str().unwrap().to_string();
+
+    let public_url = format!("/api/admin/users/{}/public", target_id);
+
+    // Non-admin callers are rejected
+    let res = app
+        .make_request_with_token(Some(&observer_token), "POST", &public_url, Some(json!({"is_public": true})))
+        .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    // Unknown user returns 404
+    let res = app
+        .make_request_with_token(Some(&admin_token), "POST", "/api/admin/users/does-not-exist/public", Some(json!({"is_public": true})))
+        .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // Private user is invisible in the public directory…
+    let is_listed = |app_body: &serde_json::Value| {
+        app_body
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|u| u["user_id"] == json!(target_id))
+    };
+    let res = app
+        .make_request_with_token(Some(&observer_token), "GET", "/api/public-users", None)
+        .await;
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert!(!is_listed(&body), "private user must not be in the public directory");
+
+    // …until the admin makes it public
+    let res = app
+        .make_request_with_token(Some(&admin_token), "POST", &public_url, Some(json!({"is_public": true})))
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app
+        .make_request_with_token(Some(&observer_token), "GET", "/api/public-users", None)
+        .await;
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert!(is_listed(&body), "public user must appear in the public directory");
+
+    // The admin list reflects the updated flag
+    let res = app
+        .make_request_with_token(Some(&admin_token), "GET", "/api/admin/users?query=toggleuser&status=active", None)
+        .await;
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    let row = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["user_id"] == json!(target_id))
+        .unwrap();
+    assert_eq!(row["is_public"], json!(true));
+
+    // …and back to private
+    let res = app
+        .make_request_with_token(Some(&admin_token), "POST", &public_url, Some(json!({"is_public": false})))
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app
+        .make_request_with_token(Some(&observer_token), "GET", "/api/public-users", None)
+        .await;
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert!(!is_listed(&body), "user made private must leave the public directory");
+
+    // The target's stored flag matches the store as well
+    let stored = app.user_store.get_user_by_id(&target_id).await.unwrap().unwrap();
+    assert!(!stored.is_public);
+}

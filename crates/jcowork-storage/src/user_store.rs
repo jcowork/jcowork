@@ -371,4 +371,19 @@ impl UserStore {
 
         Ok(result.rows_affected())
     }
+
+    /// Set the `is_public` flag for a user (admin action).
+    /// Fails if the user does not exist.
+    pub async fn set_user_public(&self, user_id: &str, is_public: bool) -> Result<()> {
+        let result = sqlx::query("UPDATE users SET is_public = ? WHERE id = ?")
+            .bind(is_public)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            anyhow::bail!("User not found");
+        }
+        Ok(())
+    }
 }
