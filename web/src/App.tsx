@@ -494,6 +494,7 @@ function AppInner() {
       return (
         <div className="login-container">
           <div className="login-card">
+            <img src="/logo.png" className="login-logo" alt="Jcowork" />
             <h1 style={{ fontSize: 28, marginBottom: 24 }}>Jcowork Agent</h1>
             {forgotStep === 'request' ? (
               <form onSubmit={handleForgotPassword}>
@@ -565,6 +566,7 @@ function AppInner() {
     return (
       <div className="login-container">
         <div className="login-card">
+          <img src="/logo.png" className="login-logo" alt="Jcowork" />
           <h1 style={{ fontSize: 28, marginBottom: 24 }}>Jcowork Agent</h1>
           <form onSubmit={handleAuth}>
             {banner(authError, 'error')}
@@ -678,7 +680,10 @@ function AppInner() {
           >
             ☰
           </button>
-          <span style={{ fontWeight: 600, fontSize: 16 }}>Jcowork</span>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 600, fontSize: 16 }}>
+            <img src="/logo.png" alt="Jcowork" style={{ width: 20, height: 20 }} />
+            Jcowork
+          </span>
           <span style={{ width: 30 }} />
         </div>
         {/* Content area */}

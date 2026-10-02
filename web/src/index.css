@@ -198,6 +198,12 @@ div:hover > .msg-copy-btn {
   width: 100%;
   max-width: 400px;
 }
+.login-logo {
+  display: block;
+  width: 72px;
+  height: 72px;
+  margin: 0 auto 16px;
+}
 
 /* Mobile top bar — hidden on desktop */
 .mobile-topbar {

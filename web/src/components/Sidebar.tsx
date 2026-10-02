@@ -140,8 +140,9 @@ export default function Sidebar({ accounts, activeUserId, streamingAccounts, unr
           transition: 'transform 0.25s',
         }}
       >
-        <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 24 }}>
-          Jcowork
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 24 }}>
+          <img src="/logo.png" alt="Jcowork" style={{ width: 26, height: 26 }} />
+          <span style={{ fontWeight: 700, fontSize: 18 }}>Jcowork</span>
         </div>
 
         {/* Contacts section */}
