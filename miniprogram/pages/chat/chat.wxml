@@ -1,0 +1,133 @@
+<!-- 聊天主页面 -->
+<view class="chat-root" style="bottom: {{keyboardHeight}}px;">
+
+  <!-- 自定义导航栏 -->
+  <view class="navbar" style="padding-top: {{statusBarHeight}}px;">
+    <view class="navbar-inner" style="height: {{navBarHeight}}px; padding-right: {{menuRightGap}}px;">
+      <view class="nav-btn" bindtap="openDrawer">
+        <text class="nav-icon">☰</text>
+      </view>
+      <view class="nav-title">{{title}}</view>
+      <view class="nav-btn">
+        <view class="conn-dot conn-{{connState}}"></view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 消息列表 -->
+  <scroll-view
+    class="messages"
+    scroll-y="{{true}}"
+    scroll-into-view="{{scrollAnchor}}"
+    show-scrollbar="{{false}}"
+  >
+    <view class="messages-inner">
+      <view class="empty-state" wx:if="{{!messages.length}}">
+        <image class="empty-logo" src="/images/logo.png" mode="aspectFit" />
+        <view class="empty-title">你好，我是你的 AI 助手</view>
+        <view class="empty-desc">直接输入消息即可开始对话</view>
+        <view class="empty-desc">左上角菜单可查看与切换历史会话</view>
+      </view>
+
+      <block wx:for="{{messages}}" wx:key="index">
+        <!-- 用户消息 -->
+        <view
+          class="msg-row user"
+          wx:if="{{item.role === 'user'}}"
+          data-index="{{index}}"
+          bindlongpress="onMessageLongPress"
+        >
+          <view class="bubble user-bubble">
+            <text user-select="{{true}}">{{item.content}}</text>
+          </view>
+        </view>
+
+        <!-- 助手消息 -->
+        <view
+          class="msg-row assistant"
+          wx:elif="{{item.role === 'assistant'}}"
+          data-index="{{index}}"
+          bindlongpress="onMessageLongPress"
+        >
+          <view class="bubble assistant-bubble">
+            <view class="html-card" wx:if="{{item.kind === 'image_html'}}">
+              [图片] 已转换为 HTML 内容，请在 Web 端查看完整效果
+            </view>
+            <rich-text wx:else nodes="{{item.nodes}}" user-select="{{true}}"></rich-text>
+          </view>
+          <view class="msg-time">{{item.time}}</view>
+        </view>
+
+        <!-- 系统消息（工具调用 / 提醒 / 错误等） -->
+        <view class="msg-row system" wx:else>
+          <view class="system-msg">
+            <text user-select="{{true}}">{{item.content}}</text>
+          </view>
+        </view>
+      </block>
+
+      <view id="anchor-a" class="anchor"></view>
+      <view id="anchor-b" class="anchor"></view>
+    </view>
+  </scroll-view>
+
+  <!-- 状态行 -->
+  <view class="status-line" wx:if="{{statusLine}}">
+    <view class="blink-dot" wx:if="{{streaming}}"></view>
+    <text class="status-text">{{statusLine}}</text>
+  </view>
+
+  <!-- 输入栏 -->
+  <view class="input-bar">
+    <view class="input-wrap">
+      <textarea
+        class="chat-input"
+        value="{{input}}"
+        bindinput="onInput"
+        auto-height="{{true}}"
+        maxlength="-1"
+        cursor-spacing="16"
+        adjust-position="{{false}}"
+        bindkeyboardheightchange="onKeyboardHeightChange"
+        confirm-type="send"
+        bindconfirm="onSend"
+        show-confirm-bar="{{false}}"
+        placeholder="发送消息…"
+        placeholder-class="input-placeholder"
+      />
+      <view
+        class="send-btn {{streaming ? 'send-btn-stop' : (canSend ? 'send-btn-active' : '')}}"
+        bindtap="onSendOrStop"
+      >
+        <text wx:if="{{streaming}}">■</text>
+        <text wx:else>↑</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- 会话抽屉 -->
+  <view class="drawer-mask {{drawerOpen ? 'show' : ''}}" bindtap="closeDrawer"></view>
+  <view class="drawer {{drawerOpen ? 'open' : ''}}">
+    <view class="drawer-head" style="padding-top: {{navTotalHeight}}px;">
+      <view class="new-chat" bindtap="onNewChat">＋ 新对话</view>
+    </view>
+    <scroll-view class="drawer-list" scroll-y="{{true}}">
+      <block wx:for="{{conversations}}" wx:key="id">
+        <view
+          class="conv-item {{item.active ? 'active' : ''}}"
+          data-id="{{item.id}}"
+          bindtap="onSelectConv"
+          bindlongpress="onConvLongPress"
+        >
+          <view class="conv-title">{{item.title}}</view>
+          <view class="conv-time">{{item.timeText}}</view>
+        </view>
+      </block>
+      <view class="drawer-empty" wx:if="{{!conversations.length}}">暂无历史会话</view>
+    </scroll-view>
+    <view class="drawer-foot">
+      <view class="drawer-user">账号：{{username}}</view>
+      <view class="drawer-setting" bindtap="goSettings">设置 ›</view>
+    </view>
+  </view>
+</view>

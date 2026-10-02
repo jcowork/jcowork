@@ -1,0 +1,79 @@
+<!-- 登录 / 注册 -->
+<view class="page" style="padding-top: {{navTotalHeight}}px;">
+  <view class="brand">
+    <image class="logo" src="/images/logo.png" mode="aspectFit" />
+    <view class="app-name">Jcowork</view>
+    <view class="tagline">多用户 AI 智能体工作台</view>
+  </view>
+
+  <view class="card">
+    <view class="tabs">
+      <view class="tab {{mode === 'login' ? 'tab-active' : ''}}" data-mode="login" bindtap="switchMode">登录</view>
+      <view class="tab {{mode === 'register' ? 'tab-active' : ''}}" data-mode="register" bindtap="switchMode">注册</view>
+    </view>
+
+    <view class="field">
+      <view class="label">服务器地址</view>
+      <input
+        class="jc-input"
+        value="{{serverUrl}}"
+        data-field="serverUrl"
+        bindinput="onInput"
+        placeholder="https://your-server.com"
+        placeholder-class="jc-input-placeholder"
+        type="text"
+        adjust-position="{{true}}"
+      />
+      <view class="hint" wx:if="{{defaultServer && serverUrl !== defaultServer}}">
+        <text class="hint-link" bindtap="useDefaultServer">恢复为默认服务器地址</text>
+      </view>
+    </view>
+
+    <view class="field">
+      <view class="label">用户名</view>
+      <input
+        class="jc-input"
+        value="{{username}}"
+        data-field="username"
+        bindinput="onInput"
+        placeholder="请输入用户名"
+        placeholder-class="jc-input-placeholder"
+        type="text"
+      />
+    </view>
+
+    <view class="field">
+      <view class="label">密码</view>
+      <input
+        class="jc-input"
+        value="{{password}}"
+        data-field="password"
+        bindinput="onInput"
+        placeholder="请输入密码"
+        placeholder-class="jc-input-placeholder"
+        password="{{true}}"
+        confirm-type="done"
+        bindconfirm="submit"
+      />
+    </view>
+
+    <view class="public-row" wx:if="{{mode === 'register'}}">
+      <view class="public-text">
+        <view class="public-title">创建公开账号</view>
+        <view class="public-desc">公开账号会出现在公开联系人目录，其他人可查看你分享的文档与定时任务</view>
+      </view>
+      <switch checked="{{isPublic}}" bindchange="onTogglePublic" color="#1f6feb" />
+    </view>
+
+    <view class="jc-error error-box" wx:if="{{error}}">{{error}}</view>
+
+    <button class="jc-btn submit-btn" bindtap="submit" loading="{{loading}}" disabled="{{loading}}">
+      {{mode === 'login' ? '登 录' : '注册并登录'}}
+    </button>
+  </view>
+
+  <view class="footnote">
+    <view>开发者工具调试时，请在「详情 → 本地设置」勾选“不校验合法域名”</view>
+    <view>正式发布需要为服务器配置 HTTPS/WSS 域名并加入小程序后台白名单</view>
+  </view>
+</view>

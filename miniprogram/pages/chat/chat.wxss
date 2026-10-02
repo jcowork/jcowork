@@ -1,0 +1,400 @@
+/* 聊天页样式 */
+.chat-root {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  background: #0d1117;
+  transition: bottom 0.2s ease-out;
+}
+
+/* ── 导航栏 ─────────────────────────────── */
+.navbar {
+  flex-shrink: 0;
+  background: #0d1117;
+  border-bottom: 1rpx solid #30363d;
+}
+
+.navbar-inner {
+  display: flex;
+  align-items: center;
+  padding-left: 12rpx;
+}
+
+.nav-btn {
+  width: 80rpx;
+  height: 80rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.nav-icon {
+  font-size: 42rpx;
+  color: #e6edf3;
+  line-height: 1;
+}
+
+.nav-title {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+  font-size: 32rpx;
+  font-weight: 600;
+  color: #e6edf3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 12rpx;
+}
+
+/* 连接状态指示点 */
+.conn-dot {
+  width: 18rpx;
+  height: 18rpx;
+  border-radius: 50%;
+  background: #8b949e;
+}
+
+.conn-connected {
+  background: #3fb950;
+  box-shadow: 0 0 10rpx rgba(63, 185, 80, 0.7);
+}
+
+.conn-connecting {
+  background: #d29922;
+}
+
+.conn-offline {
+  background: #f85149;
+}
+
+/* ── 消息区 ─────────────────────────────── */
+.messages {
+  flex: 1;
+  min-height: 0;
+}
+
+.messages-inner {
+  padding: 24rpx 24rpx 12rpx;
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 160rpx 40rpx 40rpx;
+}
+
+.empty-logo {
+  width: 110rpx;
+  height: 110rpx;
+  border-radius: 50%;
+  box-shadow: 0 10rpx 32rpx rgba(31, 111, 235, 0.3);
+}
+
+.empty-title {
+  margin-top: 32rpx;
+  font-size: 32rpx;
+  font-weight: 600;
+  color: #e6edf3;
+}
+
+.empty-desc {
+  margin-top: 10rpx;
+  font-size: 25rpx;
+  color: #66707a;
+}
+
+.msg-row {
+  display: flex;
+  margin-bottom: 22rpx;
+}
+
+.msg-row.user {
+  justify-content: flex-end;
+}
+
+.msg-row.assistant {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.bubble {
+  border-radius: 20rpx;
+  padding: 18rpx 22rpx;
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
+
+.user-bubble {
+  max-width: 86%;
+  background: #1f6feb;
+  color: #ffffff;
+  border-bottom-right-radius: 6rpx;
+  white-space: pre-wrap;
+  font-size: 30rpx;
+  line-height: 1.6;
+}
+
+.assistant-bubble {
+  max-width: 94%;
+  background: #161b22;
+  border: 1rpx solid #30363d;
+  border-bottom-left-radius: 6rpx;
+}
+
+/* 图片 HTML 消息卡片（小程序端不做 HTML 渲染） */
+.html-card {
+  font-size: 26rpx;
+  color: #8b949e;
+  line-height: 1.6;
+}
+
+.msg-time {
+  margin-top: 8rpx;
+  margin-left: 10rpx;
+  font-size: 20rpx;
+  color: #66707a;
+}
+
+/* 系统消息（工具调用 / 提醒 / 错误） */
+.msg-row.system {
+  justify-content: center;
+}
+
+.system-msg {
+  max-width: 94%;
+  background: rgba(88, 166, 255, 0.06);
+  border: 1rpx solid rgba(88, 166, 255, 0.2);
+  border-radius: 12rpx;
+  padding: 10rpx 22rpx;
+  font-size: 24rpx;
+  color: #8b949e;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.anchor {
+  height: 2rpx;
+}
+
+/* ── 状态行 ─────────────────────────────── */
+.status-line {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  padding: 6rpx 28rpx;
+}
+
+.status-text {
+  font-size: 24rpx;
+  color: #8b949e;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.blink-dot {
+  width: 12rpx;
+  height: 12rpx;
+  border-radius: 50%;
+  background: #58a6ff;
+  margin-right: 12rpx;
+  animation: jc-blink 1s infinite;
+}
+
+@keyframes jc-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+/* ── 输入栏 ─────────────────────────────── */
+.input-bar {
+  flex-shrink: 0;
+  padding: 12rpx 20rpx;
+  padding-bottom: calc(12rpx + env(safe-area-inset-bottom));
+  background: #0d1117;
+  border-top: 1rpx solid #30363d;
+}
+
+.input-wrap {
+  display: flex;
+  align-items: flex-end;
+}
+
+.chat-input {
+  flex: 1;
+  min-width: 0;
+  min-height: 76rpx;
+  max-height: 260rpx;
+  box-sizing: border-box;
+  background: #161b22;
+  border: 1rpx solid #30363d;
+  border-radius: 20rpx;
+  padding: 16rpx 22rpx;
+  color: #e6edf3;
+  font-size: 30rpx;
+  line-height: 1.5;
+}
+
+.input-placeholder {
+  color: #66707a;
+}
+
+.send-btn {
+  flex-shrink: 0;
+  width: 76rpx;
+  height: 76rpx;
+  margin-left: 16rpx;
+  border-radius: 50%;
+  background: #21262d;
+  color: #8b949e;
+  font-size: 36rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s;
+}
+
+.send-btn-active {
+  background: #1f6feb;
+  color: #ffffff;
+}
+
+.send-btn-stop {
+  background: #f85149;
+  color: #ffffff;
+}
+
+/* ── 会话抽屉 ───────────────────────────── */
+.drawer-mask {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.55);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.22s ease;
+  z-index: 90;
+}
+
+.drawer-mask.show {
+  opacity: 1;
+  visibility: visible;
+}
+
+.drawer {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 78vw;
+  max-width: 640rpx;
+  display: flex;
+  flex-direction: column;
+  background: #161b22;
+  border-right: 1rpx solid #30363d;
+  transform: translateX(-103%);
+  transition: transform 0.25s ease;
+  z-index: 100;
+}
+
+.drawer.open {
+  transform: translateX(0);
+}
+
+.drawer-head {
+  flex-shrink: 0;
+  padding: 0 24rpx 16rpx;
+}
+
+.new-chat {
+  margin-top: 16rpx;
+  height: 80rpx;
+  border-radius: 12rpx;
+  background: #1f6feb;
+  color: #ffffff;
+  font-size: 30rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.drawer-list {
+  flex: 1;
+  min-height: 0;
+  padding: 0 16rpx;
+}
+
+.conv-item {
+  padding: 20rpx 18rpx;
+  border-radius: 12rpx;
+  margin-bottom: 8rpx;
+  border: 1rpx solid transparent;
+}
+
+.conv-item.active {
+  background: rgba(31, 111, 235, 0.16);
+  border-color: rgba(31, 111, 235, 0.5);
+}
+
+.conv-title {
+  font-size: 28rpx;
+  color: #e6edf3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conv-time {
+  margin-top: 6rpx;
+  font-size: 22rpx;
+  color: #66707a;
+}
+
+.drawer-empty {
+  padding: 80rpx 0;
+  text-align: center;
+  font-size: 26rpx;
+  color: #66707a;
+}
+
+.drawer-foot {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20rpx 28rpx;
+  padding-bottom: calc(20rpx + env(safe-area-inset-bottom));
+  border-top: 1rpx solid #30363d;
+}
+
+.drawer-user {
+  flex: 1;
+  min-width: 0;
+  font-size: 26rpx;
+  color: #8b949e;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drawer-setting {
+  flex-shrink: 0;
+  padding-left: 20rpx;
+  font-size: 28rpx;
+  color: #58a6ff;
+}

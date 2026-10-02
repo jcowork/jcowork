@@ -1,0 +1,66 @@
+/**
+ * 全局样式 — 与 Web 端保持一致的 GitHub 深色配色：
+ * 背景 #0d1117 / 面板 #161b22 / 边框 #30363d / 主文字 #e6edf3
+ * 次要文字 #8b949e / 强调色 #58a6ff / 主按钮 #1f6feb
+ */
+page {
+  background: #0d1117;
+  color: #e6edf3;
+  font-size: 30rpx;
+  line-height: 1.6;
+  font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+}
+
+/* 通用文本输入 */
+.jc-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: #0d1117;
+  border: 1rpx solid #30363d;
+  border-radius: 12rpx;
+  padding: 20rpx 24rpx;
+  color: #e6edf3;
+  font-size: 30rpx;
+  height: 88rpx;
+}
+
+.jc-input-placeholder {
+  color: #66707a;
+}
+
+/* 通用按钮 */
+.jc-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 88rpx;
+  border-radius: 12rpx;
+  font-size: 32rpx;
+  font-weight: 500;
+  background: #1f6feb;
+  color: #ffffff;
+}
+
+.jc-btn::after {
+  border: none;
+}
+
+.jc-btn[disabled] {
+  opacity: 0.55;
+  color: #ffffff;
+}
+
+.jc-btn-ghost {
+  background: transparent;
+  border: 1rpx solid #30363d;
+  color: #e6edf3;
+}
+
+/* 错误提示 */
+.jc-error {
+  color: #f85149;
+  font-size: 26rpx;
+  line-height: 1.5;
+  word-break: break-all;
+}

@@ -1,0 +1,58 @@
+<!-- 设置 -->
+<view class="page">
+
+  <view class="section">
+    <view class="section-title">账号</view>
+    <view class="card">
+      <view class="row">
+        <view class="row-label">用户名</view>
+        <view class="row-value">{{username}}</view>
+      </view>
+      <view class="row">
+        <view class="row-label">用户 ID</view>
+        <view class="row-value mono">{{userId}}</view>
+      </view>
+      <view class="row">
+        <view class="row-label">服务器</view>
+        <view class="row-value mono">{{serverUrl}}</view>
+      </view>
+    </view>
+    <view class="ghost-btn" bindtap="goRelogin">切换服务器 / 账号</view>
+  </view>
+
+  <view class="section">
+    <view class="section-title">对话模型</view>
+    <view class="card">
+      <picker
+        mode="selector"
+        range="{{modelLabels}}"
+        value="{{modelIndex}}"
+        bindchange="onModelChange"
+        disabled="{{loadingModels}}"
+      >
+        <view class="row picker-row">
+          <view class="row-label">模型</view>
+          <view class="picker-value">
+            {{loadingModels ? '加载中…' : modelLabels[modelIndex]}} ›
+          </view>
+        </view>
+      </picker>
+    </view>
+    <view class="hint">列表来自服务器上已启用的 provider；选择“默认模型”则跟随服务器配置。</view>
+    <view class="jc-error error-text" wx:if="{{error}}">{{error}}</view>
+  </view>
+
+  <view class="section">
+    <view class="section-title">本机数据</view>
+    <view class="card">
+      <view class="danger-row" bindtap="clearChats">
+        <view class="danger-title">清空本机聊天记录</view>
+        <view class="danger-desc">仅删除本机缓存，不影响服务端数据</view>
+      </view>
+    </view>
+  </view>
+
+  <view class="section">
+    <view class="logout-btn" bindtap="logout">退出登录</view>
+  </view>
+</view>

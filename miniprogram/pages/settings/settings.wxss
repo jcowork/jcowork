@@ -1,0 +1,127 @@
+/* 设置页样式 */
+.page {
+  min-height: 100vh;
+  padding: 24rpx 28rpx;
+  padding-bottom: calc(48rpx + env(safe-area-inset-bottom));
+  box-sizing: border-box;
+}
+
+.section {
+  margin-bottom: 40rpx;
+}
+
+.section-title {
+  font-size: 26rpx;
+  color: #8b949e;
+  margin-bottom: 14rpx;
+  padding-left: 6rpx;
+}
+
+.card {
+  background: #161b22;
+  border: 1rpx solid #30363d;
+  border-radius: 20rpx;
+  overflow: hidden;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 26rpx 28rpx;
+  border-bottom: 1rpx solid #30363d;
+}
+
+.row:last-child {
+  border-bottom: none;
+}
+
+.row-label {
+  font-size: 28rpx;
+  color: #8b949e;
+  flex-shrink: 0;
+}
+
+.row-value {
+  font-size: 28rpx;
+  color: #e6edf3;
+  margin-left: 24rpx;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mono {
+  font-family: Menlo, Consolas, monospace;
+  font-size: 24rpx;
+}
+
+.picker-row {
+  justify-content: space-between;
+}
+
+.picker-value {
+  font-size: 28rpx;
+  color: #58a6ff;
+  margin-left: 24rpx;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hint {
+  margin-top: 14rpx;
+  padding: 0 6rpx;
+  font-size: 22rpx;
+  color: #66707a;
+  line-height: 1.6;
+}
+
+.error-text {
+  margin-top: 14rpx;
+  padding: 0 6rpx;
+}
+
+/* 幽灵按钮（切换服务器 / 账号） */
+.ghost-btn {
+  margin-top: 16rpx;
+  height: 84rpx;
+  border-radius: 16rpx;
+  border: 1rpx solid #30363d;
+  background: transparent;
+  color: #e6edf3;
+  font-size: 28rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 危险操作行 */
+.danger-row {
+  padding: 26rpx 28rpx;
+}
+
+.danger-title {
+  font-size: 28rpx;
+  color: #f85149;
+}
+
+.danger-desc {
+  margin-top: 6rpx;
+  font-size: 22rpx;
+  color: #66707a;
+}
+
+/* 退出登录 */
+.logout-btn {
+  margin-top: 8rpx;
+  height: 88rpx;
+  border-radius: 16rpx;
+  background: rgba(248, 81, 73, 0.1);
+  border: 1rpx solid rgba(248, 81, 73, 0.45);
+  color: #f85149;
+  font-size: 30rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
