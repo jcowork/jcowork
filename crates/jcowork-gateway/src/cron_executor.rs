@@ -277,6 +277,7 @@ async fn execute_cron_task(
         user_id: user_id.to_string(),
         workspace_root,
         mentioned_public_users: Vec::new(),
+        model: Some(model.to_string()),
     };
 
     let mut sink = LogSink::new();
@@ -288,7 +289,7 @@ async fn execute_cron_task(
         tool_registry: tool_registry.clone(),
         tool_ctx: &tool_ctx,
         pre_context: None,
-        max_turns: 5,
+        max_turns: 10,
         llm_timeout_secs: 120,
         stream_timeout_secs: 120,
         tool_timeout_secs: 60,
@@ -304,6 +305,17 @@ async fn execute_cron_task(
         (result.response, "success")
     } else if let Some(err) = sink.error {
         (format!("{}\n\n(LLM did not produce a response)", err), "error")
+    } else if !result.completed {
+        // The loop used all its turns while still calling tools — the model
+        // was working on the task but never produced a final text answer.
+        (
+            format!(
+                "Task stopped after reaching the maximum of {} turns without producing a final response. \
+                 Consider simplifying the instruction or splitting it into smaller tasks.",
+                result.turns_used
+            ),
+            "error",
+        )
     } else if result.response.is_empty() {
         ("The LLM returned an empty response. It may have failed to generate content.".to_string(), "error")
     } else {

@@ -172,6 +172,7 @@ async fn handle_feishu_message(
         user_id: user_id.clone(),
         workspace_root,
         mentioned_public_users: Vec::new(),
+        model: Some(model_str.to_string()),
     };
 
     // Fetch active reminders/cron jobs for context

@@ -847,6 +847,7 @@ pub async fn ws_handler(
                             user_id: user_id.clone(),
                             workspace_root,
                             mentioned_public_users: mentions,
+                            model: Some(model_str.to_string()),
                         };
                         // Fetch active reminders/cron jobs for context injection
                         let active_reminders = cron_scheduler.list_reminders(&user_id).await;
@@ -990,6 +991,7 @@ pub async fn ws_handler(
                                         user_id: user_id.clone(),
                                         workspace_root,
                                         mentioned_public_users: Vec::new(),
+                                        model: Some(default_model.clone()),
                                     };
                                     let mut sink = WsSink {
                                         ws_sender: &mut ws_sender,

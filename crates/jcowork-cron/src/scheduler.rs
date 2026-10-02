@@ -424,6 +424,123 @@ impl CronScheduler {
         Ok(id)
     }
 
+    /// Update an existing periodic task in place.
+    ///
+    /// Keeps the job ID, creation time, last-run timestamp and execution
+    /// history; the running trigger loop is replaced with one bound to the
+    /// new schedule/prompt/model. Returns the updated job.
+    pub async fn update_periodic_task(
+        &self,
+        id: &str,
+        name: &str,
+        prompt: &str,
+        model: &str,
+        schedule_expr: &str,
+    ) -> Result<CronJob> {
+        // Auto-convert 5-field cron to 7-field
+        let schedule_expr = if schedule_expr.split_whitespace().count() == 5 {
+            Self::convert_5field_to_7field(schedule_expr)
+        } else {
+            schedule_expr.to_string()
+        };
+
+        // Validate the new schedule before touching the running loop so a bad
+        // expression can never leave the task unscheduled.
+        let schedule = parse_schedule(&schedule_expr)?;
+        if next_local_fire(&schedule, Utc::now()).is_none() {
+            return Err(anyhow::anyhow!("No upcoming fire time for schedule"));
+        }
+
+        // Fetch the current job (its identity fields are preserved).
+        let current = {
+            let jobs = self.cron_jobs.lock().await;
+            jobs.get(id).cloned()
+        };
+        let Some(current) = current else {
+            return Err(anyhow::anyhow!("Cron job not found: {}", id));
+        };
+
+        // Stop the old loop; the new one is spawned below with the new values.
+        if let Some(handle) = self.cron_handles.lock().await.remove(id) {
+            handle.abort();
+        }
+
+        let updated = CronJob {
+            id: current.id.clone(),
+            user_id: current.user_id.clone(),
+            schedule: schedule_expr.clone(),
+            prompt: prompt.to_string(),
+            enabled: current.enabled,
+            last_run: current.last_run.clone(),
+            created_at: current.created_at.clone(),
+            name: Some(name.to_string()),
+            model: Some(model.to_string()),
+        };
+
+        // Validate + spawn the recurring loop (also re-registers in memory).
+        self.spawn_job_loop(updated.clone()).await?;
+
+        // Persist
+        if let Some(store) = &self.store {
+            if let Err(e) = store.save_job(CronStoreJob::from(&updated)).await {
+                tracing::warn!(error = %e, id = %id, "Failed to persist updated periodic task");
+            }
+        }
+
+        tracing::info!(id = %id, name = %name, schedule = %schedule_expr, "Periodic task updated");
+        Ok(updated)
+    }
+
+    /// Run a periodic task immediately, outside of its schedule ("Run now").
+    ///
+    /// Sends the same reminder the scheduled trigger loop would send, so the
+    /// background cron executor runs the task with its configured prompt and
+    /// model and stores the result like any scheduled run. Jobs owned by
+    /// another user are reported as not found.
+    pub async fn trigger_cron_job_now(&self, user_id: &str, id: &str) -> Result<CronJob> {
+        let job = {
+            let jobs = self.cron_jobs.lock().await;
+            match jobs.get(id) {
+                Some(j) if j.user_id == user_id => j.clone(),
+                _ => return Err(anyhow::anyhow!("Cron job not found: {}", id)),
+            }
+        };
+
+        // Mirror the scheduled trigger path: bump last_run and persist it.
+        let last_run = Utc::now().naive_utc().to_string();
+        {
+            let mut jobs = self.cron_jobs.lock().await;
+            if let Some(j) = jobs.get_mut(id) {
+                j.last_run = Some(last_run);
+            }
+        }
+        if let Some(store) = &self.store {
+            let jobs = self.cron_jobs.lock().await;
+            if let Some(j) = jobs.get(id) {
+                if let Err(e) = store.save_job(CronStoreJob::from(j)).await {
+                    tracing::warn!(error = %e, id = %id, "Failed to persist last_run after manual trigger");
+                }
+            }
+        }
+
+        let reminder = Reminder {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: job.user_id.clone(),
+            fire_at: Utc::now().to_rfc3339(),
+            message: format!("[Cron] {}", job.prompt),
+            triggered: true,
+            action: None,
+            cron_job_id: Some(job.id.clone()),
+            model: job.model.clone(),
+            prompt: Some(job.prompt.clone()),
+        };
+        // Broadcast to subscribers (the background executor picks it up).
+        let _ = self.reminder_tx.send(reminder);
+
+        tracing::info!(id = %id, "Cron job triggered manually");
+        Ok(job)
+    }
+
     /// Store a task execution result (memory + persistence).
     pub async fn store_task_result(&self, result: TaskResult) {
         if let Some(store) = &self.store {
@@ -549,11 +666,14 @@ impl CronScheduler {
     /// Returns the job ID.
     /// Supports both 5-field (min hour dom month dow) and 7-field (sec min hour dom month dow year) cron syntax.
     /// If a 5-field expression is given, it is auto-converted to 7-field by prepending "0 ".
+    /// `model` is the "provider:model" spec the job should run with; when
+    /// `None`, the executor falls back to the server default model.
     pub async fn add_cron_job(
         &self,
         user_id: &str,
         schedule_expr: &str,
         prompt: &str,
+        model: Option<&str>,
     ) -> Result<String> {
         // Auto-convert 5-field cron to 7-field (add seconds field + remap DOW)
         let schedule_expr = if schedule_expr.split_whitespace().count() == 5 {
@@ -573,7 +693,7 @@ impl CronScheduler {
             last_run: None,
             created_at: now,
             name: None,
-            model: None,
+            model: model.map(|m| m.to_string()),
         };
 
         // Validate + spawn the recurring loop (also registers in memory)
@@ -802,5 +922,111 @@ mod tests {
         assert_eq!(remap_dow("1-5/2"), "2-6/2"); // Mon-Fri step 2
         assert_eq!(remap_dow("SUN"), "SUN"); // Named day
         assert_eq!(remap_dow("mon"), "MON"); // Named day lower
+    }
+
+    // ========== update_periodic_task tests ==========
+
+    #[tokio::test]
+    async fn test_update_periodic_task_replaces_fields() {
+        let scheduler = CronScheduler::new();
+        let id = scheduler
+            .add_periodic_task("u1", "old", "old prompt", "p:m", "0 0 9 * * *")
+            .await
+            .unwrap();
+
+        let updated = scheduler
+            .update_periodic_task(&id, "new", "new prompt", "p:m2", "0 30 10 * * *")
+            .await
+            .unwrap();
+
+        // Same identity, new values
+        assert_eq!(updated.id, id);
+        assert_eq!(updated.schedule, "0 30 10 * * *");
+        assert_eq!(updated.prompt, "new prompt");
+        assert_eq!(updated.model.as_deref(), Some("p:m2"));
+        assert_eq!(updated.name.as_deref(), Some("new"));
+
+        // Exactly one job remains, carrying the updated values
+        let jobs = scheduler.list_cron_jobs("u1").await;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].schedule, "0 30 10 * * *");
+        assert_eq!(jobs[0].name.as_deref(), Some("new"));
+    }
+
+    #[tokio::test]
+    async fn test_update_periodic_task_invalid_schedule_keeps_job() {
+        let scheduler = CronScheduler::new();
+        let id = scheduler
+            .add_periodic_task("u1", "keep", "p", "m", "0 0 9 * * *")
+            .await
+            .unwrap();
+
+        let res = scheduler
+            .update_periodic_task(&id, "x", "x", "m", "definitely not a cron")
+            .await;
+        assert!(res.is_err());
+
+        // The original job must still exist, untouched
+        let jobs = scheduler.list_cron_jobs("u1").await;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].schedule, "0 0 9 * * *");
+        assert_eq!(jobs[0].name.as_deref(), Some("keep"));
+    }
+
+    #[tokio::test]
+    async fn test_update_periodic_task_missing_job() {
+        let scheduler = CronScheduler::new();
+        let res = scheduler
+            .update_periodic_task("nope", "n", "p", "m", "0 0 9 * * *")
+            .await;
+        assert!(res.is_err());
+    }
+
+    // ========== trigger_cron_job_now tests ==========
+
+    #[tokio::test]
+    async fn test_trigger_cron_job_now_emits_reminder_and_bumps_last_run() {
+        let scheduler = CronScheduler::new();
+        let id = scheduler
+            .add_periodic_task("u1", "manual", "run me", "deepseek:deepseek-v4-flash", "0 0 9 * * *")
+            .await
+            .unwrap();
+
+        // Subscribe before triggering so the broadcast is observed.
+        let mut rx = scheduler.subscribe();
+
+        let job = scheduler.trigger_cron_job_now("u1", &id).await.unwrap();
+        assert_eq!(job.id, id);
+        assert_eq!(job.model.as_deref(), Some("deepseek:deepseek-v4-flash"));
+
+        // The reminder mirrors a scheduled fire so the executor runs the task.
+        let reminder = rx.try_recv().expect("reminder should be broadcast");
+        assert_eq!(reminder.cron_job_id.as_deref(), Some(id.as_str()));
+        assert_eq!(reminder.model.as_deref(), Some("deepseek:deepseek-v4-flash"));
+        assert_eq!(reminder.prompt.as_deref(), Some("run me"));
+        assert_eq!(reminder.user_id, "u1");
+
+        // last_run is bumped immediately (shown as "Last run" in the UI).
+        let jobs = scheduler.list_cron_jobs("u1").await;
+        assert!(jobs.iter().find(|j| j.id == id).unwrap().last_run.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_trigger_cron_job_now_rejects_unknown_and_foreign_jobs() {
+        let scheduler = CronScheduler::new();
+        let id = scheduler
+            .add_periodic_task("u1", "mine", "p", "m", "0 0 9 * * *")
+            .await
+            .unwrap();
+
+        let mut rx = scheduler.subscribe();
+
+        // Unknown job id
+        assert!(scheduler.trigger_cron_job_now("u1", "nope").await.is_err());
+        // Another user's job is indistinguishable from a missing one
+        assert!(scheduler.trigger_cron_job_now("u2", &id).await.is_err());
+
+        // No reminder may be broadcast for the rejected attempts.
+        assert!(rx.try_recv().is_err());
     }
 }

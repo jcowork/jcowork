@@ -88,10 +88,12 @@ pub(crate) struct CreateCronJobRequest {
     pub hour: Option<u32>,         // for daily/weekly/monthly/yearly: specific hour
     pub day: Option<u32>,          // for monthly/yearly: specific day (1-28)
     pub month: Option<u32>,        // for yearly: specific month (1-12)
-    pub days_of_week: Option<Vec<u32>>, // for weekly: list of days (0=Sun, 1=Mon, ..., 6=Sat)
+    pub days_of_week: Option<Vec<u32>>, // for weekly: list of days (0=Sun, 1=Mon, ..., 6=Sat; remapped to cron-crate numbering internally)
 }
 
 /// Convert frequency + time parameters to a 6-field cron expression (second minute hour dom month dow).
+/// The `days_of_week` input uses standard numbering (0=Sun..6=Sat) and is
+/// remapped to the `cron` crate's numbering (1=Sun..7=Sat) for the dow field.
 /// Returns Err if frequency is invalid.
 fn build_cron_expression(
     frequency: &str,
@@ -138,14 +140,16 @@ fn build_cron_expression(
             if dows.is_empty() {
                 return Err("days_of_week must not be empty for weekly".to_string());
             }
-            // Validate and sort days
+            // Validate and sort days (standard numbering: 0=Sun..6=Sat)
             let sorted_dows: Vec<u32> = dows.into_iter().collect::<std::collections::BTreeSet<_>>().into_iter().collect();
             for &dow in &sorted_dows {
                 if dow > 6 {
                     return Err(format!("Invalid day_of_week {} for weekly (must be 0-6)", dow));
                 }
             }
-            let dow_str = sorted_dows.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(",");
+            // Remap standard numbering to the cron crate's (1=Sun..7=Sat) so
+            // the schedule actually fires on the selected weekday.
+            let dow_str = sorted_dows.iter().map(|d| (d + 1).to_string()).collect::<Vec<_>>().join(",");
             Ok(format!("{} {} {} * * {}", sec, minute, hour, dow_str))
         }
         "monthly" => {
@@ -211,6 +215,77 @@ pub(crate) async fn create_cron_job(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+/// PUT /api/cron-jobs/{id} - update an existing periodic task.
+pub(crate) async fn update_cron_job(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    Json(req): Json<CreateCronJobRequest>,
+) -> impl IntoResponse {
+    // Ownership check: the job must belong to the requester.
+    let owned = state
+        .cron_scheduler
+        .list_cron_jobs(&auth_user.user_id)
+        .await
+        .iter()
+        .any(|j| j.id == id);
+    if !owned {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Cron job not found"})),
+        );
+    }
+
+    // Convert frequency + time to cron expression
+    let schedule_expr = match build_cron_expression(&req.frequency, req.second, req.minute, req.hour, req.day, req.month, req.days_of_week) {
+        Ok(expr) => expr,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": e})),
+            );
+        }
+    };
+
+    match state.cron_scheduler.update_periodic_task(&id, &req.name, &req.prompt, &req.model, &schedule_expr).await {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "id": id,
+                "schedule": schedule_expr,
+                "status": "updated",
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+/// POST /api/cron-jobs/{id}/run - execute a periodic task immediately.
+pub(crate) async fn run_cron_job_now(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.cron_scheduler.trigger_cron_job_now(&auth_user.user_id, &id).await {
+        Ok(job) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "id": job.id,
+                "name": job.name,
+                "schedule": job.schedule,
+                "status": "triggered",
+            })),
+        ),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": e.to_string()})),
         ),
     }
@@ -381,61 +456,64 @@ mod tests {
     }
 
     // --- Weekly tests (multi-select) ---
+    // Input days use standard numbering (0=Sun..6=Sat); output dow uses the
+    // cron crate's numbering (1=Sun..7=Sat), i.e. +1 on each day.
+
     #[test]
     fn test_weekly_default() {
-        // Default: Monday at 9:00
-        assert_eq!(build("weekly", None, None, None, None, None, None).unwrap(), "0 0 9 * * 1");
+        // Default: Monday at 9:00 -> crate 2
+        assert_eq!(build("weekly", None, None, None, None, None, None).unwrap(), "0 0 9 * * 2");
     }
 
     #[test]
     fn test_weekly_single_day_sunday() {
-        assert_eq!(build("weekly", None, Some(0), Some(10), None, None, Some(vec![0])).unwrap(), "0 0 10 * * 0");
+        assert_eq!(build("weekly", None, Some(0), Some(10), None, None, Some(vec![0])).unwrap(), "0 0 10 * * 1");
     }
 
     #[test]
     fn test_weekly_single_day_saturday() {
-        assert_eq!(build("weekly", None, Some(30), Some(14), None, None, Some(vec![6])).unwrap(), "0 30 14 * * 6");
+        assert_eq!(build("weekly", None, Some(30), Some(14), None, None, Some(vec![6])).unwrap(), "0 30 14 * * 7");
     }
 
     #[test]
     fn test_weekly_with_second() {
-        assert_eq!(build("weekly", Some(30), Some(0), Some(9), None, None, Some(vec![1])).unwrap(), "30 0 9 * * 1");
+        assert_eq!(build("weekly", Some(30), Some(0), Some(9), None, None, Some(vec![1])).unwrap(), "30 0 9 * * 2");
     }
 
     #[test]
     fn test_weekly_multiple_days() {
         // Mon, Wed, Fri
-        assert_eq!(build("weekly", None, Some(0), Some(9), None, None, Some(vec![1, 3, 5])).unwrap(), "0 0 9 * * 1,3,5");
+        assert_eq!(build("weekly", None, Some(0), Some(9), None, None, Some(vec![1, 3, 5])).unwrap(), "0 0 9 * * 2,4,6");
     }
 
     #[test]
     fn test_weekly_weekdays_equivalent() {
         // Mon-Fri (like old weekdays)
-        assert_eq!(build("weekly", None, Some(0), Some(9), None, None, Some(vec![1, 2, 3, 4, 5])).unwrap(), "0 0 9 * * 1,2,3,4,5");
+        assert_eq!(build("weekly", None, Some(0), Some(9), None, None, Some(vec![1, 2, 3, 4, 5])).unwrap(), "0 0 9 * * 2,3,4,5,6");
     }
 
     #[test]
     fn test_weekly_weekends_equivalent() {
         // Sat, Sun (like old weekends)
-        assert_eq!(build("weekly", None, Some(0), Some(10), None, None, Some(vec![0, 6])).unwrap(), "0 0 10 * * 0,6");
+        assert_eq!(build("weekly", None, Some(0), Some(10), None, None, Some(vec![0, 6])).unwrap(), "0 0 10 * * 1,7");
     }
 
     #[test]
     fn test_weekly_all_days() {
         // Every day
-        assert_eq!(build("weekly", None, Some(0), Some(9), None, None, Some(vec![0, 1, 2, 3, 4, 5, 6])).unwrap(), "0 0 9 * * 0,1,2,3,4,5,6");
+        assert_eq!(build("weekly", None, Some(0), Some(9), None, None, Some(vec![0, 1, 2, 3, 4, 5, 6])).unwrap(), "0 0 9 * * 1,2,3,4,5,6,7");
     }
 
     #[test]
     fn test_weekly_duplicate_days_deduped() {
         // Duplicates should be removed
-        assert_eq!(build("weekly", None, Some(0), Some(9), None, None, Some(vec![1, 1, 3, 3])).unwrap(), "0 0 9 * * 1,3");
+        assert_eq!(build("weekly", None, Some(0), Some(9), None, None, Some(vec![1, 1, 3, 3])).unwrap(), "0 0 9 * * 2,4");
     }
 
     #[test]
     fn test_weekly_unsorted_days_sorted() {
         // Days should be sorted
-        assert_eq!(build("weekly", None, Some(0), Some(9), None, None, Some(vec![5, 1, 3])).unwrap(), "0 0 9 * * 1,3,5");
+        assert_eq!(build("weekly", None, Some(0), Some(9), None, None, Some(vec![5, 1, 3])).unwrap(), "0 0 9 * * 2,4,6");
     }
 
     #[test]

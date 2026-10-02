@@ -363,6 +363,7 @@ mod tests {
             user_id: "test-user".to_string(),
             workspace_root: dir.join("data_dir").join("test-user").join("workspace").to_string_lossy().to_string(),
             mentioned_public_users: Vec::new(),
+            model: None,
         }
     }
 

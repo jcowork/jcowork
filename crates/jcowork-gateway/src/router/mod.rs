@@ -225,6 +225,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/cron-jobs", get(cron::list_cron_jobs))
         .route("/api/cron-jobs", post(cron::create_cron_job))
         .route("/api/cron-jobs/{id}", delete(cron::remove_cron_job))
+        .route("/api/cron-jobs/{id}", put(cron::update_cron_job))
+        .route("/api/cron-jobs/{id}/run", post(cron::run_cron_job_now))
         .route("/api/cron-jobs/{id}/results", get(cron::get_cron_job_results))
         .route("/api/cron-jobs/{id}/results", post(cron::store_cron_job_result))
         .route("/api/providers", get(providers::list_providers))

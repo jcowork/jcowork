@@ -30,6 +30,10 @@ pub struct ToolContext {
     /// tools that access other users' public data must verify their target
     /// is present in this list.
     pub mentioned_public_users: Vec<(String, String)>,
+    /// Model selected for the current conversation ("provider:model"), when
+    /// known. Tools that create background work (e.g. `cron_add`) use it as
+    /// the default model so the work runs on the same model as the chat.
+    pub model: Option<String>,
 }
 
 /// Truncate a string to at most `max_bytes` bytes without splitting a

@@ -39,7 +39,11 @@ export function formatFrequency(
   if (dom === '*' && mon === '*' && dow !== '*') {
     const dayNames = ['daySunday', 'dayMonday', 'dayTuesday', 'dayWednesday', 'dayThursday', 'dayFriday', 'daySaturday'];
     const days = dow.split(',').map(d => parseInt(d, 10));
-    const dayLabels = days.map(d => t(dayNames[d] || String(d)));
+    // Stored dow uses cron-crate numbering (1=Sun..7=Sat); map back to standard indices.
+    const dayLabels = days.map(d => {
+      const idx = d - 1;
+      return (idx >= 0 && idx < dayNames.length) ? t(dayNames[idx]) : String(d);
+    });
     return `${t('frequencyWeekly')} ${dayLabels.join('/')} ${timeStr}`;
   }
   
@@ -50,6 +54,97 @@ export function formatFrequency(
   
   // Monthly: sec minute hour dom * *
   return `${t('frequencyMonthly')} ${dom}${t('dayOfMonth')} ${timeStr}`;
+}
+
+/**
+ * Frequency + time parameters parsed back from a cron expression.
+ * Inverse shape of the values accepted by {@link buildCronExpression}.
+ */
+export interface ParsedCron {
+  frequency: 'hourly' | 'daily' | 'weekly' | 'monthly' | 'yearly';
+  second: number;
+  minute: number;
+  hour: number;
+  day: number;
+  month: number;
+  daysOfWeek: number[];
+}
+
+/**
+ * Parse a cron expression back into frequency + time parameters (for the
+ * edit form). Accepts the 6-field "sec min hour dom month dow" format used by
+ * this app plus an optional trailing year field; frequency detection mirrors
+ * {@link formatFrequency} so the form always shows what the list displays.
+ * Returns daily-09:00 defaults when the expression cannot be parsed.
+ */
+export function parseCronExpression(schedule: string): ParsedCron {
+  const defaults: ParsedCron = {
+    frequency: 'daily',
+    second: 0,
+    minute: 0,
+    hour: 9,
+    day: 1,
+    month: 1,
+    daysOfWeek: [1],
+  };
+
+  const parts = String(schedule || '').trim().split(/\s+/);
+  if (parts.length < 6) return defaults;
+
+  const [secRaw, minRaw, hrRaw, dom, mon, dow] = parts;
+  const num = (s: string, fallback: number) => {
+    const n = parseInt(s, 10);
+    return Number.isFinite(n) ? n : fallback;
+  };
+
+  const second = num(secRaw, 0);
+  const minute = num(minRaw, 0);
+  const hour = hrRaw === '*' ? 9 : num(hrRaw, 9);
+
+  // Hourly: sec minute hour=* dom=* mon=*
+  if (dom === '*' && mon === '*' && hrRaw === '*') {
+    return { ...defaults, frequency: 'hourly', second, minute };
+  }
+
+  // Weekly: sec minute hour * * dayOfWeek(s)
+  if (dom === '*' && mon === '*' && dow !== '*') {
+    // Stored dow uses cron-crate numbering (1=Sun..7=Sat); convert to
+    // standard indices (0=Sun..6=Sat) for the form's day picker.
+    const days = dow
+      .split(',')
+      .map((d) => parseInt(d, 10))
+      .filter((d) => Number.isFinite(d) && d >= 1 && d <= 7)
+      .map((d) => d - 1);
+    return {
+      ...defaults,
+      frequency: 'weekly',
+      second,
+      minute,
+      hour,
+      daysOfWeek: days.length > 0 ? [...new Set(days)].sort((a, b) => a - b) : [1],
+    };
+  }
+
+  // Daily: sec minute hour * * *
+  if (dom === '*' && mon === '*') {
+    return { ...defaults, frequency: 'daily', second, minute, hour };
+  }
+
+  // Yearly: sec minute hour dom month *
+  if (dom !== '*' && mon !== '*' && dow === '*') {
+    return {
+      ...defaults,
+      frequency: 'yearly',
+      second,
+      minute,
+      hour,
+      day: num(dom, 1),
+      month: num(mon, 1),
+    };
+  }
+
+  // Monthly: sec minute hour dom * *
+  return { ...defaults, frequency: 'monthly', second, minute, hour, day: num(dom, 1) };
 }
 
 /**

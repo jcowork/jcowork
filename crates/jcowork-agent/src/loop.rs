@@ -251,6 +251,7 @@ impl AgentLoop {
                 user_id: self.config.user_id.clone(),
                 workspace_root: self.config.workspace_root.clone(),
                 mentioned_public_users: Vec::new(),
+                model: Some(self.config.model.clone()),
             };
             for tc in &tool_calls {
                 let result = self

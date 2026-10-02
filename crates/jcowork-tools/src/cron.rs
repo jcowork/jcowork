@@ -149,7 +149,9 @@ impl Tool for CronAddTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'prompt' parameter"))?;
 
-        match self.scheduler.add_cron_job(&ctx.user_id, schedule, prompt).await {
+        // Inherit the model of the current conversation so the task runs on
+        // the same model the user is chatting with.
+        match self.scheduler.add_cron_job(&ctx.user_id, schedule, prompt, ctx.model.as_deref()).await {
             Ok(id) => {
                 let next = CronScheduler::next_fire_time(schedule)
                     .map(|t| t.to_rfc3339())

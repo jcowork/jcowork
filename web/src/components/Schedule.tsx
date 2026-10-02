@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useT } from '../i18n';
-import { formatFrequency, type TranslationFn } from '../utils/cron';
+import { formatFrequency, parseCronExpression, type TranslationFn } from '../utils/cron';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -52,13 +52,15 @@ interface ScheduleProps {
 
 type Frequency = 'hourly' | 'daily' | 'weekly' | 'monthly' | 'yearly';
 
-export default function Schedule({ userId: _userId, token }: ScheduleProps) {
+export default function Schedule({ userId, token }: ScheduleProps) {
   const t = useT();
   const [reminders, setReminders] = useState<Reminder[]>([]);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
+  const [editingJobId, setEditingJobId] = useState<string | null>(null);
   const [providers, setProviders] = useState<ProviderEntry[]>([]);
+  const contentRef = useRef<HTMLDivElement>(null);
 
   // Form state
   const [taskName, setTaskName] = useState('');
@@ -78,6 +80,11 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
   const [expandedResults, setExpandedResults] = useState<Record<string, boolean>>({});
   const [taskResults, setTaskResults] = useState<Record<string, TaskResult[]>>({});
   const [selected, setSelected] = useState<{ jobId: string; resultId: string } | null>(null);
+
+  // "Run now": jobs whose manual run is being triggered/polled, and the job
+  // whose trigger request just failed (transient button feedback).
+  const [runningJobs, setRunningJobs] = useState<Set<string>>(new Set());
+  const [runFailedJobId, setRunFailedJobId] = useState<string | null>(null);
 
   const fetchReminders = useCallback(async () => {
     try {
@@ -132,6 +139,31 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
     }
   }, [token, fetchAllResults]);
 
+  // Read the model chosen on the chat page for this user
+  // (stored by Settings as JSON {provider, model} under "jcowork_model_<userId>").
+  const getChatModel = useCallback((): string => {
+    try {
+      const saved = localStorage.getItem(`jcowork_model_${userId}`);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed.provider && parsed.model) return `${parsed.provider}:${parsed.model}`;
+      }
+    } catch {}
+    return '';
+  }, [userId]);
+
+  const isModelAvailable = (model: string, entries: ProviderEntry[]) =>
+    !!model && entries.some(p => p.models?.some(m => `${p.id}:${m.id}` === model));
+
+  // Pick the default model for the form: the chat-selected model when it is
+  // available, otherwise the first available model.
+  const resolveDefaultModel = useCallback((entries: ProviderEntry[]): string => {
+    const chatModel = getChatModel();
+    if (isModelAvailable(chatModel, entries)) return chatModel;
+    const first = entries.find(p => p.models?.length > 0);
+    return first ? `${first.id}:${first.models[0].id}` : '';
+  }, [getChatModel]);
+
   const fetchProviders = useCallback(async () => {
     try {
       const res = await fetch('/api/providers/entries', {
@@ -139,19 +171,16 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
       });
       if (res.ok) {
         const data = await res.json();
-        setProviders(data.entries || []);
-        // Auto-select first model if none selected
-        if (!taskModel && data.entries?.length > 0) {
-          const firstProvider = data.entries[0];
-          if (firstProvider.models?.length > 0) {
-            setTaskModel(`${firstProvider.id}:${firstProvider.models[0].id}`);
-          }
-        }
+        const entries: ProviderEntry[] = data.entries || [];
+        setProviders(entries);
+        // Auto-select a model if none selected: the chat-selected model when
+        // available, otherwise the first available model.
+        setTaskModel(prev => prev || resolveDefaultModel(entries));
       }
     } catch (err) {
       console.error('Failed to fetch providers:', err);
     }
-  }, [token]);
+  }, [token, resolveDefaultModel]);
 
   useEffect(() => {
     Promise.all([fetchReminders(), fetchCronJobs(), fetchProviders()]).finally(() => setLoading(false));
@@ -188,13 +217,101 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
     }
   };
 
+  // Execute a periodic task immediately ("Run now"). After triggering, poll
+  // for the new execution record so the result shows up without waiting for
+  // the 30s background refresh.
+  const runCronJobNow = async (job: CronJob) => {
+    if (runningJobs.has(job.id)) return;
+    setRunFailedJobId(prev => (prev === job.id ? null : prev));
+    setRunningJobs(prev => new Set(prev).add(job.id));
+    try {
+      const res = await fetch(`/api/cron-jobs/${job.id}/run`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // The executor runs the task in the background; poll for its record.
+      const baseline = (taskResults[job.id] || [])[0]?.id ?? null;
+      const deadline = Date.now() + 180000; // up to 3 minutes
+      while (Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        const rr = await fetch(`/api/cron-jobs/${job.id}/results`, {
+          headers: { 'Authorization': `Bearer ${token}` },
+        });
+        if (!rr.ok) continue;
+        const results: TaskResult[] = await rr.json();
+        const latest = results[0]?.id ?? null;
+        if (latest && latest !== baseline) {
+          setTaskResults(prev => ({ ...prev, [job.id]: results }));
+          setExpandedResults(prev => ({ ...prev, [job.id]: true }));
+          setSelected({ jobId: job.id, resultId: results[0].id });
+          break;
+        }
+      }
+      fetchCronJobs(); // refresh last_run once the run has been accepted
+    } catch (err) {
+      console.error('Failed to run cron job:', err);
+      setRunFailedJobId(job.id);
+      setTimeout(() => setRunFailedJobId(prev => (prev === job.id ? null : prev)), 3000);
+    } finally {
+      setRunningJobs(prev => {
+        const next = new Set(prev);
+        next.delete(job.id);
+        return next;
+      });
+    }
+  };
+
+  // Reset all form fields to defaults.
+  const resetForm = () => {
+    setTaskName('');
+    setTaskPrompt('');
+    setFrequency('daily');
+    setSecond(0);
+    setMinute(0);
+    setHour(9);
+    setDay(1);
+    setMonth(1);
+    setDaysOfWeek([1]);
+  };
+
+  // Open the form in "create" mode.
+  const openCreateForm = () => {
+    setEditingJobId(null);
+    resetForm();
+    setTaskModel(resolveDefaultModel(providers));
+    setSubmitStatus('idle');
+    setShowForm(true);
+  };
+
+  // Open the form in "edit" mode, pre-filled from the existing job.
+  const startEditJob = (job: CronJob) => {
+    const parsed = parseCronExpression(job.schedule);
+    setEditingJobId(job.id);
+    setTaskName(job.name || '');
+    setTaskPrompt(job.prompt);
+    // Keep the job's own model when it is still available; otherwise fall
+    // back to the chat-selected model (jobs created by the AI have no model).
+    setTaskModel(job.model && isModelAvailable(job.model, providers) ? job.model : resolveDefaultModel(providers));
+    setFrequency(parsed.frequency);
+    setSecond(parsed.second);
+    setMinute(parsed.minute);
+    setHour(parsed.hour);
+    setDay(parsed.day);
+    setMonth(parsed.month);
+    setDaysOfWeek(parsed.daysOfWeek);
+    setSubmitStatus('idle');
+    setShowForm(true);
+    contentRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   const handleSubmitTask = async () => {
     if (!taskName.trim() || !taskPrompt.trim() || !taskModel) return;
     setSubmitting(true);
     setSubmitStatus('idle');
     try {
-      const res = await fetch('/api/cron-jobs', {
-        method: 'POST',
+      const res = await fetch(editingJobId ? `/api/cron-jobs/${editingJobId}` : '/api/cron-jobs', {
+        method: editingJobId ? 'PUT' : 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json',
@@ -220,6 +337,7 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
         setTaskName('');
         setTaskPrompt('');
         setShowForm(false);
+        setEditingJobId(null);
         fetchCronJobs();
         setTimeout(() => setSubmitStatus('idle'), 3000);
       } else {
@@ -311,7 +429,15 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
       }}>
         <span style={{ fontWeight: 600, fontSize: 16 }}>{t('schedule')}</span>
         <div style={{ display: 'flex', gap: 8 }}>
-          <button onClick={() => setShowForm(!showForm)} style={{
+          <button onClick={() => {
+            if (showForm) {
+              setShowForm(false);
+              setEditingJobId(null);
+              setSubmitStatus('idle');
+            } else {
+              openCreateForm();
+            }
+          }} style={{
             ...btnPrimary,
             background: showForm ? '#444' : '#1f6feb',
           }}>
@@ -327,15 +453,15 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
       </div>
 
       {/* Content */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
-        {/* ── Add New Task Form ── */}
+      <div ref={contentRef} style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
+        {/* ── Add / Edit Task Form ── */}
         {showForm && (
           <div style={{
             padding: 16, borderRadius: 8, border: '1px solid #1f6feb44',
             background: '#0d1117', marginBottom: 20,
           }}>
             <h4 style={{ fontSize: 14, marginBottom: 14, color: '#58a6ff', margin: '0 0 14px 0' }}>
-              {t('addNewTask')}
+              {editingJobId ? t('editTask') : t('addNewTask')}
             </h4>
 
             {/* Task Name */}
@@ -557,12 +683,16 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
             {/* Submit */}
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', alignItems: 'center' }}>
               {submitStatus === 'success' && (
-                <span style={{ color: '#3fb950', fontSize: 13 }}>{t('taskCreated')}</span>
+                <span style={{ color: '#3fb950', fontSize: 13 }}>
+                  {editingJobId ? t('taskUpdated') : t('taskCreated')}
+                </span>
               )}
               {submitStatus === 'error' && (
-                <span style={{ color: '#f87171', fontSize: 13 }}>{t('createFailed')}</span>
+                <span style={{ color: '#f87171', fontSize: 13 }}>
+                  {editingJobId ? t('updateFailed') : t('createFailed')}
+                </span>
               )}
-              <button onClick={() => { setShowForm(false); setSubmitStatus('idle'); }} style={btnSecondary}>
+              <button onClick={() => { setShowForm(false); setEditingJobId(null); setSubmitStatus('idle'); }} style={btnSecondary}>
                 {t('cancel')}
               </button>
               <button
@@ -574,7 +704,9 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
                   cursor: (submitting || !taskName.trim() || !taskPrompt.trim() || !taskModel) ? 'not-allowed' : 'pointer',
                 }}
               >
-                {submitting ? t('creating') : t('createTask')}
+                {editingJobId
+                  ? (submitting ? t('saving') : t('saveChanges'))
+                  : (submitting ? t('creating') : t('createTask'))}
               </button>
             </div>
           </div>
@@ -605,7 +737,8 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
                 const isExpanded = !!expandedResults[job.id];
                 return (
                 <div key={job.id} style={{
-                  borderRadius: 8, background: '#2a2a2a', border: '1px solid #444',
+                  borderRadius: 8, background: '#2a2a2a',
+                  border: editingJobId === job.id ? '1px solid #1f6feb' : '1px solid #444',
                   overflow: 'hidden',
                 }}>
                   {/* Task header */}
@@ -654,6 +787,26 @@ export default function Schedule({ userId: _userId, token }: ScheduleProps) {
                       )}
                     </div>
                     <div style={{ display: 'flex', gap: 6, marginLeft: 12, flexShrink: 0 }}>
+                      <button
+                        onClick={() => runCronJobNow(job)}
+                        disabled={runningJobs.has(job.id)}
+                        style={{
+                          padding: '4px 10px', borderRadius: 4, border: '1px solid #555',
+                          background: 'transparent',
+                          color: runFailedJobId === job.id ? '#e57373' : runningJobs.has(job.id) ? '#888' : '#81c784',
+                          cursor: runningJobs.has(job.id) ? 'default' : 'pointer', fontSize: 12,
+                          whiteSpace: 'nowrap',
+                        }}>
+                        {runningJobs.has(job.id) ? t('runningNow') : runFailedJobId === job.id ? t('runFailed') : t('runNow')}
+                      </button>
+                      <button onClick={() => startEditJob(job)} style={{
+                        padding: '4px 10px', borderRadius: 4,
+                        border: editingJobId === job.id ? '1px solid #1f6feb' : '1px solid #555',
+                        background: editingJobId === job.id ? '#1f6feb22' : 'transparent',
+                        color: '#64b5f6', cursor: 'pointer', fontSize: 12,
+                      }}>
+                        {t('edit')}
+                      </button>
                       <button onClick={() => removeCronJob(job.id)} style={{
                         padding: '4px 10px', borderRadius: 4, border: '1px solid #555',
                         background: 'transparent', color: '#e57373', cursor: 'pointer', fontSize: 12,

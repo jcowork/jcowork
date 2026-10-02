@@ -379,6 +379,7 @@ mod tests {
                 .to_string_lossy()
                 .to_string(),
             mentioned_public_users: vec![("owner-user".to_string(), "alice".to_string())],
+            model: None,
         }
     }
 

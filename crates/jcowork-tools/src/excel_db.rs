@@ -570,6 +570,7 @@ mod tests {
                 .to_string_lossy()
                 .to_string(),
             mentioned_public_users: Vec::new(),
+            model: None,
         }
     }
 
