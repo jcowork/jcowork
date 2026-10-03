@@ -232,7 +232,7 @@ export default function Schedule({ userId, token }: ScheduleProps) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       // The executor runs the task in the background; poll for its record.
       const baseline = (taskResults[job.id] || [])[0]?.id ?? null;
-      const deadline = Date.now() + 180000; // up to 3 minutes
+      const deadline = Date.now() + 3600000; // up to 60 minutes
       while (Date.now() < deadline) {
         await new Promise(resolve => setTimeout(resolve, 5000));
         const rr = await fetch(`/api/cron-jobs/${job.id}/results`, {
@@ -352,7 +352,13 @@ export default function Schedule({ userId, token }: ScheduleProps) {
 
   const formatTime = (isoStr: string) => {
     try {
-      return new Date(isoStr).toLocaleString('zh-CN', {
+      // Naive UTC timestamps (e.g. cron job last_run "2026-10-03 02:23:43")
+      // carry no timezone suffix; mark them as UTC so they render in local
+      // time consistently with RFC3339 values (executed_at, fire_at).
+      const s = /[Zz]$|[+-]\d{2}:\d{2}$/.test(isoStr)
+        ? isoStr
+        : isoStr.replace(' ', 'T') + 'Z';
+      return new Date(s).toLocaleString('zh-CN', {
         month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
       });
     } catch { return isoStr; }

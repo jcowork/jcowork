@@ -19,11 +19,53 @@ use jcowork_storage::UserStore;
 use jcowork_tools::base::ToolContext;
 use jcowork_tools::registry::ToolRegistry;
 
+/// Maximum characters kept for a single tool argument excerpt in the trace.
+const TRACE_ARG_MAX: usize = 240;
+/// Maximum characters kept for a single tool result excerpt in the trace.
+const TRACE_RESULT_MAX: usize = 320;
+/// Maximum characters kept for an assistant text excerpt in the trace.
+const TRACE_TEXT_MAX: usize = 500;
+/// Overall cap for the rendered trace appended to a failed result.
+const TRACE_TOTAL_MAX: usize = 60_000;
+
+/// Flatten whitespace and truncate to `max` chars on a char boundary.
+fn excerpt(s: &str, max: usize) -> String {
+    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > max {
+        let cut: String = flat.chars().take(max).collect();
+        format!("{}…", cut)
+    } else {
+        flat
+    }
+}
+
+/// A tool call that has started but not finished yet.
+struct PendingTool {
+    name: String,
+    args: String,
+    started: std::time::Instant,
+}
+
 /// A logging output sink that captures the final response and errors.
 /// Used by the background executor where there is no WebSocket client.
+///
+/// It also records a markdown turn-by-turn trace (assistant text snippets,
+/// tool calls with arguments/results, errors). The trace is appended to the
+/// stored output when a run fails, so the reason can be judged from the
+/// execution record alone.
 struct LogSink {
     response: String,
     error: Option<String>,
+    /// Rendered trace of all completed turns.
+    trace: String,
+    /// Current turn number (0 = no turn started yet).
+    turn: usize,
+    /// Assistant text streamed during the current turn.
+    turn_text: String,
+    /// Tool/error lines of the current turn, in event order.
+    turn_lines: Vec<String>,
+    /// Tool calls that started but have not finished yet.
+    pending_tools: Vec<PendingTool>,
 }
 
 impl LogSink {
@@ -31,19 +73,95 @@ impl LogSink {
         Self {
             response: String::new(),
             error: None,
+            trace: String::new(),
+            turn: 0,
+            turn_text: String::new(),
+            turn_lines: Vec::new(),
+            pending_tools: Vec::new(),
         }
+    }
+
+    /// Render the current turn (if any) into the trace buffer.
+    fn flush_turn(&mut self) {
+        if self.turn > 0 {
+            let mut body = String::new();
+            if !self.turn_text.trim().is_empty() {
+                body.push_str(&format!("text: {}\n", excerpt(&self.turn_text, TRACE_TEXT_MAX)));
+            }
+            for line in self.turn_lines.drain(..) {
+                body.push_str(&line);
+                body.push('\n');
+            }
+            for pending in self.pending_tools.drain(..) {
+                body.push_str(&format!(
+                    "- **{}** args: {} (no result recorded)\n",
+                    pending.name,
+                    excerpt(&pending.args, TRACE_ARG_MAX)
+                ));
+            }
+            if !body.is_empty() {
+                self.trace.push_str(&format!("\n**Turn {}**\n{}", self.turn, body));
+            }
+        }
+        self.turn_text.clear();
+        self.turn_lines.clear();
+        self.pending_tools.clear();
+    }
+
+    /// Build the markdown trace of the whole run. Empty when nothing was
+    /// recorded.
+    fn render_trace(&mut self) -> String {
+        self.flush_turn();
+        if self.trace.trim().is_empty() {
+            return String::new();
+        }
+        let mut out = String::from("\n\n---\n\n**Turn-by-turn trace**\n");
+        out.push_str(&self.trace);
+        if out.chars().count() > TRACE_TOTAL_MAX {
+            let cut: String = out.chars().take(TRACE_TOTAL_MAX).collect();
+            out = format!("{}\n\n(trace truncated)", cut);
+        }
+        out
     }
 }
 
 impl AgentOutputSink for LogSink {
     fn on_text_delta<'b>(&'b mut self, text: &'b str) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'b>> {
         self.response.push_str(text);
+        self.turn_text.push_str(text);
         Box::pin(async {})
     }
-    fn on_tool_call_start<'b>(&'b mut self, _name: &'b str, _call_id: &'b str, _arguments: &'b str) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'b>> {
+    fn on_tool_call_start<'b>(&'b mut self, name: &'b str, _call_id: &'b str, arguments: &'b str) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'b>> {
+        self.pending_tools.push(PendingTool {
+            name: name.to_string(),
+            args: arguments.to_string(),
+            started: std::time::Instant::now(),
+        });
         Box::pin(async {})
     }
-    fn on_tool_call_end<'b>(&'b mut self, _name: &'b str, _result: &'b str) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'b>> {
+    fn on_tool_call_end<'b>(&'b mut self, name: &'b str, result: &'b str) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'b>> {
+        let pending = match self.pending_tools.iter().position(|p| p.name == name) {
+            Some(pos) => Some(self.pending_tools.remove(pos)),
+            None if !self.pending_tools.is_empty() => Some(self.pending_tools.remove(0)),
+            None => None,
+        };
+        let (args, secs) = match pending {
+            Some(p) => (p.args, p.started.elapsed().as_secs_f64()),
+            None => (String::new(), 0.0),
+        };
+        let args_shown = if args.is_empty() {
+            "(unknown)".to_string()
+        } else {
+            excerpt(&args, TRACE_ARG_MAX)
+        };
+        self.turn_lines.push(format!(
+            "- **{}** args: {} → {:.1}s, {} chars: {}",
+            name,
+            args_shown,
+            secs,
+            result.chars().count(),
+            excerpt(result, TRACE_RESULT_MAX)
+        ));
         Box::pin(async {})
     }
     fn on_done<'b>(&'b mut self, _usage: Option<(i32, i32, i32)>) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'b>> {
@@ -51,9 +169,17 @@ impl AgentOutputSink for LogSink {
     }
     fn on_error<'b>(&'b mut self, message: &'b str) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'b>> {
         self.error = Some(message.to_string());
+        self.turn_lines.push(format!("- ERROR: {}", excerpt(message, TRACE_RESULT_MAX)));
         Box::pin(async {})
     }
-    fn on_status<'b>(&'b mut self, _message: &'b str) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'b>> {
+    fn on_status<'b>(&'b mut self, message: &'b str) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'b>> {
+        // The agent loop emits one status per turn ("🤖 ..." / "🔄 ... 第N轮")
+        // plus a "🔧 正在执行工具..." notice inside a turn. Everything except
+        // the tool notice marks the start of a new turn.
+        if !message.starts_with('🔧') {
+            self.flush_turn();
+            self.turn += 1;
+        }
         Box::pin(async {})
     }
 }
@@ -289,7 +415,7 @@ async fn execute_cron_task(
         tool_registry: tool_registry.clone(),
         tool_ctx: &tool_ctx,
         pre_context: None,
-        max_turns: 10,
+        max_turns: 60,
         llm_timeout_secs: 120,
         stream_timeout_secs: 120,
         tool_timeout_secs: 60,
@@ -301,9 +427,10 @@ async fn execute_cron_task(
     .await;
 
     // Determine output and status
-    let (output, status) = if result.completed && !result.response.is_empty() {
+    let sink_error = sink.error.take();
+    let (mut output, status) = if result.completed && !result.response.is_empty() {
         (result.response, "success")
-    } else if let Some(err) = sink.error {
+    } else if let Some(err) = sink_error {
         (format!("{}\n\n(LLM did not produce a response)", err), "error")
     } else if !result.completed {
         // The loop used all its turns while still calling tools — the model
@@ -321,6 +448,12 @@ async fn execute_cron_task(
     } else {
         (result.response, "error")
     };
+
+    // On failure, append the per-turn trace so the stored record alone is
+    // enough to judge where the run went wrong.
+    if status != "success" {
+        output.push_str(&sink.render_trace());
+    }
 
     tracing::info!(
         cron_job_id = %cron_job_id,
@@ -376,4 +509,52 @@ pub fn spawn_trash_purger(
             tokio::time::sleep(interval).await;
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::executor::block_on;
+
+    #[test]
+    fn trace_records_turns_tools_and_errors() {
+        let mut sink = LogSink::new();
+        // Turn 1: status → text → tool start → tool notice → tool end.
+        block_on(sink.on_status("🤖 正在调用 deepseek ..."));
+        block_on(sink.on_text_delta("I will check the file."));
+        block_on(sink.on_tool_call_start("file_read", "c1", "{\"path\": \"a.html\"}"));
+        block_on(sink.on_status("🔧 正在执行工具: file_read"));
+        block_on(sink.on_tool_call_end("file_read", "1234 chars of content"));
+        // Turn 2: continues, then errors.
+        block_on(sink.on_status("🔄 工具调用完成，继续思考 (第2轮)..."));
+        block_on(sink.on_tool_call_start("web_search", "c2", "{\"query\": \"latest ai models\"}"));
+        block_on(sink.on_tool_call_end("web_search", "search results..."));
+        block_on(sink.on_error("LLM error: something bad"));
+
+        let trace = sink.render_trace();
+        assert!(trace.contains("**Turn 1**"), "trace: {}", trace);
+        assert!(trace.contains("**Turn 2**"), "trace: {}", trace);
+        assert!(trace.contains("file_read"));
+        assert!(trace.contains("web_search"));
+        assert!(trace.contains("ERROR: LLM error: something bad"));
+        assert!(trace.contains("I will check the file."));
+        assert_eq!(sink.response, "I will check the file.");
+    }
+
+    #[test]
+    fn trace_truncates_long_excerpts() {
+        let mut sink = LogSink::new();
+        block_on(sink.on_status("🤖 ..."));
+        block_on(sink.on_tool_call_start("shell", "c1", "{\"command\": \"echo\"}"));
+        block_on(sink.on_tool_call_end("shell", &"x".repeat(1000)));
+        let trace = sink.render_trace();
+        assert!(trace.contains("1000 chars"), "trace: {}", trace);
+        assert!(trace.contains('…'));
+    }
+
+    #[test]
+    fn trace_is_empty_without_events() {
+        let mut sink = LogSink::new();
+        assert_eq!(sink.render_trace(), "");
+    }
 }
