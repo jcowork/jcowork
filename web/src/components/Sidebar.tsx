@@ -69,7 +69,7 @@ export default function Sidebar({ accounts, activeUserId, streamingAccounts, unr
     { key: 'skills', label: t('navSkillsConnectors') },
     // Super users get an extra entry for user management
     ...(isAdmin ? [{ key: 'admin', label: t('userManagement') }] : []),
-    { key: 'settings', label: t('settings') },
+    { key: 'settings', label: t('navSettings') },
   ];
 
   const navHandlers: Record<string, () => void> = { chat: onChat, documents: onDocuments, schedule: onSchedule, memory: onMemory, skills: onSkills, settings: onSettings, admin: onAdminUsers ?? (() => {}) };
