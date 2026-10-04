@@ -213,6 +213,14 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/skills", get(skills::list_skills))
         .route("/api/skills", post(skills::create_skill))
         .route("/api/skills/all", get(skills::list_all_skills))
+        // Import accepts pasted SKILL.md content, so allow a larger body than
+        // the axum default (2 MB).
+        .route(
+            "/api/skills/import",
+            post(skills::import_skill)
+                .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
+        .route("/api/skills/{id}", delete(skills::delete_skill))
         .route("/api/skills/{id}/toggle", put(skills::toggle_skill))
         .route("/api/skills/{id}/config", get(skills::get_skill_config))
         .route("/api/skills/{id}/config", put(skills::save_skill_config))

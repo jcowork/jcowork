@@ -944,7 +944,27 @@ pub async fn build_skill_prompt(
 
     if let Ok(user_skills) = skill_manager.list(user_id).await {
         for s in user_skills {
-            if enabled_ids.contains(&s.id) {
+            if !enabled_ids.contains(&s.id) {
+                continue;
+            }
+            // Third-party skills keep their instructions in a workspace file
+            // and are far too large to inject wholesale. Give the agent a
+            // compact index plus on-demand reading instructions instead.
+            if let Some(source_path) = &s.source_path {
+                let desc = s.description.as_deref().unwrap_or("");
+                let size_kb = s.content.len() / 1024;
+                blocks.push(format!(
+                    "## Skill: {} (third-party)\n\n{}\n\n\
+                     The full instructions for this skill are NOT included here. \
+                     They live in the workspace file `{}` (~{} KB). \
+                     Before using this skill, locate the relevant section with \
+                     `file_search` (search section markers, endpoint names or key terms), \
+                     then read it in slices with `file_read` using `offset`/`limit` \
+                     (the footer of a truncated read tells you the next offset). \
+                     Never try to read the whole file at once.",
+                    s.name, desc, source_path, size_kb
+                ));
+            } else {
                 blocks.push(s.content);
             }
         }

@@ -72,6 +72,8 @@ fn parse_skill_file(content: &str, path: &Path) -> Option<Skill> {
         content: body,
         conditions,
         version: 1,
+        origin: Skill::ORIGIN_AGENT.to_string(),
+        source_path: None,
         created_at: now.clone(),
         updated_at: now,
     })

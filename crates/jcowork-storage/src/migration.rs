@@ -88,6 +88,8 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
             content TEXT NOT NULL,
             conditions TEXT,
             version INTEGER DEFAULT 1,
+            origin TEXT NOT NULL DEFAULT 'agent',
+            source_path TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now')),
             UNIQUE(user_id, name)
@@ -96,6 +98,20 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+
+    // Upgrade path for pre-existing databases missing the newer columns
+    for col in [
+        "origin TEXT NOT NULL DEFAULT 'agent'",
+        "source_path TEXT",
+    ] {
+        if let Err(e) = sqlx::query(&format!("ALTER TABLE skills ADD COLUMN {}", col))
+            .execute(pool)
+            .await
+        {
+            // Column already exists — safe to ignore
+            tracing::debug!(error = %e, column = %col, "skills column migration skipped");
+        }
+    }
 
     // Cron jobs table
     sqlx::query(

@@ -9,15 +9,24 @@ use crate::base::{Tool, ToolContext};
 /// File read tool.
 pub struct FileReadTool;
 
+/// Maximum bytes returned by a single `file_read` call. Larger files must be
+/// read in slices via `offset`/`limit` so a huge file (e.g. a big skill
+/// document) cannot flood the model context.
+const READ_MAX_BYTES: usize = 64 * 1024;
+
 #[async_trait]
 impl Tool for FileReadTool {
     fn name(&self) -> &str { "file_read" }
-    fn description(&self) -> &str { "Read the contents of a file in the user's workspace." }
+    fn description(&self) -> &str {
+        "Read the contents of a file in the user's workspace. Large files are read in slices: pass offset (1-based start line) and limit (max lines); the footer of a truncated result tells you the next offset. Use file_search first to locate the line of interest in big files."
+    }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Relative path to the file within workspace" }
+                "path": { "type": "string", "description": "Relative path to the file within workspace" },
+                "offset": { "type": "integer", "description": "1-based line number to start reading from (default 1)" },
+                "limit": { "type": "integer", "description": "Maximum number of lines to return (default: until the output byte cap)" }
             },
             "required": ["path"]
         })
@@ -25,8 +34,61 @@ impl Tool for FileReadTool {
     async fn execute(&self, args: &str, ctx: &ToolContext) -> Result<String> {
         let parsed: serde_json::Value = serde_json::from_str(args)?;
         let path = parsed["path"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
+        let offset = parsed["offset"].as_u64().unwrap_or(1).max(1) as usize;
+        let limit = parsed["limit"].as_u64().map(|l| l.max(1) as usize);
+
         let store = FileStore::new(&ctx.workspace_root);
-        store.read_file(path).await
+        let content = store.read_file(path).await?;
+
+        // Fast path: whole small file, no slicing requested — return verbatim.
+        if offset == 1 && limit.is_none() && content.len() <= READ_MAX_BYTES {
+            return Ok(content);
+        }
+
+        let lines: Vec<&str> = content.lines().collect();
+        let total_lines = lines.len();
+        if offset > total_lines {
+            return Ok(format!(
+                "[empty: offset {} is past the end of {} ({} lines total)]",
+                offset, path, total_lines
+            ));
+        }
+
+        let start = offset - 1; // 0-based
+        let requested_end = match limit {
+            Some(l) => (start + l).min(total_lines),
+            None => total_lines,
+        };
+
+        // Fill the slice until the byte budget is exhausted.
+        let mut bytes = 0usize;
+        let mut end = start;
+        for i in start..requested_end {
+            let line_bytes = lines[i].len() + 1;
+            if bytes + line_bytes > READ_MAX_BYTES {
+                break;
+            }
+            bytes += line_bytes;
+            end = i + 1;
+        }
+        // Always return at least one line, even when it alone exceeds the cap.
+        if end == start && start < requested_end {
+            end = start + 1;
+        }
+
+        let mut out = lines[start..end].join("\n");
+        if end < total_lines {
+            out.push_str(&format!(
+                "\n\n[{} has {} lines; showing lines {}-{}. Continue with file_read offset={} limit={} to read more.]",
+                path,
+                total_lines,
+                start + 1,
+                end,
+                end + 1,
+                limit.unwrap_or(200)
+            ));
+        }
+        Ok(out)
     }
 }
 
@@ -420,6 +482,53 @@ mod tests {
         let result = FileInfoTool.execute(r#"{"path":"test.txt"}"#, &ctx).await.unwrap();
         assert!(result.contains("type: file"));
         assert!(result.contains("size: 5 bytes"));
+    }
+
+    #[tokio::test]
+    async fn test_file_read_offset_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = make_ctx(dir.path());
+
+        let body: String = (1..=500).map(|i| format!("line {}\n", i)).collect();
+        FileWriteTool.execute(&serde_json::json!({"path": "big.txt", "content": body}).to_string(), &ctx)
+            .await
+            .unwrap();
+
+        // offset + limit slice
+        let result = FileReadTool
+            .execute(r#"{"path":"big.txt","offset":100,"limit":3}"#, &ctx)
+            .await
+            .unwrap();
+        assert!(result.starts_with("line 100\nline 101\nline 102"));
+        assert!(result.contains("Continue with file_read offset=103"));
+
+        // offset past EOF
+        let result = FileReadTool
+            .execute(r#"{"path":"big.txt","offset":9999}"#, &ctx)
+            .await
+            .unwrap();
+        assert!(result.contains("past the end"));
+
+        // Small file: unchanged behaviour (verbatim, no footer)
+        FileWriteTool.execute(r#"{"path":"small.txt","content":"a\nb\n"}"#, &ctx).await.unwrap();
+        let result = FileReadTool.execute(r#"{"path":"small.txt"}"#, &ctx).await.unwrap();
+        assert_eq!(result, "a\nb\n");
+    }
+
+    #[tokio::test]
+    async fn test_file_read_caps_large_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = make_ctx(dir.path());
+
+        // ~200 KB across many lines: default read must cap at READ_MAX_BYTES
+        let body: String = (1..=20000).map(|i| format!("payload line {:05}\n", i)).collect();
+        FileWriteTool.execute(&serde_json::json!({"path": "huge.txt", "content": body}).to_string(), &ctx)
+            .await
+            .unwrap();
+
+        let result = FileReadTool.execute(r#"{"path":"huge.txt"}"#, &ctx).await.unwrap();
+        assert!(result.len() <= READ_MAX_BYTES + 512, "output should be capped, got {}", result.len());
+        assert!(result.contains("[huge.txt has 20000 lines; showing lines 1-"));
     }
 
     #[tokio::test]
