@@ -337,7 +337,20 @@ mod tests {
             "env var candidate should win when the script exists there"
         );
 
-        // 2. Env var removed → workspace_root/scripts/web_search.py is used
+        // 2. JCWORK_SCRIPTS_DIR set but no script there → must fall through to
+        //    the workspace candidate instead of returning the missing env path.
+        let bogus_dir = tempdir().unwrap();
+        unsafe { std::env::set_var("JCWORK_SCRIPTS_DIR", bogus_dir.path()); }
+        let ws = tempdir().unwrap();
+        let ws_script = create_script(ws.path());
+        let got = resolve_script_path(&ws.path().to_string_lossy());
+        assert_eq!(
+            std::path::Path::new(&got).canonicalize().unwrap(),
+            ws_script.canonicalize().unwrap(),
+            "missing env-var script must fall through to workspace candidate"
+        );
+
+        // 3. Env var removed → workspace_root/scripts/web_search.py is used
         unsafe { std::env::remove_var("JCWORK_SCRIPTS_DIR"); }
         let ws = tempdir().unwrap();
         let ws_script = create_script(ws.path());
@@ -348,29 +361,12 @@ mod tests {
             "workspace candidate should be used when env var is unset"
         );
 
-        // 3. No candidate in env/workspace → still returns a path (no panic).
+        // 4. No candidate in env/workspace → still returns a path (no panic).
         //    In dev builds the exe-dir grandparent (project scripts/) may be
         //    found, so only assert a non-empty result here.
         let empty_ws = tempdir().unwrap();
         let got = resolve_script_path(&empty_ws.path().to_string_lossy());
         assert!(!got.is_empty(), "must always return a candidate path");
-    }
-
-    #[test]
-    fn test_resolve_script_path_env_var_without_script_falls_through() {
-        // JCWORK_SCRIPTS_DIR set but no script there → must fall through to
-        // the workspace candidate instead of returning the missing env path.
-        let bogus_dir = tempdir().unwrap();
-        unsafe { std::env::set_var("JCWORK_SCRIPTS_DIR", bogus_dir.path()); }
-        let ws = tempdir().unwrap();
-        let ws_script = create_script(ws.path());
-        let got = resolve_script_path(&ws.path().to_string_lossy());
-        unsafe { std::env::remove_var("JCWORK_SCRIPTS_DIR"); }
-        assert_eq!(
-            std::path::Path::new(&got).canonicalize().unwrap(),
-            ws_script.canonicalize().unwrap(),
-            "missing env-var script must fall through to workspace candidate"
-        );
     }
 
     // ── Subprocess error extraction ─────────────────────────────────────
