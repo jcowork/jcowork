@@ -113,9 +113,9 @@ jcowork-server
 | Feishu | `jcowork-feishu` | Feishu/Lark bot: event parsing, API client, per-user config |
 | Logging | `jcowork-logs` | JSONL daily rotating logs for LLM and tool calls |
 
-## Desktop App (macOS / Windows)
+## Desktop App (macOS / Windows / Linux)
 
-A native desktop application is available for macOS and Windows, powered by [Tauri v2](https://tauri.app/). The desktop app bundles the entire backend + frontend into a single installable package — no Docker or Node.js required. A local Python environment is still needed for web search and document parsing (see [Setup Python Environment](#3-setup-python-environment-for-web-search--document-parsing)).
+A native desktop application is available for macOS, Windows, and Linux (Ubuntu), powered by [Tauri v2](https://tauri.app/). The desktop app bundles the entire backend + frontend into a single installable package — no Docker or Node.js required. A local Python environment is still needed for web search and document parsing (see [Setup Python Environment](#3-setup-python-environment-for-web-search--document-parsing)).
 
 **Download pre-built installers:**
 
@@ -144,6 +144,18 @@ A native desktop application is available for macOS and Windows, powered by [Tau
 
 **Build from source:**
 
+**Ubuntu / Linux system dependencies** (required before building):
+
+```bash
+sudo apt-get update && sudo apt-get install -y pkg-config \
+  libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+  librsvg2-dev libxdo-dev
+```
+
+- `pkg-config` — `openssl-sys` needs it to locate OpenSSL; without it the build fails early with `failed to run custom build command for openssl-sys`
+- `libwebkit2gtk-4.1-dev` + `libgtk-3-dev` — Tauri v2's Linux webview (WebKitGTK)
+- `libayatana-appindicator3-dev`, `librsvg2-dev`, `libxdo-dev` — tray icon, SVG, and input support
+
 ```bash
 # Prerequisites: Rust 1.85+, Node.js 20+, Python 3.12+ (installed in step 3)
 cargo install tauri-cli --version "^2"
@@ -160,6 +172,8 @@ cargo tauri build
 # Output:
 #   target/release/bundle/dmg/Jcowork_0.2.11_aarch64.dmg       (macOS)
 #   target/release/bundle/msi/Jcowork_0.2.11_x64_en-US.msi     (Windows)
+#   target/release/jcowork-desktop                             (Linux, default build)
+#   target/release/bundle/deb/Jcowork_0.2.12_amd64.deb         (Linux, with --bundles deb)
 
 # 3. Install the Python runtime environment (run once, required for web search,
 #    PDF parsing, and the Docling service)
@@ -168,6 +182,8 @@ bash scripts/setup-python.sh                                          # Linux / 
 ```
 
 > **Important:** Always run `npm run build` in `web/` before `cargo tauri build`. The Tauri bundler copies `web/dist/` into the app bundle — if the dist is stale or missing, the desktop app will show a blank screen.
+
+> **Note — Linux builds:** `tauri.conf.json` declares only macOS/Windows installer targets (`dmg`, `app`, `msi`, `nsis`), so a plain `cargo tauri build` on Ubuntu compiles the app and stops at the bare executable `target/release/jcowork-desktop` — no installer is produced. Launch it with `./target/release/jcowork-desktop` from the project root. To also produce an installable Debian package, run `cargo tauri build --bundles deb` (output: `target/release/bundle/deb/Jcowork_0.2.12_amd64.deb`).
 
 > **Note:** The desktop app requires at least one LLM API key configured in `.env`. The Docling PDF parsing service is optional and runs separately if available.
 >
@@ -1014,7 +1030,7 @@ Periodic Tasks is a UI-based scheduled LLM invocation feature. Users can create 
 | LLM client | reqwest + SSE streaming (5 providers) |
 | Concurrency | DashMap, mpsc channels |
 | Frontend | React + Vite + TypeScript |
-| Desktop | Tauri v2 (native macOS/Windows) |
+| Desktop | Tauri v2 (native macOS/Windows/Linux) |
 
 ## License
 

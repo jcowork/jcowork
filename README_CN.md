@@ -111,9 +111,9 @@ jcowork-server
 | Cron Scheduler | `jcowork-cron::scheduler` | 每用户定时任务，基于 `cron` crate |
 | Auth | `jcowork-gateway::auth` | JWT + Argon2（多用户认证） |
 
-## 桌面应用（macOS / Windows）
+## 桌面应用（macOS / Windows / Linux）
 
-基于 [Tauri v2](https://tauri.app/) 构建的原生桌面应用，将完整的后端 + 前端打包为单一可安装程序 — 无需 Docker 或 Node.js。网页搜索和文档解析仍需要本机 Python 环境（见[配置 Python 环境](#3-配置-python-环境用于网页搜索和-pdf-解析)）。
+基于 [Tauri v2](https://tauri.app/) 构建的原生桌面应用，支持 macOS、Windows 和 Linux（Ubuntu），将完整的后端 + 前端打包为单一可安装程序 — 无需 Docker 或 Node.js。网页搜索和文档解析仍需要本机 Python 环境（见[配置 Python 环境](#3-配置-python-环境用于网页搜索和-pdf-解析)）。
 
 **下载安装包：**
 
@@ -142,6 +142,18 @@ jcowork-server
 
 **从源码构建：**
 
+**Ubuntu / Linux 系统依赖**（构建前必须安装）：
+
+```bash
+sudo apt-get update && sudo apt-get install -y pkg-config \
+  libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+  librsvg2-dev libxdo-dev
+```
+
+- `pkg-config` — `openssl-sys` 需要它来定位 OpenSSL；缺失时构建会提前失败并报 `failed to run custom build command for openssl-sys`
+- `libwebkit2gtk-4.1-dev` + `libgtk-3-dev` — Tauri v2 Linux 端 WebView（WebKitGTK）依赖
+- `libayatana-appindicator3-dev`、`librsvg2-dev`、`libxdo-dev` — 托盘图标、SVG 与输入支持
+
 ```bash
 # 前置要求：Rust 1.85+、Node.js 20+、Python 3.12+（见第 3 步）
 cargo install tauri-cli --version "^2"
@@ -158,6 +170,8 @@ cargo tauri build
 # 输出：
 #   target/release/bundle/dmg/Jcowork_0.2.11_aarch64.dmg       (macOS)
 #   target/release/bundle/msi/Jcowork_0.2.11_x64_en-US.msi     (Windows)
+#   target/release/jcowork-desktop                             (Linux，默认构建)
+#   target/release/bundle/deb/Jcowork_0.2.12_amd64.deb         (Linux，使用 --bundles deb)
 
 # 3. 安装 Python 运行环境（首次使用前执行一次，联网搜索、PDF 解析、Docling 服务必需）
 bash scripts/setup-python.sh                                          # Linux / macOS
@@ -165,6 +179,8 @@ bash scripts/setup-python.sh                                          # Linux / 
 ```
 
 > **重要：** 执行 `cargo tauri build` 前务必先在 `web/` 目录下运行 `npm run build`。Tauri 会将 `web/dist/` 复制到应用包中 — 如果 dist 目录过期或缺失，桌面应用将显示白屏。
+
+> **注意 — Linux 构建：** `tauri.conf.json` 中声明的打包目标（`dmg`、`app`、`msi`、`nsis`）仅适用于 macOS/Windows，因此在 Ubuntu 上直接运行 `cargo tauri build` 只会编译出可执行文件 `target/release/jcowork-desktop`，不会生成安装包；在项目根目录用 `./target/release/jcowork-desktop` 启动即可。如需生成 Debian 安装包，请运行 `cargo tauri build --bundles deb`（输出：`target/release/bundle/deb/Jcowork_0.2.12_amd64.deb`）。
 
 > **注意：** 桌面应用需要在 `.env` 中配置至少一个 LLM API Key。Docling PDF 解析服务为可选，如可用会自动连接。
 >
@@ -1009,7 +1025,7 @@ Agent: ✅ 定时任务已创建！计划：0 9 * * * — 每天早上9:00提醒
 | LLM 客户端 | reqwest + SSE 流式（5 个提供者） |
 | 并发 | DashMap, mpsc channels |
 | 前端 | React + Vite + TypeScript |
-| 桌面应用 | Tauri v2（原生 macOS/Windows） |
+| 桌面应用 | Tauri v2（原生 macOS/Windows/Linux） |
 
 ## 许可证
 
