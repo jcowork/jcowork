@@ -895,7 +895,10 @@ pub async fn ws_handler(
                                 tool_registry: tool_registry_task,
                                 tool_ctx: &tool_ctx,
                                 pre_context: pre_context_msg.as_ref(),
-                                max_turns: 10,
+                                // Interactive chat budget. run_turn reserves the
+                                // final round for a tools-off summary, so a turn
+                                // always ends with a real conclusion.
+                                max_turns: 30,
                                 llm_timeout_secs: 60,
                                 stream_timeout_secs: 120,
                                 tool_timeout_secs: 30,

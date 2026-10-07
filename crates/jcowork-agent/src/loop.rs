@@ -389,8 +389,14 @@ pub async fn run_turn(opts: AgentTurnOptions<'_>) -> AgentTurnResult {
     for turn in 0..max_turns {
         turns_used = turn + 1;
 
+        // The last round is reserved for a tools-off summary: the LLM is
+        // called without tool schemas so it must answer with text from
+        // whatever was gathered, instead of the turn cutting off mid
+        // tool-use with no conclusion for the user.
+        let is_forced_final = turns_used == max_turns;
+
         // Build effective history: inject pre-context (reminders/cron) after system prompt
-        let effective_history = match opts.pre_context {
+        let mut effective_history = match opts.pre_context {
             Some(ctx) if opts.history.len() >= 1 => {
                 let mut h = opts.history.clone();
                 h.insert(1, ctx.clone());
@@ -398,6 +404,21 @@ pub async fn run_turn(opts: AgentTurnOptions<'_>) -> AgentTurnResult {
             }
             _ => opts.history.clone(),
         };
+        // Transient hint for the forced final round (not persisted to history).
+        if is_forced_final {
+            effective_history.push(ChatMessage {
+                role: "user".to_string(),
+                content: "[Context] The tool-call budget for this turn is exhausted. \
+                          Based on the information already gathered above, write your final \
+                          answer now. No further tool calls are possible. If some data could \
+                          not be obtained, state clearly what is missing."
+                    .to_string(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                images: None,
+            });
+        }
 
         let llm_start = std::time::Instant::now();
         let provider_name = opts.provider.name().to_string();
@@ -410,8 +431,12 @@ pub async fn run_turn(opts: AgentTurnOptions<'_>) -> AgentTurnResult {
                 .collect::<Vec<_>>(),
         );
 
-        // Send status for first turn or tool-follow-up
-        if turn == 0 {
+        // Send status for first turn, forced final round, or tool-follow-up
+        if is_forced_final {
+            opts.output
+                .on_status("📝 已用完全部工具调用轮次，正在基于已获取的信息生成最终回答…")
+                .await;
+        } else if turn == 0 {
             opts.output
                 .on_status(&format!("🤖 正在调用 {} ...", provider_name)).await;
         } else {
@@ -421,10 +446,12 @@ pub async fn run_turn(opts: AgentTurnOptions<'_>) -> AgentTurnResult {
             )).await;
         }
 
-        // Call LLM with timeout
+        // Call LLM with timeout. The forced final round is offered no tools,
+        // so the model cannot request further tool calls.
+        let call_tools: &[ToolDefinition] = if is_forced_final { &[] } else { opts.tools };
         let stream_result = tokio::time::timeout(
             std::time::Duration::from_secs(opts.llm_timeout_secs),
-            opts.provider.chat_stream(&effective_history, opts.tools),
+            opts.provider.chat_stream(&effective_history, call_tools),
         )
         .await;
 
@@ -571,6 +598,24 @@ pub async fn run_turn(opts: AgentTurnOptions<'_>) -> AgentTurnResult {
             final_response = assistant_content;
             opts.output.on_done(final_usage).await;
             completed = true;
+            break;
+        }
+
+        // Forced final round: no tool schemas were offered, so any tool call
+        // deltas are hallucinated — never dispatch them. Finish with the text
+        // we have (leave completed=false when the model produced none, so the
+        // transport can surface its fallback notice).
+        if is_forced_final {
+            if let Some(last) = opts.history.last_mut() {
+                // Drop dangling tool_calls: without matching tool results they
+                // would corrupt later provider requests.
+                last.tool_calls = None;
+            }
+            final_response = assistant_content;
+            completed = !final_response.is_empty();
+            if completed {
+                opts.output.on_done(final_usage).await;
+            }
             break;
         }
 
@@ -1349,5 +1394,253 @@ mod tests {
         let both = merge_context_msgs(Some(ctx_msg("[Context] A")), Some(ctx_msg("[Context] B")))
             .unwrap();
         assert_eq!(both.content, "[Context] A\n\n[Context] B");
+    }
+
+    // ── run_turn turn-budget behavior ──
+
+    /// Mock provider: requests a tool call on every round that is offered
+    /// tools (or on every round when `always_tool_call` is set) and returns a
+    /// text answer when called without any tool schemas.
+    struct ToolLoopProvider {
+        /// Recorded per LLM call: whether the round got a non-empty tool list.
+        got_tools: std::sync::Mutex<Vec<bool>>,
+        always_tool_call: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for ToolLoopProvider {
+        fn name(&self) -> &str {
+            "tool-loop-mock"
+        }
+
+        async fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[ToolDefinition],
+        ) -> Result<jcowork_llm::provider::ChatResponse> {
+            unreachable!("run_turn only uses chat_stream")
+        }
+
+        async fn chat_stream(
+            &self,
+            _messages: &[ChatMessage],
+            tools: &[ToolDefinition],
+        ) -> Result<jcowork_llm::provider::ChatStream> {
+            let got_tools = !tools.is_empty();
+            self.got_tools.lock().unwrap().push(got_tools);
+
+            let usage = || Usage {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                total_tokens: 2,
+            };
+            let chunks = if got_tools || self.always_tool_call {
+                vec![
+                    Ok(StreamChunk::ToolCallDelta(
+                        "call-1".to_string(),
+                        "noop_tool".to_string(),
+                        "{}".to_string(),
+                    )),
+                    Ok(StreamChunk::Done(usage())),
+                ]
+            } else {
+                vec![
+                    Ok(StreamChunk::Delta("FINAL SUMMARY".to_string())),
+                    Ok(StreamChunk::Done(usage())),
+                ]
+            };
+            Ok(Box::pin(futures::stream::iter(chunks)))
+        }
+
+        fn context_length(&self) -> usize {
+            8192
+        }
+
+        fn with_model(&self, _model: &str) -> Arc<dyn LlmProvider> {
+            unreachable!("not used by run_turn")
+        }
+    }
+
+    /// Output sink that records text, errors and whether done was emitted.
+    struct CollectSink {
+        text: String,
+        done: bool,
+        errors: Vec<String>,
+    }
+
+    impl AgentOutputSink for CollectSink {
+        fn on_text_delta<'a>(
+            &'a mut self,
+            text: &'a str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+            self.text.push_str(text);
+            Box::pin(async {})
+        }
+
+        fn on_tool_call_start<'a>(
+            &'a mut self,
+            _name: &'a str,
+            _call_id: &'a str,
+            _arguments: &'a str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+            Box::pin(async {})
+        }
+
+        fn on_tool_call_end<'a>(
+            &'a mut self,
+            _name: &'a str,
+            _result: &'a str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+            Box::pin(async {})
+        }
+
+        fn on_done<'a>(
+            &'a mut self,
+            _usage: Option<(i32, i32, i32)>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+            self.done = true;
+            Box::pin(async {})
+        }
+
+        fn on_error<'a>(
+            &'a mut self,
+            message: &'a str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+            self.errors.push(message.to_string());
+            Box::pin(async {})
+        }
+    }
+
+    fn tool_def(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            r#type: "function".to_string(),
+            function: jcowork_llm::provider::FunctionDefinition {
+                name: name.to_string(),
+                description: String::new(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+        }
+    }
+
+    fn test_history() -> Vec<ChatMessage> {
+        vec![ChatMessage {
+            role: "system".to_string(),
+            content: "SYS".to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            images: None,
+        }]
+    }
+
+    fn test_tool_ctx() -> ToolContext {
+        ToolContext {
+            user_id: "u1".to_string(),
+            workspace_root: "/tmp".to_string(),
+            mentioned_public_users: Vec::new(),
+            model: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn run_turn_reserves_last_round_for_tools_off_summary() {
+        let provider = Arc::new(ToolLoopProvider {
+            got_tools: std::sync::Mutex::new(Vec::new()),
+            always_tool_call: false,
+        });
+        let tools = vec![tool_def("noop_tool")];
+        let mut history = test_history();
+        let mut sink = CollectSink {
+            text: String::new(),
+            done: false,
+            errors: Vec::new(),
+        };
+
+        let result = run_turn(AgentTurnOptions {
+            history: &mut history,
+            tools: &tools,
+            provider: provider.clone(),
+            tool_registry: Arc::new(ToolRegistry::new()),
+            tool_ctx: &test_tool_ctx(),
+            pre_context: None,
+            max_turns: 3,
+            llm_timeout_secs: 5,
+            stream_timeout_secs: 5,
+            tool_timeout_secs: 5,
+            output: &mut sink,
+            user_id: "u1",
+            model: "mock:test",
+            log_writer: None,
+        })
+        .await;
+
+        assert!(result.completed, "forced final round must complete the turn");
+        assert_eq!(result.turns_used, 3);
+        assert_eq!(result.response, "FINAL SUMMARY");
+        assert!(sink.done, "on_done must be emitted for the forced summary");
+        assert_eq!(sink.text, "FINAL SUMMARY");
+
+        let calls = provider.got_tools.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![true, true, false],
+            "every round except the reserved final one must be offered tools"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_turn_ignores_hallucinated_tool_calls_on_forced_final_round() {
+        let provider = Arc::new(ToolLoopProvider {
+            got_tools: std::sync::Mutex::new(Vec::new()),
+            always_tool_call: true,
+        });
+        let tools = vec![tool_def("noop_tool")];
+        let mut history = test_history();
+        let mut sink = CollectSink {
+            text: String::new(),
+            done: false,
+            errors: Vec::new(),
+        };
+
+        let result = run_turn(AgentTurnOptions {
+            history: &mut history,
+            tools: &tools,
+            provider: provider.clone(),
+            tool_registry: Arc::new(ToolRegistry::new()),
+            tool_ctx: &test_tool_ctx(),
+            pre_context: None,
+            max_turns: 2,
+            llm_timeout_secs: 5,
+            stream_timeout_secs: 5,
+            tool_timeout_secs: 5,
+            output: &mut sink,
+            user_id: "u1",
+            model: "mock:test",
+            log_writer: None,
+        })
+        .await;
+
+        assert!(
+            !result.completed,
+            "no text on the forced round -> transport-level fallback"
+        );
+        assert_eq!(result.turns_used, 2);
+
+        let calls = provider.got_tools.lock().unwrap().clone();
+        assert_eq!(calls, vec![true, false]);
+
+        // Round 1's tool call was dispatched; the hallucinated call on the
+        // forced final round must be dropped, not dispatched.
+        let tool_results = history.iter().filter(|m| m.role == "tool").count();
+        assert_eq!(
+            tool_results, 1,
+            "forced final round must not dispatch tool calls"
+        );
+        let last = history.last().unwrap();
+        assert_eq!(last.role, "assistant");
+        assert!(
+            last.tool_calls.is_none(),
+            "dangling tool_calls must be stripped from history"
+        );
     }
 }

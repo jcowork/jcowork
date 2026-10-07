@@ -189,7 +189,9 @@ async fn handle_feishu_message(
         tool_registry: state.tool_registry.clone(),
         tool_ctx: &tool_ctx,
         pre_context: reminder_ctx_msg.as_ref(),
-        max_turns: 10,
+        // Match the chat budget (ws.rs). The final round is reserved for a
+        // tools-off summary by run_turn.
+        max_turns: 30,
         llm_timeout_secs: 60,
         stream_timeout_secs: 120,
         tool_timeout_secs: 30,
