@@ -316,6 +316,46 @@ pub(crate) async fn get_cron_job_results(
     (StatusCode::OK, Json(serde_json::json!(results)))
 }
 
+/// DELETE /api/cron-jobs/{id}/results/{result_id} - delete one execution record.
+pub(crate) async fn delete_cron_job_result(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Path((id, result_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    // Ownership check: records can only be deleted through a job the
+    // requester owns.
+    let owned = state
+        .cron_scheduler
+        .list_cron_jobs(&auth_user.user_id)
+        .await
+        .iter()
+        .any(|j| j.id == id);
+    if !owned {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Cron job not found"})),
+        );
+    }
+
+    // The record must belong to this job (prevents deleting another job's
+    // record by guessing its id).
+    let exists = state
+        .cron_scheduler
+        .list_task_results(&id)
+        .await
+        .iter()
+        .any(|r| r.id == result_id);
+    if !exists {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Execution record not found"})),
+        );
+    }
+
+    state.cron_scheduler.delete_task_result(&id, &result_id).await;
+    (StatusCode::OK, Json(serde_json::json!({"status": "removed"})))
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct StoreCronJobResultRequest {
     pub output: String,

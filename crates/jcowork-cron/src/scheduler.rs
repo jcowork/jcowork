@@ -185,6 +185,7 @@ pub trait CronStore: Send + Sync {
     async fn list_jobs(&self) -> Result<Vec<CronStoreJob>>;
     async fn save_result(&self, result: TaskResult) -> Result<()>;
     async fn list_results(&self, cron_job_id: &str) -> Result<Vec<TaskResult>>;
+    async fn delete_result(&self, result_id: &str) -> Result<()>;
     async fn delete_results(&self, cron_job_id: &str) -> Result<()>;
 }
 
@@ -570,6 +571,18 @@ impl CronScheduler {
         };
         items.sort_by(|a, b| b.executed_at.cmp(&a.executed_at)); // most recent first
         items
+    }
+
+    /// Delete a single execution result (store + in-memory cache).
+    pub async fn delete_task_result(&self, cron_job_id: &str, result_id: &str) {
+        if let Some(store) = &self.store {
+            if let Err(e) = store.delete_result(result_id).await {
+                tracing::warn!(error = %e, result_id = %result_id, "Failed to delete persisted task result");
+            }
+        }
+        if let Some(list) = self.task_results.lock().await.get_mut(cron_job_id) {
+            list.retain(|r| r.id != result_id);
+        }
     }
 
     /// Subscribe to reminder notifications.
@@ -1028,5 +1041,32 @@ mod tests {
 
         // No reminder may be broadcast for the rejected attempts.
         assert!(rx.try_recv().is_err());
+    }
+
+    // ========== delete_task_result tests ==========
+
+    #[tokio::test]
+    async fn test_delete_task_result_removes_only_matching_record() {
+        let scheduler = CronScheduler::new();
+        let mk = |id: &str, at: &str| TaskResult {
+            id: id.to_string(),
+            cron_job_id: "job-1".to_string(),
+            user_id: "u1".to_string(),
+            output: "out".to_string(),
+            status: "success".to_string(),
+            executed_at: at.to_string(),
+        };
+        scheduler.store_task_result(mk("r-old", "2026-10-01T00:00:00Z")).await;
+        scheduler.store_task_result(mk("r-new", "2026-10-02T00:00:00Z")).await;
+
+        scheduler.delete_task_result("job-1", "r-old").await;
+
+        let remaining = scheduler.list_task_results("job-1").await;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "r-new");
+
+        // Deleting a non-existent id is a no-op, not a failure
+        scheduler.delete_task_result("job-1", "r-missing").await;
+        assert_eq!(scheduler.list_task_results("job-1").await.len(), 1);
     }
 }

@@ -81,6 +81,9 @@ export default function Schedule({ userId, token }: ScheduleProps) {
   const [taskResults, setTaskResults] = useState<Record<string, TaskResult[]>>({});
   const [selected, setSelected] = useState<{ jobId: string; resultId: string } | null>(null);
 
+  // "Show all" toggle per job: only the newest 3 records are listed by default.
+  const [showAllResults, setShowAllResults] = useState<Record<string, boolean>>({});
+
   // "Run now": jobs whose manual run is being triggered/polled, and the job
   // whose trigger request just failed (transient button feedback).
   const [runningJobs, setRunningJobs] = useState<Set<string>>(new Set());
@@ -214,6 +217,27 @@ export default function Schedule({ userId, token }: ScheduleProps) {
       }
     } catch (err) {
       console.error('Failed to remove cron job:', err);
+    }
+  };
+
+  // Delete one execution record (per-record 🗑 button).
+  const removeTaskResult = async (jobId: string, resultId: string) => {
+    if (!window.confirm(t('confirmDeleteRecord'))) return;
+    try {
+      const res = await fetch(`/api/cron-jobs/${jobId}/results/${resultId}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      if (res.ok) {
+        setTaskResults(prev => ({
+          ...prev,
+          [jobId]: (prev[jobId] || []).filter(r => r.id !== resultId),
+        }));
+        // Close the right-side preview if the deleted record was selected.
+        setSelected(prev => (prev?.jobId === jobId && prev?.resultId === resultId ? null : prev));
+      }
+    } catch (err) {
+      console.error('Failed to delete task result:', err);
     }
   };
 
@@ -741,6 +765,9 @@ export default function Schedule({ userId, token }: ScheduleProps) {
               {cronJobs.map(job => {
                 const results = taskResults[job.id] || [];
                 const isExpanded = !!expandedResults[job.id];
+                // Newest 3 records by default; the rest behind the toggle.
+                const showAll = !!showAllResults[job.id];
+                const visibleResults = showAll ? results : results.slice(0, 3);
                 return (
                 <div key={job.id} style={{
                   borderRadius: 8, background: '#2a2a2a',
@@ -834,7 +861,8 @@ export default function Schedule({ userId, token }: ScheduleProps) {
                           {t('noResults')}
                         </div>
                       ) : (
-                        results.map(result => {
+                        <>
+                        {visibleResults.map(result => {
                           const isSelected = selected?.jobId === job.id && selected?.resultId === result.id;
                           return (
                             <div
@@ -866,9 +894,31 @@ export default function Schedule({ userId, token }: ScheduleProps) {
                               }}>
                                 {result.status === 'success' ? t('success') : t('failed')}
                               </span>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); removeTaskResult(job.id, result.id); }}
+                                title={t('deleteRecord')}
+                                aria-label={t('deleteRecord')}
+                                style={{
+                                  padding: '2px 6px', borderRadius: 4, border: 'none',
+                                  background: 'transparent', color: '#888', cursor: 'pointer',
+                                  fontSize: 12, flexShrink: 0, lineHeight: 1,
+                                }}>
+                                🗑
+                              </button>
                             </div>
                           );
-                        })
+                        })}
+                        {results.length > 3 && (
+                          <button
+                            onClick={() => setShowAllResults(prev => ({ ...prev, [job.id]: !prev[job.id] }))}
+                            style={{
+                              background: 'transparent', border: 'none', color: '#64b5f6',
+                              cursor: 'pointer', fontSize: 12, padding: '6px 10px',
+                            }}>
+                            {showAll ? t('collapseRecords') : `${t('showMoreRecords')} (${results.length - 3})`}
+                          </button>
+                        )}
+                        </>
                       )}
                     </div>
                   )}

@@ -139,6 +139,14 @@ impl CronStore for CronJobStore {
             .collect())
     }
 
+    async fn delete_result(&self, result_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM cron_task_results WHERE id = ?")
+            .bind(result_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     async fn delete_results(&self, cron_job_id: &str) -> Result<()> {
         sqlx::query("DELETE FROM cron_task_results WHERE cron_job_id = ?")
             .bind(cron_job_id)
