@@ -84,6 +84,10 @@ export default function Schedule({ userId, token }: ScheduleProps) {
   // "Show all" toggle per job: only the newest 3 records are listed by default.
   const [showAllResults, setShowAllResults] = useState<Record<string, boolean>>({});
 
+  // window.confirm is unsupported in Tauri's WKWebView, so record deletion
+  // goes through a custom confirmation modal.
+  const [confirmDeleteResult, setConfirmDeleteResult] = useState<{ jobId: string; resultId: string } | null>(null);
+
   // "Run now": jobs whose manual run is being triggered/polled, and the job
   // whose trigger request just failed (transient button feedback).
   const [runningJobs, setRunningJobs] = useState<Set<string>>(new Set());
@@ -220,9 +224,8 @@ export default function Schedule({ userId, token }: ScheduleProps) {
     }
   };
 
-  // Delete one execution record (per-record 🗑 button).
+  // Delete one execution record (per-record 🗑 button → confirmation modal).
   const removeTaskResult = async (jobId: string, resultId: string) => {
-    if (!window.confirm(t('confirmDeleteRecord'))) return;
     try {
       const res = await fetch(`/api/cron-jobs/${jobId}/results/${resultId}`, {
         method: 'DELETE',
@@ -895,7 +898,7 @@ export default function Schedule({ userId, token }: ScheduleProps) {
                                 {result.status === 'success' ? t('success') : t('failed')}
                               </span>
                               <button
-                                onClick={(e) => { e.stopPropagation(); removeTaskResult(job.id, result.id); }}
+                                onClick={(e) => { e.stopPropagation(); setConfirmDeleteResult({ jobId: job.id, resultId: result.id }); }}
                                 title={t('deleteRecord')}
                                 aria-label={t('deleteRecord')}
                                 style={{
@@ -1021,6 +1024,52 @@ export default function Schedule({ userId, token }: ScheduleProps) {
           </div>
         )}
       </div>
+
+      {/* Delete-record confirmation modal (window.confirm is unsupported in Tauri's WKWebView) */}
+      {confirmDeleteResult && (
+        <div
+          onClick={() => setConfirmDeleteResult(null)}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 999,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: '#1f1f1f', border: '1px solid #333', borderRadius: 10,
+              padding: 20, width: 320, boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
+            }}
+          >
+            <div style={{ color: '#eee', fontSize: 14, lineHeight: 1.6, marginBottom: 16 }}>
+              {t('confirmDeleteRecord')}
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button
+                onClick={() => setConfirmDeleteResult(null)}
+                style={{
+                  padding: '6px 16px', borderRadius: 6, border: '1px solid #555',
+                  background: 'transparent', color: '#ccc', cursor: 'pointer', fontSize: 13,
+                }}
+              >
+                {t('cancel')}
+              </button>
+              <button
+                onClick={() => {
+                  removeTaskResult(confirmDeleteResult.jobId, confirmDeleteResult.resultId);
+                  setConfirmDeleteResult(null);
+                }}
+                style={{
+                  padding: '6px 16px', borderRadius: 6, border: 'none',
+                  background: '#e53935', color: '#fff', cursor: 'pointer', fontSize: 13,
+                }}
+              >
+                {t('delete')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

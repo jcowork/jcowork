@@ -32,6 +32,9 @@ export default function SkillsList({ token, onCountChange }: {
   const [filter, setFilter] = useState<FilterTab>('all');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<Set<string>>(new Set());
+  // window.confirm is unsupported in Tauri's WKWebView, so skill deletion
+  // goes through a custom confirmation modal.
+  const [confirmDeleteSkill, setConfirmDeleteSkill] = useState<SkillEntry | null>(null);
 
   // Vision models offered to the image-to-HTML skill, and the user's selection
   const [vlModels, setVlModels] = useState<string[]>([]);
@@ -153,8 +156,8 @@ export default function SkillsList({ token, onCountChange }: {
     }
   };
 
+  // Delete a third-party skill (🗑 button → confirmation modal).
   const deleteSkill = async (skill: SkillEntry) => {
-    if (!window.confirm(t('confirmDeleteSkill'))) return;
     setDeleting(prev => new Set(prev).add(skill.id));
     try {
       const res = await fetch(`/api/skills/${encodeURIComponent(skill.id)}`, {
@@ -410,7 +413,7 @@ export default function SkillsList({ token, onCountChange }: {
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
                       {thirdParty && (
                         <button
-                          onClick={e => { e.stopPropagation(); deleteSkill(skill); }}
+                          onClick={e => { e.stopPropagation(); setConfirmDeleteSkill(skill); }}
                           disabled={deleting.has(skill.id)}
                           title={t('deleteThirdPartySkill')}
                           style={{
@@ -642,6 +645,75 @@ export default function SkillsList({ token, onCountChange }: {
                 }}
               >
                 {importing ? t('importing') : t('importBtn')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete-skill confirmation modal (window.confirm is unsupported in Tauri's WKWebView) */}
+      {confirmDeleteSkill && (
+        <div
+          onClick={() => setConfirmDeleteSkill(null)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.6)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              background: '#161b22',
+              border: '1px solid #30363d',
+              borderRadius: 12,
+              padding: 20,
+              width: 360,
+              maxWidth: 'calc(100vw - 48px)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 16,
+            }}
+          >
+            <div style={{ fontSize: 14, color: '#c9d1d9', lineHeight: 1.6 }}>
+              {t('confirmDeleteSkill')}
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+              <button
+                onClick={() => setConfirmDeleteSkill(null)}
+                style={{
+                  padding: '7px 18px',
+                  borderRadius: 6,
+                  border: '1px solid #30363d',
+                  background: 'transparent',
+                  color: '#c9d1d9',
+                  cursor: 'pointer',
+                  fontSize: 13,
+                }}
+              >
+                {t('cancel')}
+              </button>
+              <button
+                onClick={() => {
+                  deleteSkill(confirmDeleteSkill);
+                  setConfirmDeleteSkill(null);
+                }}
+                style={{
+                  padding: '7px 18px',
+                  borderRadius: 6,
+                  border: 'none',
+                  background: '#f85149',
+                  color: '#fff',
+                  cursor: 'pointer',
+                  fontSize: 13,
+                  fontWeight: 500,
+                }}
+              >
+                {t('delete')}
               </button>
             </div>
           </div>
