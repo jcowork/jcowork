@@ -7,13 +7,31 @@
  *  3. 消息持久化到 mock 存储、会话列表刷新
  *  4. 断开重连后 ensureConnected 生效
  *
- * 用法：node scripts/smoke_mp_page.js [server_url]
+ * 用法：JCWORK_SMOKE_TOKEN=<token> node scripts/smoke_mp_page.js [server_url]
  * 默认服务器：http://localhost:3000
+ *
+ * 注册接口已下线，短信验证码是唯一的登录方式，而验证码只写进服务端日志、
+ * 从不出现在 HTTP 响应里，所以脚本无法自助申请账号。获取令牌：
+ *   1. 不配置 JCWORK_SMS_* 启动 server（dev 通道，验证码打印在日志里）
+ *   2. POST /api/auth/sms/send {"phone":"13800000000"}
+ *   3. 从 server 日志取 code=XXXXXX
+ *   4. POST /api/auth/sms/login {"phone":"13800000000","code":"XXXXXX"} → token
  */
 const path = require('path');
 
 const BASE = (process.argv[2] || process.env.JC_SERVER || 'http://localhost:3000').replace(/\/+$/, '');
 const MP = path.join(__dirname, '..', 'miniprogram');
+const TOKEN = (process.env.JCWORK_SMOKE_TOKEN || '').trim();
+
+/** 从 JWT 载荷里取 user_id（sub），会话持久化的存储键需要它 */
+function userIdFromToken(token) {
+  try {
+    const payload = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    return JSON.parse(Buffer.from(payload, 'base64').toString('utf8')).sub || '';
+  } catch (e) {
+    return '';
+  }
+}
 
 let failures = 0;
 function check(name, ok, detail) {
@@ -63,9 +81,10 @@ global.wx = {
 };
 
 const appMock = {
-  globalData: { serverUrl: BASE, token: '', userId: '', username: '' },
-  isLoggedIn() { return !!this.globalData.token; },
-  clearSession() { this.globalData.token = ''; },
+  globalData: { serverUrl: BASE, token: '', userId: '', username: '', mustBindPhone: false },
+  isLoggedIn() { return !!(this.globalData.token && !this.globalData.mustBindPhone); },
+  clearSession() { this.globalData.token = ''; this.globalData.mustBindPhone = false; },
+  markPhoneBound() { this.globalData.mustBindPhone = false; },
 };
 global.getApp = () => appMock;
 
@@ -111,20 +130,28 @@ function makePage() {
 async function main() {
   console.log('服务器:', BASE);
 
-  // 准备测试账号
-  const username = 'mp_page_' + Date.now().toString(36);
-  const reg = await fetch(BASE + '/api/auth/register', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password: 'smoke-test-1234' }),
-  }).then((r) => r.json());
-  if (!reg.token) {
-    console.error('注册失败:', reg);
+  if (!TOKEN) {
+    console.error('缺少 JCWORK_SMOKE_TOKEN：注册接口已下线，请按文件头部的步骤用短信验证码换取一个令牌');
     process.exit(1);
   }
-  appMock.globalData.token = reg.token;
-  appMock.globalData.userId = reg.user_id;
-  appMock.globalData.username = username;
+  const userId = userIdFromToken(TOKEN);
+  if (!userId) {
+    console.error('JCWORK_SMOKE_TOKEN 无法解析出 user_id');
+    process.exit(1);
+  }
+  const profileRes = await fetch(BASE + '/api/profile', {
+    headers: { Authorization: 'Bearer ' + TOKEN },
+  });
+  const profile = await profileRes.json().catch(() => ({}));
+  if (profileRes.status !== 200) {
+    console.error('令牌不可用（HTTP ' + profileRes.status + '）:', profile);
+    console.error('若为 403 phone_bind_required，说明该账号还没绑定手机号，请先在登录页完成绑定');
+    process.exit(1);
+  }
+  appMock.globalData.token = TOKEN;
+  appMock.globalData.userId = userId;
+  appMock.globalData.username = profile.username || '';
+  console.log('测试账号:', appMock.globalData.username, userId);
 
   require(path.join(MP, 'pages', 'chat', 'chat.js'));
   const page = makePage();
@@ -163,7 +190,7 @@ async function main() {
   if (systemMsgs.length) console.log('  系统消息:', JSON.stringify(systemMsgs.map((m) => m.content).join(' | ')).slice(0, 200));
 
   // 4. 持久化校验
-  const convsRaw = storage.get('jcowork_convs_' + reg.user_id);
+  const convsRaw = storage.get('jcowork_convs_' + userId);
   const convs = convsRaw ? JSON.parse(convsRaw) : [];
   check('会话已持久化（无 system/流式消息）', convs.length === 1 && convs[0].messages.length > 0,
     JSON.stringify((convs[0] && convs[0].messages.map((m) => m.role)) || []));

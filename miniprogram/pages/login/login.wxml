@@ -1,4 +1,4 @@
-<!-- 登录 / 注册 -->
+<!-- 登录：短信验证码 / 管理员密码引导 / 强制绑定手机号 -->
 <view class="page" style="padding-top: {{navTotalHeight}}px;">
   <view class="brand">
     <image class="logo" src="/images/logo.png" mode="aspectFit" />
@@ -7,12 +7,17 @@
   </view>
 
   <view class="card">
-    <view class="tabs">
-      <view class="tab {{mode === 'login' ? 'tab-active' : ''}}" data-mode="login" bindtap="switchMode">登录</view>
-      <view class="tab {{mode === 'register' ? 'tab-active' : ''}}" data-mode="register" bindtap="switchMode">注册</view>
+    <view class="tabs" wx:if="{{mode !== 'bind'}}">
+      <view class="tab {{mode === 'sms' ? 'tab-active' : ''}}" data-mode="sms" bindtap="switchMode">短信登录</view>
+      <view class="tab {{mode === 'admin' ? 'tab-active' : ''}}" data-mode="admin" bindtap="switchMode">管理员</view>
     </view>
 
-    <view class="field">
+    <block wx:if="{{mode === 'bind'}}">
+      <view class="bind-title">绑定手机号</view>
+      <view class="bind-desc">当前账号尚未绑定手机号，绑定后才能继续使用。绑定后该账号只能通过短信验证码登录。</view>
+    </block>
+
+    <view class="field" wx:if="{{mode !== 'bind'}}">
       <view class="label">服务器地址</view>
       <input
         class="jc-input"
@@ -29,47 +34,88 @@
       </view>
     </view>
 
-    <view class="field">
-      <view class="label">用户名</view>
-      <input
-        class="jc-input"
-        value="{{username}}"
-        data-field="username"
-        bindinput="onInput"
-        placeholder="请输入用户名"
-        placeholder-class="jc-input-placeholder"
-        type="text"
-      />
-    </view>
-
-    <view class="field">
-      <view class="label">密码</view>
-      <input
-        class="jc-input"
-        value="{{password}}"
-        data-field="password"
-        bindinput="onInput"
-        placeholder="请输入密码"
-        placeholder-class="jc-input-placeholder"
-        password="{{true}}"
-        confirm-type="done"
-        bindconfirm="submit"
-      />
-    </view>
-
-    <view class="public-row" wx:if="{{mode === 'register'}}">
-      <view class="public-text">
-        <view class="public-title">创建公开账号</view>
-        <view class="public-desc">公开账号会出现在公开联系人目录，其他人可查看你分享的文档与定时任务</view>
+    <block wx:if="{{mode === 'admin'}}">
+      <view class="field">
+        <view class="label">用户名</view>
+        <input
+          class="jc-input"
+          value="{{username}}"
+          data-field="username"
+          bindinput="onInput"
+          placeholder="请输入用户名"
+          placeholder-class="jc-input-placeholder"
+          type="text"
+        />
       </view>
-      <switch checked="{{isPublic}}" bindchange="onTogglePublic" color="#1f6feb" />
-    </view>
+
+      <view class="field">
+        <view class="label">密码</view>
+        <input
+          class="jc-input"
+          value="{{password}}"
+          data-field="password"
+          bindinput="onInput"
+          placeholder="请输入密码"
+          placeholder-class="jc-input-placeholder"
+          password="{{true}}"
+          confirm-type="done"
+          bindconfirm="submit"
+        />
+      </view>
+
+      <view class="mode-desc">仅供管理员首次登录绑定手机号使用；绑定成功后密码登录将永久关闭</view>
+    </block>
+
+    <block wx:if="{{mode !== 'admin'}}">
+      <view class="field">
+        <view class="label">手机号</view>
+        <input
+          class="jc-input"
+          value="{{phone}}"
+          data-field="phone"
+          bindinput="onInput"
+          placeholder="请输入手机号"
+          placeholder-class="jc-input-placeholder"
+          type="number"
+          maxlength="20"
+        />
+      </view>
+
+      <view class="field">
+        <view class="label">短信验证码</view>
+        <view class="code-row">
+          <input
+            class="jc-input code-input"
+            value="{{code}}"
+            data-field="code"
+            bindinput="onInput"
+            placeholder="6 位验证码"
+            placeholder-class="jc-input-placeholder"
+            type="number"
+            maxlength="6"
+            confirm-type="done"
+            bindconfirm="submit"
+          />
+          <button
+            class="code-btn"
+            bindtap="sendCode"
+            disabled="{{sendingCode || countdown > 0}}"
+          >{{countdown > 0 ? countdown + ' 秒后重发' : '获取验证码'}}</button>
+        </view>
+      </view>
+
+      <view class="mode-desc" wx:if="{{mode === 'sms'}}">未注册的手机号验证通过后将自动创建账号</view>
+    </block>
 
     <view class="jc-error error-box" wx:if="{{error}}">{{error}}</view>
 
     <button class="jc-btn submit-btn" bindtap="submit" loading="{{loading}}" disabled="{{loading}}">
-      {{mode === 'login' ? '登 录' : '注册并登录'}}
+      {{mode === 'bind' ? '绑定并继续' : '登 录'}}
     </button>
+
+    <view class="logout-row" wx:if="{{mode === 'bind'}}">
+      <text class="hint-link" bindtap="logout">退出登录</text>
+    </view>
   </view>
 
   <view class="footnote">

@@ -175,6 +175,10 @@ async fn main() -> Result<()> {
         token_duration_hours: config.token_duration_hours,
     };
 
+    // Fail fast on an explicitly-configured-but-incomplete SMS channel: starting
+    // up anyway would leave every user unable to log in.
+    let sms = router::SmsRuntime::from_env()?;
+
     let state = AppState {
         session_manager,
         auth_config,
@@ -189,7 +193,7 @@ async fn main() -> Result<()> {
         log_writer,
         feishu_config_store: Arc::new(FeishuConfigStore::new(pool)),
         feishu_client_cache: Arc::new(dashmap::DashMap::new()),
-        reset_codes: Arc::new(dashmap::DashMap::new()),
+        sms,
         data_dir: data_dir.clone(),
     };
 

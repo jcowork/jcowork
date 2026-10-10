@@ -1,8 +1,9 @@
 //! REST API routes.
 //!
 //! Handlers are split into domain-specific submodules:
-//! - [`auth_api`] — registration, login, health
-//! - [`admin_users`] — super-user user management (search / trash / restore)
+//! - [`auth_api`] — SMS code send/login, admin bootstrap login, health
+//! - [`admin_users`] — super-user user management (search / phone / trash / restore)
+//! - [`profile`] — self-service account profile (phone binding, display name)
 //! - [`skills`] — skill listing / toggling
 //! - [`memory`] — memory CRUD + agent identity
 //! - [`cron`] — reminders and periodic tasks
@@ -22,6 +23,7 @@ pub(crate) mod doc_index;
 pub(crate) mod feishu;
 pub(crate) mod fetch_url;
 pub(crate) mod memory;
+pub(crate) mod profile;
 pub(crate) mod providers;
 pub(crate) mod public_users;
 pub(crate) mod skills;
@@ -42,7 +44,9 @@ use axum::extract::ws::WebSocketUpgrade;
 use axum::http::header;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::RwLock;
+use std::sync::atomic::AtomicU32;
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::auth;
@@ -56,8 +60,72 @@ use jcowork_llm::LlmRouter;
 use jcowork_logs::LogWriter;
 use jcowork_memory::MemoryManager;
 use jcowork_skills::SkillManager;
+use jcowork_sms::SmsSender;
 use jcowork_storage::{FeishuConfigStore, UserStore};
 use jcowork_tools::registry::ToolRegistry;
+
+/// The SMS half of [`AppState`], assembled once at startup.
+///
+/// Bundled into a single type so the server binary, the desktop binary and the
+/// integration tests do not each repeat the same wiring — and so the startup
+/// banner telling the operator which channel is live is printed identically in
+/// all three rather than copy-pasted.
+#[derive(Clone)]
+pub struct SmsRuntime {
+    /// Pluggable SMS channel (Aliyun in production, log-only in dev).
+    pub sender: Arc<dyn SmsSender>,
+    /// Verification codes keyed by normalized phone number.
+    pub codes: Arc<DashMap<String, SmsCodeEntry>>,
+    /// Messages sent process-wide on the current UTC day. Per-phone throttling
+    /// alone cannot stop an attacker enumerating the number space and draining
+    /// the SMS balance, so this global ceiling is the real cost guard.
+    pub sent_today: Arc<AtomicU32>,
+    /// `YYYY-MM-DD` key for [`SmsRuntime::sent_today`], reset on rollover.
+    pub day_key: Arc<Mutex<String>>,
+    pub daily_global_cap: u32,
+    /// When false, `/api/auth/sms/login` refuses numbers with no account
+    /// instead of auto-provisioning one.
+    pub allow_register: bool,
+}
+
+impl SmsRuntime {
+    pub fn new(sender: Arc<dyn SmsSender>, daily_global_cap: u32, allow_register: bool) -> Self {
+        Self {
+            sender,
+            codes: Arc::new(DashMap::new()),
+            sent_today: Arc::new(AtomicU32::new(0)),
+            day_key: Arc::new(Mutex::new(String::new())),
+            daily_global_cap,
+            allow_register,
+        }
+    }
+
+    /// Build from the `JCWORK_SMS_*` environment variables.
+    ///
+    /// Fails rather than silently degrading when the operator asked for Aliyun
+    /// explicitly but left credentials out — a quiet fallback to dev would look
+    /// exactly like a carrier outage to anyone waiting for a code.
+    pub fn from_env() -> anyhow::Result<Self> {
+        let config = jcowork_sms::config::SmsConfig::from_env();
+        let kind = config.resolve()?;
+        let sender = config.build()?;
+        if kind == jcowork_sms::config::SmsProviderKind::Dev {
+            tracing::warn!(
+                "SMS channel is 'dev': verification codes are written to the server log and no \
+                 real messages are sent. Set JCWORK_SMS_ACCESS_KEY_ID, JCWORK_SMS_ACCESS_KEY_SECRET, \
+                 JCWORK_SMS_SIGN_NAME and JCWORK_SMS_TEMPLATE_CODE to switch to Aliyun."
+            );
+        } else {
+            tracing::info!(
+                channel = %sender.name(),
+                daily_cap = config.daily_global_cap,
+                allow_register = config.allow_register,
+                "SMS channel ready"
+            );
+        }
+        Ok(Self::new(sender, config.daily_global_cap, config.allow_register))
+    }
+}
 
 /// Shared application state.
 #[derive(Clone)]
@@ -77,8 +145,8 @@ pub struct AppState {
     pub feishu_config_store: Arc<FeishuConfigStore>,
     /// Cache of FeishuClient instances keyed by app_id.
     pub feishu_client_cache: Arc<DashMap<String, Arc<FeishuClient>>>,
-    /// In-memory password reset codes (valid 10 min each, local/self-hosted).
-    pub reset_codes: Arc<DashMap<String, ResetCodeEntry>>,
+    /// SMS verification-code login.
+    pub sms: SmsRuntime,
     /// Data directory for per-user workspaces.
     pub data_dir: String,
 }
@@ -98,46 +166,60 @@ pub struct UpdateMemoryRequest {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct RegisterRequest {
-    pub username: String,
-    pub password: String,
-    /// Opt-in public account flag, fixed at registration time.
-    /// Defaults to false so older clients keep registering private accounts.
-    #[serde(default)]
-    pub is_public: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub struct AuthResponse {
-    pub token: String,
-    pub user_id: String,
-    pub username: String,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct LoginRequest {
     pub username: String,
     pub password: String,
 }
 
+// --- SMS verification-code login ---
+
+/// Lifetime of a code once sent, in seconds.
+pub const SMS_CODE_TTL_SECS: i64 = 300;
+/// Minimum gap between two sends to the same number.
+pub const SMS_RESEND_COOLDOWN_SECS: i64 = 60;
+/// Per-number ceiling within a single UTC day.
+pub const SMS_PER_PHONE_DAILY: u32 = 10;
+/// Wrong guesses before the code is locked out.
+pub const SMS_MAX_ATTEMPTS: u8 = 5;
+/// Length of the lockout, in seconds.
+pub const SMS_LOCK_SECS: i64 = 900;
+
 #[derive(Debug, Deserialize)]
-pub struct ForgotPasswordRequest {
-    pub username: String,
+pub struct SmsSendRequest {
+    pub phone: String,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ResetPasswordRequest {
-    pub username: String,
+pub struct SmsLoginRequest {
+    pub phone: String,
     pub code: String,
-    pub password: String,
 }
 
-/// In-memory password reset code (used for local/self-hosted deployments).
+#[derive(Debug, Deserialize)]
+pub struct BindPhoneRequest {
+    pub phone: String,
+    pub code: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChangeUsernameRequest {
+    pub username: String,
+}
+
+/// One row of the verification-code table, keyed by normalized phone number.
 #[derive(Debug, Clone)]
-pub struct ResetCodeEntry {
+pub struct SmsCodeEntry {
     pub code: String,
     pub expires_at: i64,
-    pub user_id: String,
+    /// Wrong guesses against the current code. Reset on every new send.
+    pub attempts: u8,
+    /// Brute-force lockout deadline; survives resends and successful logins.
+    pub locked_until: i64,
+    pub last_sent_at: i64,
+    /// `YYYY-MM-DD` the counters below belong to. Storing it per entry is what
+    /// keeps the daily limit a daily limit even after a long idle stretch.
+    pub day_key: String,
+    pub sent_today: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -192,6 +274,20 @@ pub(crate) fn mask_secret(secret: &str) -> String {
     }
 }
 
+/// Mask a phone number for display, keeping only the last four digits.
+///
+/// A partial mask like `138****8000` would still publish 7 of the 11 digits and
+/// leave only 10^4 candidates for an attacker to brute force, so the prefix is
+/// hidden entirely.
+pub(crate) fn mask_phone(phone: &str) -> String {
+    let chars: Vec<char> = phone.chars().collect();
+    if chars.len() <= 4 {
+        return "*".repeat(chars.len());
+    }
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+    format!("{}{}", "*".repeat(chars.len() - 4), tail)
+}
+
 // --- Route assembly ---
 
 pub fn build_router(state: AppState) -> Router {
@@ -199,10 +295,9 @@ pub fn build_router(state: AppState) -> Router {
 
     // Public routes (no auth required)
     let public = Router::new()
-        .route("/api/auth/register", post(auth_api::register))
         .route("/api/auth/login", post(auth_api::login))
-        .route("/api/auth/forgot-password", post(auth_api::forgot_password))
-        .route("/api/auth/reset-password", post(auth_api::reset_password))
+        .route("/api/auth/sms/send", post(auth_api::sms_send))
+        .route("/api/auth/sms/login", post(auth_api::sms_login))
         .route("/api/health", get(auth_api::health))
         .route("/api/feishu/event", post(crate::feishu::feishu_event_handler));
 
@@ -243,6 +338,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/providers", post(providers::save_providers))
         .route("/api/agent-identity", get(memory::get_agent_identity))
         .route("/api/agent-identity", put(memory::set_agent_identity))
+        .route("/api/profile", get(profile::get_profile))
+        .route("/api/profile/phone", post(profile::bind_phone))
+        .route("/api/profile/username", put(profile::change_username))
         .route("/api/feishu/config", get(feishu::get_feishu_config))
         .route("/api/feishu/config", put(feishu::set_feishu_config))
         .route("/api/feishu/config", delete(feishu::delete_feishu_config))
@@ -283,6 +381,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/admin/users/{id}/trash", post(admin_users::trash_user))
         .route("/api/admin/users/{id}/restore", post(admin_users::restore_user))
         .route("/api/admin/users/{id}/public", post(admin_users::set_user_public))
+        .route("/api/admin/users/{id}/phone", post(admin_users::set_user_phone))
+        .route("/api/admin/users/{id}/phone", delete(admin_users::clear_user_phone))
         .route("/api/admin/users/{id}", delete(admin_users::permanently_delete_user))
         // Read-only cross-user endpoints for public accounts
         .route("/api/public-users", get(public_users::list_public_users))
@@ -363,6 +463,12 @@ async fn serve_index_no_cache(path: String) -> impl IntoResponse {
     )
 }
 
+/// Endpoints an account with no bound phone number may still call.
+///
+/// Exact matches on purpose: a prefix rule would also open anything mounted
+/// underneath, and the binding screen needs precisely these two.
+const PHONE_BIND_ALLOWLIST: &[&str] = &["/api/profile", "/api/profile/phone"];
+
 /// JWT authentication middleware.
 /// Extracts user_id from the Bearer token and inserts it into request extensions.
 async fn auth_middleware(
@@ -403,6 +509,19 @@ async fn auth_middleware(
             // rejected immediately, even with a still-valid JWT.
             match state.user_store.get_user_by_id(&claims.sub).await {
                 Ok(Some(user)) if user.deleted_at.is_none() => {
+                    // Forced binding: an account without a phone number may only
+                    // read its profile and submit the binding. Everything else is
+                    // refused, so a bootstrap token cannot be used to keep working
+                    // instead of binding — which is the whole point of forcing it.
+                    if user.phone.is_none() && !PHONE_BIND_ALLOWLIST.contains(&req.uri().path()) {
+                        return (
+                            StatusCode::FORBIDDEN,
+                            Json(serde_json::json!({
+                                "error": "Bind a phone number to continue",
+                                "code": "phone_bind_required",
+                            })),
+                        ).into_response();
+                    }
                     // Insert authenticated user into request extensions
                     req.extensions_mut().insert(AuthUser {
                         user_id: user.id,
@@ -501,5 +620,16 @@ mod tests {
     #[test]
     fn test_mask_secret_boundary_five_chars() {
         assert_eq!(mask_secret("abcde"), "*bcde");
+    }
+
+    #[test]
+    fn test_mask_phone_keeps_only_last_four_digits() {
+        assert_eq!(mask_phone("13800138000"), "*******8000");
+    }
+
+    #[test]
+    fn test_mask_phone_short_values_are_fully_masked() {
+        assert_eq!(mask_phone(""), "");
+        assert_eq!(mask_phone("1234"), "****");
     }
 }

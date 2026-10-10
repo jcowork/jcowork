@@ -1,7 +1,7 @@
 //! API Integration Tests for jcowork-gateway
 //!
 //! These tests verify the core HTTP API endpoints:
-//! - Authentication (register, login)
+//! - Authentication (SMS verification-code login, admin bootstrap)
 //! - Provider management (list)
 //! - Health endpoint
 
@@ -11,6 +11,7 @@ use axum::{
     Router,
 };
 use serde_json::json;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use jcowork_gateway::{
@@ -27,6 +28,31 @@ use jcowork_tools::registry::ToolRegistry;
 use sqlx::sqlite::SqlitePoolOptions;
 use tempfile::TempDir;
 
+/// Records every verification code the gateway hands to the carrier, so tests
+/// can complete an SMS login without a real channel.
+///
+/// This lives in the test binary rather than in `jcowork-sms`: a fixed or
+/// readable code path in production code would be a universal backdoor.
+#[derive(Default)]
+struct CaptureSms {
+    sent: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+}
+
+#[async_trait::async_trait]
+impl jcowork_sms::SmsSender for CaptureSms {
+    async fn send_code(&self, phone: &str, code: &str) -> anyhow::Result<()> {
+        self.sent
+            .lock()
+            .expect("capture lock poisoned")
+            .push((phone.to_string(), code.to_string()));
+        Ok(())
+    }
+
+    fn name(&self) -> &'static str {
+        "capture"
+    }
+}
+
 /// Test fixture that sets up a minimal gateway with in-memory SQLite
 struct TestApp {
     _temp_dir: TempDir,
@@ -34,10 +60,21 @@ struct TestApp {
     token: Option<String>,
     /// Shared handle to the user store (for seeding/purge assertions).
     user_store: Arc<UserStore>,
+    /// Codes captured from the fake SMS channel, as (phone, code) pairs.
+    sms_sent: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    /// Counter behind `next_phone`.
+    phone_seq: AtomicU32,
 }
 
 impl TestApp {
     async fn new() -> Self {
+        Self::with_sms(jcowork_sms::config::SmsConfig::default()).await
+    }
+
+    /// Build the test app with a specific SMS configuration, so tests can
+    /// exercise the daily cap and the invite-only (`allow_register = false`)
+    /// mode without touching the process environment.
+    async fn with_sms(config: jcowork_sms::config::SmsConfig) -> Self {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let data_dir = temp_dir.path().to_str().unwrap().to_string();
 
@@ -77,6 +114,14 @@ impl TestApp {
 
         let user_store_handle = user_store.clone();
 
+        let capture = CaptureSms::default();
+        let sms_sent = capture.sent.clone();
+        let sms = router::SmsRuntime::new(
+            Arc::new(capture),
+            config.daily_global_cap,
+            config.allow_register,
+        );
+
         let state = AppState {
             session_manager,
             auth_config: AuthConfig {
@@ -94,7 +139,7 @@ impl TestApp {
             log_writer,
             feishu_config_store,
             feishu_client_cache: Arc::new(dashmap::DashMap::new()),
-            reset_codes: Arc::new(dashmap::DashMap::new()),
+            sms,
             data_dir: data_dir.clone(),
         };
 
@@ -105,52 +150,43 @@ impl TestApp {
             router,
             token: None,
             user_store: user_store_handle,
+            sms_sent,
+            phone_seq: AtomicU32::new(0),
         }
     }
 
-    /// Register a test user and get JWT token
-    async fn register_and_login(&mut self, username: &str, password: &str) {
-        use tower::ServiceExt;
-        
-        // Register
-        let register_req = Request::builder()
-            .method("POST")
-            .uri("/api/auth/register")
-            .header("Content-Type", "application/json")
-            .body(Body::from(
-                json!({
-                    "username": username,
-                    "password": password
-                })
-                .to_string(),
-            ))
-            .unwrap();
+    /// Next unused valid phone number.
+    ///
+    /// Every account a test needs must be provisioned on a fresh number: the
+    /// 60-second resend cooldown means a given number yields exactly one code.
+    fn next_phone(&self) -> String {
+        format!("137{:08}", self.phone_seq.fetch_add(1, Ordering::SeqCst))
+    }
 
-        let register_res = self.router.clone().oneshot(register_req).await.unwrap();
-        assert_eq!(register_res.status(), StatusCode::OK);
+    /// Provision a fresh account through the SMS flow, returning
+    /// (user_id, token, phone).
+    async fn provision_user_on(&self) -> (String, String, String) {
+        let phone = self.next_phone();
+        let (status, body) = self.sms_send_and_login(&phone).await;
+        assert_eq!(status, StatusCode::OK, "provisioning {} failed: {:?}", phone, body);
+        (
+            body["user_id"].as_str().unwrap().to_string(),
+            body["token"].as_str().unwrap().to_string(),
+            phone,
+        )
+    }
 
-        // Login
-        let login_req = Request::builder()
-            .method("POST")
-            .uri("/api/auth/login")
-            .header("Content-Type", "application/json")
-            .body(Body::from(
-                json!({
-                    "username": username,
-                    "password": password
-                })
-                .to_string(),
-            ))
-            .unwrap();
+    /// Provision a fresh account through the SMS flow, returning (user_id, token).
+    async fn provision_user(&self) -> (String, String) {
+        let (id, token, _) = self.provision_user_on().await;
+        (id, token)
+    }
 
-        let login_res = self.router.clone().oneshot(login_req).await.unwrap();
-        assert_eq!(login_res.status(), StatusCode::OK);
-
-        let body_bytes = axum::body::to_bytes(login_res.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let login_resp: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-        self.token = Some(login_resp["token"].as_str().unwrap().to_string());
+    /// Provision a fresh account through the SMS flow and make it the fixture's
+    /// current identity.
+    async fn sms_login(&mut self) {
+        let (_, token) = self.provision_user().await;
+        self.token = Some(token);
     }
 
     /// Make an authenticated request using the fixture's current token
@@ -181,31 +217,6 @@ impl TestApp {
         self.router.clone().oneshot(req).await.unwrap()
     }
 
-    /// Register a new user (asserting success) and return its user_id.
-    async fn register_user(&self, username: &str, password: &str, is_public: bool) -> String {
-        use tower::ServiceExt;
-
-        let register_req = Request::builder()
-            .method("POST")
-            .uri("/api/auth/register")
-            .header("Content-Type", "application/json")
-            .body(Body::from(
-                json!({
-                    "username": username,
-                    "password": password,
-                    "is_public": is_public
-                })
-                .to_string(),
-            ))
-            .unwrap();
-
-        let res = self.router.clone().oneshot(register_req).await.unwrap();
-        assert_eq!(res.status(), StatusCode::OK, "register should succeed for {}", username);
-        let body_bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
-        let resp: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-        resp["user_id"].as_str().unwrap().to_string()
-    }
-
     /// Attempt a login and return (status, body).
     async fn login_raw(&self, username: &str, password: &str) -> (StatusCode, serde_json::Value) {
         use tower::ServiceExt;
@@ -227,8 +238,12 @@ impl TestApp {
         (status, resp)
     }
 
-    /// Seed the default admin account and return the admin's token.
-    async fn seed_and_login_admin(&self) -> String {
+    /// Seed the default admin account and log in through the bootstrap password.
+    ///
+    /// The returned token has no phone bound yet, so the forced-binding gate
+    /// only lets it reach `/api/profile*`. Call `bind_phone_number` to unlock
+    /// the rest of the API.
+    async fn bootstrap_admin(&self) -> String {
         jcowork_gateway::auth::ensure_default_admin(&self.user_store)
             .await
             .expect("failed to seed default admin");
@@ -238,49 +253,168 @@ impl TestApp {
                 jcowork_gateway::auth::DEFAULT_ADMIN_PASSWORD,
             )
             .await;
-        assert_eq!(status, StatusCode::OK, "admin login should succeed");
+        assert_eq!(status, StatusCode::OK, "admin bootstrap login should succeed");
         assert_eq!(resp["is_admin"], json!(true), "admin login should report is_admin");
+        assert_eq!(
+            resp["must_bind_phone"],
+            json!(true),
+            "bootstrap login must flag the account as needing a phone"
+        );
         resp["token"].as_str().unwrap().to_string()
+    }
+
+    /// Bind a freshly generated number to the account holding `token`.
+    /// Returns the number that was bound.
+    async fn bind_phone_number(&self, token: &str) -> String {
+        let phone = self.next_phone();
+        let (status, body) = self
+            .post_public("/api/auth/sms/send", json!({ "phone": phone }))
+            .await;
+        assert_eq!(status, StatusCode::OK, "sending a code to {} failed: {:?}", phone, body);
+        let code = self.captured_code(&phone);
+
+        let res = self
+            .make_request_with_token(
+                Some(token),
+                "POST",
+                "/api/profile/phone",
+                Some(json!({ "phone": phone, "code": code })),
+            )
+            .await;
+        assert_eq!(res.status(), StatusCode::OK, "binding {} should succeed", phone);
+        phone
+    }
+
+    /// Seed the default admin, walk it through the bootstrap password door, and
+    /// satisfy the forced phone binding — returning a token that can reach the
+    /// whole API.
+    async fn seed_and_login_admin(&self) -> String {
+        let token = self.bootstrap_admin().await;
+        self.bind_phone_number(&token).await;
+        // The same JWT keeps working after binding: the middleware re-reads the
+        // account on every request, so the gate opens as soon as a phone exists.
+        token
+    }
+
+    /// POST to a public (unauthenticated) endpoint and return (status, body).
+    async fn post_public(&self, path: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+        use tower::ServiceExt;
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let res = self.router.clone().oneshot(req).await.unwrap();
+        let status = res.status();
+        let body_bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let resp: serde_json::Value =
+            serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
+        (status, resp)
+    }
+
+    /// Most recent code the fake channel captured for `phone`.
+    fn captured_code(&self, phone: &str) -> String {
+        self.sms_sent
+            .lock()
+            .expect("capture lock poisoned")
+            .iter()
+            .rev()
+            .find(|(p, _)| p == phone)
+            .map(|(_, c)| c.clone())
+            .unwrap_or_else(|| panic!("no code was sent to {}", phone))
+    }
+
+    /// Number of messages the fake channel has been asked to deliver.
+    fn captured_count(&self) -> usize {
+        self.sms_sent.lock().expect("capture lock poisoned").len()
+    }
+
+    /// PUT a new display name for the account owning `token`.
+    async fn rename(&self, token: &str, name: &str) -> axum::http::Response<Body> {
+        self.make_request_with_token(
+            Some(token),
+            "PUT",
+            "/api/profile/username",
+            Some(json!({ "username": name })),
+        )
+        .await
+    }
+
+    /// Send a code to `phone` and immediately log in with it.
+    /// Asserts the send succeeded and returns the login (status, body).
+    async fn sms_send_and_login(&self, phone: &str) -> (StatusCode, serde_json::Value) {
+        let (status, _) = self
+            .post_public("/api/auth/sms/send", json!({ "phone": phone }))
+            .await;
+        assert_eq!(status, StatusCode::OK, "sending a code to {} should work", phone);
+        let code = self.captured_code(phone);
+        self.post_public("/api/auth/sms/login", json!({ "phone": phone, "code": code }))
+            .await
     }
 }
 
 #[tokio::test]
-async fn test_auth_register_login_flow() {
-    let mut app = TestApp::new().await;
+async fn test_password_signup_endpoints_are_gone() {
+    let app = TestApp::new().await;
 
-    // Test registration
-    app.register_and_login("testuser", "securepass123").await;
-
-    // Verify token is set
-    assert!(app.token.is_some());
-    assert!(!app.token.as_ref().unwrap().is_empty());
+    // SMS login is the only way in, so none of these may still resolve. The
+    // router's GET-only SPA fallback answers unmatched paths, which turns a
+    // deleted POST route into a 405 rather than a 404.
+    for path in [
+        "/api/auth/register",
+        "/api/auth/forgot-password",
+        "/api/auth/reset-password",
+    ] {
+        let (status, _) = app
+            .post_public(path, json!({ "username": "x", "password": "y", "code": "z" }))
+            .await;
+        assert!(
+            status == StatusCode::NOT_FOUND || status == StatusCode::METHOD_NOT_ALLOWED,
+            "{} must not accept a signup request, got {}",
+            path,
+            status
+        );
+    }
 }
 
 #[tokio::test]
-async fn test_auth_invalid_credentials() {
-    use tower::ServiceExt;
-    
-    let mut app = TestApp::new().await;
-
-    // Register first
-    app.register_and_login("testuser2", "pass123").await;
-
-    // Try login with wrong password
-    let login_req = Request::builder()
-        .method("POST")
-        .uri("/api/auth/login")
-        .header("Content-Type", "application/json")
-        .body(Body::from(
-            json!({
-                "username": "testuser2",
-                "password": "wrongpassword"
-            })
-            .to_string(),
-        ))
+async fn test_password_login_is_admin_bootstrap_only() {
+    let app = TestApp::new().await;
+    jcowork_gateway::auth::ensure_default_admin(&app.user_store)
+        .await
         .unwrap();
 
-    let login_res = app.router.clone().oneshot(login_req).await.unwrap();
-    assert_eq!(login_res.status(), StatusCode::UNAUTHORIZED);
+    let (status, _) = app.login_raw("admin", "not-the-password").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // A non-admin account is refused even when it holds the right password, and
+    // the body is identical to a plain wrong-password failure — otherwise the
+    // endpoint would disclose which usernames hold admin accounts.
+    let hash =
+        jcowork_gateway::auth::hash_password(jcowork_gateway::auth::DEFAULT_ADMIN_PASSWORD)
+            .unwrap();
+    app.user_store
+        .create_user("normal", &hash, false)
+        .await
+        .unwrap();
+    let (status, body) = app
+        .login_raw("normal", jcowork_gateway::auth::DEFAULT_ADMIN_PASSWORD)
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], json!("Invalid username or password"));
+
+    // The bootstrap door does admit the admin while it has no phone.
+    let (status, body) = app
+        .login_raw(
+            jcowork_gateway::auth::DEFAULT_ADMIN_USERNAME,
+            jcowork_gateway::auth::DEFAULT_ADMIN_PASSWORD,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{:?}", body);
+    assert_eq!(body["must_bind_phone"], json!(true));
 }
 
 #[tokio::test]
@@ -303,7 +437,7 @@ async fn test_providers_list_without_auth() {
 #[tokio::test]
 async fn test_providers_list_with_auth() {
     let mut app = TestApp::new().await;
-    app.register_and_login("provideruser", "pass123").await;
+    app.sms_login().await;
 
     // List providers with valid token
     let res = app.make_request("GET", "/api/providers", None).await;
@@ -323,7 +457,7 @@ async fn test_providers_list_with_auth() {
 #[tokio::test]
 async fn test_providers_save_add_modify_and_vision_flag() {
     let mut app = TestApp::new().await;
-    app.register_and_login("provideradmin", "pass123").await;
+    app.sms_login().await;
 
     // Save two providers: one with a vision-capable model, one local without
     let save_body = json!({
@@ -512,7 +646,7 @@ async fn test_connectors_require_auth() {
 #[tokio::test]
 async fn test_connector_crud_flow() {
     let mut app = TestApp::new().await;
-    app.register_and_login("connectoruser", "pass123").await;
+    app.sms_login().await;
 
     // Create
     let res = app
@@ -606,7 +740,7 @@ async fn test_connector_crud_flow() {
 #[tokio::test]
 async fn test_connector_validation_errors() {
     let mut app = TestApp::new().await;
-    app.register_and_login("connvalidator", "pass123").await;
+    app.sms_login().await;
 
     // Empty name -> 400
     let mut body = api_connector_body();
@@ -661,7 +795,7 @@ async fn test_connector_validation_errors() {
 #[tokio::test]
 async fn test_skill_config_save_get_clear() {
     let mut app = TestApp::new().await;
-    app.register_and_login("skillcfg", "pass123").await;
+    app.sms_login().await;
 
     let skill_id = "builtin:image_to_html";
     let cfg_url = format!("/api/skills/{}/config", skill_id);
@@ -718,11 +852,7 @@ async fn test_admin_user_management_flow() {
     let admin_token = app.seed_and_login_admin().await;
 
     // A regular user cannot access the admin API
-    let victim_id = app.register_user("victim", "victimpass1", false).await;
-    let (status, victim_login) = app.login_raw("victim", "victimpass1").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(victim_login["is_admin"], json!(false));
-    let victim_token = victim_login["token"].as_str().unwrap().to_string();
+    let (victim_id, victim_token) = app.provision_user().await;
 
     let res = app
         .make_request_with_token(Some(&victim_token), "GET", "/api/admin/users", None)
@@ -748,10 +878,9 @@ async fn test_admin_user_management_flow() {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    // Trashed user cannot log in, and the old token is rejected
-    let (status, resp) = app.login_raw("victim", "victimpass1").await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "trashed user login must fail");
-    assert_eq!(resp["error"], json!("Account has been deleted"));
+    // The old token is rejected. That a trashed account also cannot log back in
+    // over SMS is covered by `test_sms_login_rejects_trashed_account` — the
+    // resend cooldown means this number cannot yield a second code here.
     let res = app
         .make_request_with_token(Some(&victim_token), "GET", "/api/providers", None)
         .await;
@@ -811,20 +940,26 @@ async fn test_admin_user_management_flow() {
         .make_request_with_token(Some(&admin_token), "POST", &restore_url, None)
         .await;
     assert_eq!(res.status(), StatusCode::OK);
-    let (status, _) = app.login_raw("victim", "victimpass1").await;
-    assert_eq!(status, StatusCode::OK, "restored user must be able to log in");
     let res = app
         .make_request_with_token(Some(&victim_token), "GET", "/api/providers", None)
         .await;
     assert_eq!(res.status(), StatusCode::OK, "old token must work again after restore");
 
-    // Permanently delete the account; login falls back to invalid credentials
+    // Permanently delete the account; its token stops resolving to a user.
+    // Logging in again would prove nothing here — the freed number would simply
+    // auto-provision a brand-new account.
     let res = app
         .make_request_with_token(Some(&admin_token), "DELETE", &format!("/api/admin/users/{}", victim_id), None)
         .await;
     assert_eq!(res.status(), StatusCode::OK);
-    let (status, _) = app.login_raw("victim", "victimpass1").await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "deleted account must not exist");
+    let res = app
+        .make_request_with_token(Some(&victim_token), "GET", "/api/providers", None)
+        .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::UNAUTHORIZED,
+        "a permanently deleted account's token must be rejected"
+    );
     let res = app
         .make_request_with_token(Some(&admin_token), "DELETE", &format!("/api/admin/users/{}", admin_id), None)
         .await;
@@ -837,11 +972,19 @@ async fn test_public_users_excludes_trashed() {
     let app = TestApp::new().await;
     let admin_token = app.seed_and_login_admin().await;
 
-    let pub_id = app.register_user("pubvictim", "pubpass1234", true).await;
-    app.register_user("regular", "regularpass1", false).await;
-    let (status, regular_login) = app.login_raw("regular", "regularpass1").await;
-    assert_eq!(status, StatusCode::OK);
-    let regular_token = regular_login["token"].as_str().unwrap().to_string();
+    // Provisioned accounts are always private now that self-service signup is
+    // gone, so the admin has to publish the one this test expects to find.
+    let (pub_id, _) = app.provision_user().await;
+    let res = app
+        .make_request_with_token(
+            Some(&admin_token),
+            "POST",
+            &format!("/api/admin/users/{}/public", pub_id),
+            Some(json!({ "is_public": true })),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let (_, regular_token) = app.provision_user().await;
 
     // Public directory contains the user while active
     let res = app
@@ -972,11 +1115,8 @@ async fn test_admin_toggles_user_public_flag() {
     let admin_token = app.seed_and_login_admin().await;
 
     // A private target user and an unrelated observer
-    let target_id = app.register_user("toggleuser", "togglepass1", false).await;
-    app.register_user("observer", "observerpass1", false).await;
-    let (status, observer_login) = app.login_raw("observer", "observerpass1").await;
-    assert_eq!(status, StatusCode::OK);
-    let observer_token = observer_login["token"].as_str().unwrap().to_string();
+    let (target_id, _, target_phone) = app.provision_user_on().await;
+    let (_, observer_token) = app.provision_user().await;
 
     let public_url = format!("/api/admin/users/{}/public", target_id);
 
@@ -1021,9 +1161,15 @@ async fn test_admin_toggles_user_public_flag() {
             .unwrap();
     assert!(is_listed(&body), "public user must appear in the public directory");
 
-    // The admin list reflects the updated flag
+    // The admin list reflects the updated flag, and finds the account by phone
+    // number as well as by name
     let res = app
-        .make_request_with_token(Some(&admin_token), "GET", "/api/admin/users?query=toggleuser&status=active", None)
+        .make_request_with_token(
+            Some(&admin_token),
+            "GET",
+            &format!("/api/admin/users?query={}&status=active", target_phone),
+            None,
+        )
         .await;
     let body: serde_json::Value =
         serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
@@ -1052,4 +1198,502 @@ async fn test_admin_toggles_user_public_flag() {
     // The target's stored flag matches the store as well
     let stored = app.user_store.get_user_by_id(&target_id).await.unwrap().unwrap();
     assert!(!stored.is_public);
+}
+
+// ── SMS verification-code login ──
+//
+// The 60-second per-phone resend cooldown means a test can only ever obtain one
+// code per phone number, so each case below uses a distinct number whenever it
+// needs to send twice.
+
+#[tokio::test]
+async fn test_sms_login_provisions_account_and_returns_working_token() {
+    let app = TestApp::new().await;
+    let phone = "13800138001";
+
+    let (status, body) = app.sms_send_and_login(phone).await;
+    assert_eq!(status, StatusCode::OK, "sms login should succeed: {:?}", body);
+    assert!(!body["token"].as_str().unwrap().is_empty());
+    assert_eq!(body["is_admin"], json!(false));
+    // The account was created from this number, so it is already bound.
+    assert_eq!(body["must_bind_phone"], json!(false));
+    // The display name is derived from the last four digits only.
+    assert_eq!(body["username"], json!("用户8001"));
+
+    let token = body["token"].as_str().unwrap();
+    let res = app
+        .make_request_with_token(Some(token), "GET", "/api/profile", None)
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let profile: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(profile["phone_bound"], json!(true));
+    assert_eq!(profile["phone_masked"], json!("*******8001"));
+    // The full number must never come back to the client.
+    assert!(!profile.to_string().contains(phone));
+}
+
+#[tokio::test]
+async fn test_sms_send_response_never_leaks_the_code() {
+    let app = TestApp::new().await;
+    let phone = "13800138002";
+
+    let (status, body) = app
+        .post_public("/api/auth/sms/send", json!({ "phone": phone }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The code exists only in the server log. Echoing it — or naming the channel
+    // that produced it — would tell an attacker exactly where to look.
+    let text = body.to_string();
+    let code = app.captured_code(phone);
+    assert!(!code.is_empty());
+    assert!(!text.contains(&code), "response leaked the code: {}", text);
+    assert!(body.get("code").is_none(), "response has a `code` field: {}", text);
+    assert!(!text.contains("dev"), "response leaked the provider name: {}", text);
+    assert!(!text.contains("capture"), "response leaked the provider name: {}", text);
+    // Only the timings the client needs to drive its countdown.
+    assert_eq!(body["expires_in"], json!(300));
+    assert_eq!(body["resend_after"], json!(60));
+}
+
+#[tokio::test]
+async fn test_sms_rejects_invalid_phone_numbers() {
+    let app = TestApp::new().await;
+
+    for bad in ["12345", "23800138000", "138001380001", "not-a-phone", ""] {
+        let (status, _) = app
+            .post_public("/api/auth/sms/send", json!({ "phone": bad }))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{:?} should be rejected", bad);
+    }
+    assert_eq!(app.captured_count(), 0, "no message should reach the carrier");
+
+    let (status, _) = app
+        .post_public("/api/auth/sms/login", json!({ "phone": "12345", "code": "000000" }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_sms_code_is_single_use_and_rejected_when_wrong() {
+    let app = TestApp::new().await;
+    let phone = "13800138003";
+
+    let (status, _) = app
+        .post_public("/api/auth/sms/send", json!({ "phone": phone }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let code = app.captured_code(phone);
+
+    let (status, body) = app
+        .post_public("/api/auth/sms/login", json!({ "phone": phone, "code": "000000" }))
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], json!("Invalid verification code"));
+    assert_eq!(body["attempts_left"], json!(4));
+
+    let (status, _) = app
+        .post_public("/api/auth/sms/login", json!({ "phone": phone, "code": code }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Replaying the spent code must not mint a second session.
+    let (status, _) = app
+        .post_public("/api/auth/sms/login", json!({ "phone": phone, "code": code }))
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "a spent code must not log in again");
+
+    // Nor may it be used against a number that never requested one.
+    let (status, _) = app
+        .post_public("/api/auth/sms/login", json!({ "phone": "13800138099", "code": code }))
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_sms_locks_out_after_repeated_wrong_codes() {
+    let app = TestApp::new().await;
+    let phone = "13800138004";
+
+    let (status, _) = app
+        .post_public("/api/auth/sms/send", json!({ "phone": phone }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let code = app.captured_code(phone);
+
+    for expected_left in (0..5).rev() {
+        let (status, body) = app
+            .post_public("/api/auth/sms/login", json!({ "phone": phone, "code": "000000" }))
+            .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["attempts_left"], json!(expected_left));
+    }
+
+    // The sixth attempt trips the lock even with the correct code — that is what
+    // keeps a 6-digit number from being brute-forceable inside the 5-minute TTL.
+    let (status, body) = app
+        .post_public("/api/auth/sms/login", json!({ "phone": phone, "code": code }))
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(body["retry_after"].as_i64().unwrap() > 0);
+
+    let (status, _) = app
+        .post_public("/api/auth/sms/login", json!({ "phone": phone, "code": code }))
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn test_sms_resend_cooldown() {
+    let app = TestApp::new().await;
+    let phone = "13800138005";
+
+    let (status, _) = app
+        .post_public("/api/auth/sms/send", json!({ "phone": phone }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = app
+        .post_public("/api/auth/sms/send", json!({ "phone": phone }))
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(body["retry_after"].as_i64().unwrap() > 0);
+    assert_eq!(app.captured_count(), 1, "a blocked resend must not reach the carrier");
+
+    // A different number is unaffected.
+    let (status, _) = app
+        .post_public("/api/auth/sms/send", json!({ "phone": "13800138006" }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(app.captured_count(), 2);
+}
+
+#[tokio::test]
+async fn test_sms_daily_global_cap_stops_toll_fraud() {
+    let config = jcowork_sms::config::SmsConfig {
+        daily_global_cap: 3,
+        ..jcowork_sms::config::SmsConfig::default()
+    };
+    let app = TestApp::with_sms(config).await;
+
+    // Distinct numbers, so only the process-wide budget can stop these.
+    for i in 0..3 {
+        let (status, _) = app
+            .post_public("/api/auth/sms/send", json!({ "phone": format!("1390013800{}", i) }))
+            .await;
+        assert_eq!(status, StatusCode::OK, "send {} should be within budget", i);
+    }
+    assert_eq!(app.captured_count(), 3);
+
+    let (status, body) = app
+        .post_public("/api/auth/sms/send", json!({ "phone": "13900138009" }))
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(body["error"], json!("SMS quota exhausted, please try again tomorrow"));
+    assert_eq!(app.captured_count(), 3, "the cap must be enforced before the carrier call");
+}
+
+#[tokio::test]
+async fn test_sms_invite_only_mode_refuses_unknown_numbers() {
+    let config = jcowork_sms::config::SmsConfig {
+        allow_register: false,
+        ..jcowork_sms::config::SmsConfig::default()
+    };
+    let app = TestApp::with_sms(config).await;
+
+    let unknown = "13800138007";
+    let (status, body) = app.sms_send_and_login(unknown).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], json!("Phone number is not registered"));
+    assert!(
+        app.user_store.get_user_by_phone(unknown).await.unwrap().is_none(),
+        "invite-only mode must not provision an account"
+    );
+
+    // A number an admin has assigned can still log in.
+    let assigned = "13800138017";
+    let seeded = app
+        .user_store
+        .create_user("seeded-user", "irrelevant", false)
+        .await
+        .unwrap();
+    app.user_store.set_user_phone(&seeded.id, assigned).await.unwrap();
+
+    let (status, body) = app.sms_send_and_login(assigned).await;
+    assert_eq!(status, StatusCode::OK, "{:?}", body);
+    assert_eq!(body["user_id"], json!(seeded.id));
+}
+
+#[tokio::test]
+async fn test_sms_login_rejects_trashed_account() {
+    let app = TestApp::new().await;
+    let phone = "13800138008";
+
+    let user = app.user_store.create_user("trash-me", "irrelevant", false).await.unwrap();
+    app.user_store.set_user_phone(&user.id, phone).await.unwrap();
+    app.user_store.soft_delete_user(&user.id).await.unwrap();
+
+    // The number is still occupied by the trashed row, so the lookup finds it and
+    // the handler rejects instead of falling through to a second INSERT that
+    // would hit the unique index and surface as an opaque 500.
+    let (status, body) = app.sms_send_and_login(phone).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], json!("Account has been deleted"));
+}
+
+#[tokio::test]
+async fn test_bind_phone_closes_the_password_door() {
+    let app = TestApp::new().await;
+    let phone = "13800138010";
+
+    // Deliberately stop short of binding: this test performs the bind itself.
+    let admin_token = app.bootstrap_admin().await;
+
+    // The bootstrap password works while no phone is bound.
+    let (status, _) = app
+        .login_raw(
+            jcowork_gateway::auth::DEFAULT_ADMIN_USERNAME,
+            jcowork_gateway::auth::DEFAULT_ADMIN_PASSWORD,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = app
+        .post_public("/api/auth/sms/send", json!({ "phone": phone }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let code = app.captured_code(phone);
+
+    let res = app
+        .make_request_with_token(
+            Some(&admin_token),
+            "POST",
+            "/api/profile/phone",
+            Some(json!({ "phone": phone, "code": code })),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let profile: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(profile["phone_bound"], json!(true));
+    assert_eq!(profile["is_admin"], json!(true));
+    assert_eq!(profile["phone_masked"], json!("*******8010"));
+
+    // The default admin password is a published constant, so binding has to
+    // retire it — otherwise anyone who can reach the port keeps a way in.
+    let (status, _) = app
+        .login_raw(
+            jcowork_gateway::auth::DEFAULT_ADMIN_USERNAME,
+            jcowork_gateway::auth::DEFAULT_ADMIN_PASSWORD,
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "password login must fail once a phone is bound");
+
+    // A token minted during bootstrap stays valid until it expires; there is no
+    // token-version column to revoke it with. This is a known, documented limit.
+    let res = app
+        .make_request_with_token(Some(&admin_token), "GET", "/api/profile", None)
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_profile_requires_auth_and_validates_username() {
+    let app = TestApp::new().await;
+
+    let res = app.make_request_with_token(None, "GET", "/api/profile", None).await;
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    let (status, body) = app.sms_send_and_login("13800138011").await;
+    assert_eq!(status, StatusCode::OK);
+    let token = body["token"].as_str().unwrap().to_string();
+
+    // Too short, too long, and characters that would break `@`-mentions or
+    // markdown rendering.
+    for bad in [
+        "a",
+        "way-too-long-a-display-name-that-exceeds-the-limit",
+        "a@b",
+        "a b",
+        "a/b",
+        "a\\b",
+    ] {
+        let res = app.rename(&token, bad).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{:?} should be rejected", bad);
+    }
+
+    let res = app.rename(&token, "新名字").await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let profile: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(profile["username"], json!("新名字"));
+
+    // A name that is already taken is a conflict, not a server error.
+    let (status, body2) = app.sms_send_and_login("13800138012").await;
+    assert_eq!(status, StatusCode::OK);
+    let token2 = body2["token"].as_str().unwrap().to_string();
+    let res = app.rename(&token2, "新名字").await;
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+}
+
+async fn json_body(res: axum::http::Response<Body>) -> serde_json::Value {
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+// ── Forced phone binding ──
+
+/// An account with no phone bound may only reach the endpoints the binding
+/// screen needs; everything else is refused until the number exists.
+#[tokio::test]
+async fn test_unbound_account_is_locked_to_the_binding_endpoints() {
+    let app = TestApp::new().await;
+    let token = app.bootstrap_admin().await;
+
+    let res = app
+        .make_request_with_token(Some(&token), "GET", "/api/profile", None)
+        .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "the binding screen must be able to read the profile"
+    );
+
+    for path in ["/api/providers", "/api/sessions", "/api/admin/users"] {
+        let res = app
+            .make_request_with_token(Some(&token), "GET", path, None)
+            .await;
+        assert_eq!(res.status(), StatusCode::FORBIDDEN, "{} must be gated", path);
+        // The frontend branches on this code to redirect, so it has to be there.
+        assert_eq!(json_body(res).await["code"], json!("phone_bind_required"));
+    }
+
+    // Binding lifts the gate for the very same token.
+    app.bind_phone_number(&token).await;
+    let res = app
+        .make_request_with_token(Some(&token), "GET", "/api/providers", None)
+        .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "binding a phone must unlock the rest of the API"
+    );
+}
+
+// ── Admin phone assignment ──
+
+/// Assigning a number is the only way back into an account that predates SMS
+/// login, so it has to work end to end and retire the account's password.
+#[tokio::test]
+async fn test_admin_assigns_and_removes_a_phone_number() {
+    let app = TestApp::new().await;
+    let admin_token = app.seed_and_login_admin().await;
+
+    // A legacy account: no number, so nothing it holds can authenticate.
+    let hash = jcowork_gateway::auth::hash_password("legacypass1").unwrap();
+    let legacy = app
+        .user_store
+        .create_user("legacy", &hash, false)
+        .await
+        .unwrap();
+    assert!(legacy.phone.is_none());
+
+    let phone = app.next_phone();
+    let url = format!("/api/admin/users/{}/phone", legacy.id);
+
+    // Only an admin may assign numbers.
+    let (_, other_token) = app.provision_user().await;
+    let res = app
+        .make_request_with_token(Some(&other_token), "POST", &url, Some(json!({ "phone": phone })))
+        .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    let res = app
+        .make_request_with_token(
+            Some(&admin_token),
+            "POST",
+            &url,
+            Some(json!({ "phone": "12345" })),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST, "an invalid number must be rejected");
+
+    let res = app
+        .make_request_with_token(Some(&admin_token), "POST", &url, Some(json!({ "phone": phone })))
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // The number now authenticates that same account, not a new one.
+    let (status, body) = app.sms_send_and_login(&phone).await;
+    assert_eq!(status, StatusCode::OK, "{:?}", body);
+    assert_eq!(body["user_id"], json!(legacy.id));
+
+    // Assigning stamps the SMS-only sentinel over the stored hash.
+    let stored = app.user_store.get_user_by_id(&legacy.id).await.unwrap().unwrap();
+    assert!(
+        !jcowork_gateway::auth::verify_password("legacypass1", &stored.password_hash)
+            .unwrap_or(false),
+        "assigning a phone must retire the account's password"
+    );
+    let (status, _) = app.login_raw("legacy", "legacypass1").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // The admin list masks the number and can search by it.
+    let res = app
+        .make_request_with_token(
+            Some(&admin_token),
+            "GET",
+            &format!("/api/admin/users?query={}&status=active", phone),
+            None,
+        )
+        .await;
+    let body = json_body(res).await;
+    let row = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["user_id"] == json!(legacy.id))
+        .expect("the assigned number must make the account searchable");
+    assert_eq!(row["phone_bound"], json!(true));
+    assert_eq!(row["phone_masked"], json!(format!("*******{}", &phone[7..])));
+    assert!(row.get("password_hash").is_none());
+
+    // Unbinding frees the number; doing it twice is a conflict.
+    let res = app
+        .make_request_with_token(Some(&admin_token), "DELETE", &url, None)
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app
+        .make_request_with_token(Some(&admin_token), "DELETE", &url, None)
+        .await;
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+
+    // The admin cannot unbind itself: with no number and an unparseable hash
+    // there would be no way back in short of a restart with JCWORK_ADMIN_PHONE.
+    let res = app
+        .make_request_with_token(Some(&admin_token), "GET", "/api/admin/users?status=active", None)
+        .await;
+    let body = json_body(res).await;
+    let admin_id = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["username"] == json!("admin"))
+        .unwrap()["user_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let res = app
+        .make_request_with_token(
+            Some(&admin_token),
+            "DELETE",
+            &format!("/api/admin/users/{}/phone", admin_id),
+            None,
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }

@@ -53,6 +53,68 @@ function handleUnauthorized() {
 }
 
 /**
+ * 账号未绑定手机号：令牌仍然有效，但服务端只放行 /api/profile*。
+ * 保留会话（绑定接口需要它），只打上标记并把用户送回登录页。
+ */
+function handlePhoneBindRequired() {
+  if (redirectingToLogin) return;
+  redirectingToLogin = true;
+  const app = getAppSafe();
+  if (app) {
+    app.globalData.mustBindPhone = true;
+    try {
+      wx.setStorageSync(STORAGE_KEYS.mustBindPhone, true);
+    } catch (e) {}
+  }
+  wx.showToast({ title: '请先绑定手机号', icon: 'none' });
+  setTimeout(() => {
+    wx.reLaunch({
+      url: '/pages/login/login',
+      complete: () => {
+        redirectingToLogin = false;
+      },
+    });
+  }, 600);
+}
+
+/**
+ * 服务端以英文描述（而非错误码）返回鉴权失败原因，这里统一转成中文提示。
+ * 匹配顺序有意为之：更具体的串必须先判断，否则会命中包含它的短串。
+ */
+function localizeAuthError(body) {
+  const raw = String((body && (body.error || body.message)) || '');
+  if (!raw) return '';
+  const retryAfter = body && body.retry_after;
+  const attemptsLeft = body && body.attempts_left;
+  if (raw.includes('Invalid phone number')) return '手机号格式不正确';
+  if (raw.includes('Please wait before requesting another code')) {
+    return retryAfter ? `请 ${retryAfter} 秒后再获取验证码` : '请稍后再获取验证码';
+  }
+  if (raw.includes('Daily limit reached for this phone number')) return '该手机号今日获取次数已达上限';
+  if (raw.includes('SMS quota exhausted')) return '短信额度已用尽，请明天再试';
+  if (raw.includes('Failed to send verification code')) return '验证码发送失败，请稍后重试';
+  if (raw.includes('Verification code is required')) return '请输入验证码';
+  if (raw.includes('Verification code has expired')) return '验证码已过期，请重新获取';
+  if (raw.includes('Invalid verification code')) {
+    return attemptsLeft > 0 ? `验证码不正确，还可尝试 ${attemptsLeft} 次` : '验证码不正确';
+  }
+  if (raw.includes('Too many failed attempts')) {
+    return retryAfter ? `尝试次数过多，请 ${retryAfter} 秒后再试` : '尝试次数过多，请稍后再试';
+  }
+  if (raw.includes('Phone number is not registered')) return '该手机号未注册';
+  if (raw.includes('Account has been deleted')) return '该账号已被删除，无法登录';
+  if (raw.includes('Invalid username or password')) return '用户名或密码错误';
+  if (raw.includes('Bind a phone number to continue')) return '请先绑定手机号';
+  if (raw.includes('already bound')) return '该手机号已被其他账号绑定';
+  if (raw.includes('Username must be between') || raw.includes('Username cannot contain')) {
+    return '显示名称需为 2-24 个字符，且不能包含空格与 @ / \\ 字符';
+  }
+  if (raw.includes('already exists')) return '该名称已被占用';
+  if (raw.includes('Account not found')) return '账号不存在';
+  return raw;
+}
+
+/**
  * 发起请求。resolve 返回响应 JSON；失败时 reject(Error 带 message)。
  * @param {string} path 接口路径，如 /api/auth/login
  * @param {object} [opts] { method, data, auth, baseUrl, timeout }
@@ -86,15 +148,14 @@ function request(path, opts = {}) {
           handleUnauthorized();
         }
         const body = res.data;
+        if (status === 403 && body && body.code === 'phone_bind_required') {
+          handlePhoneBindRequired();
+          reject(new Error(localizeAuthError(body)));
+          return;
+        }
         const msg =
-          (body && (body.error || body.message)) ||
-          (status === 401
-            ? '用户名或密码错误'
-            : status === 403
-              ? '账号不可用（可能已被删除）'
-              : status === 409
-                ? '用户名已存在'
-                : `请求失败（HTTP ${status}）`);
+          (body && (body.error || body.message) && localizeAuthError(body)) ||
+          `请求失败（HTTP ${status}）`;
         reject(new Error(msg));
       },
       fail: (err) => {
@@ -112,8 +173,37 @@ function request(path, opts = {}) {
 
 // ─── 认证 ────────────────────────────────────────────────
 
-/** 登录：POST /api/auth/login → { token, user_id, username, is_admin } */
-function login(serverUrl, username, password) {
+/** 发送短信验证码：POST /api/auth/sms/send → { expires_in, resend_after } */
+function sendSmsCode(serverUrl, phone) {
+  return request('/api/auth/sms/send', {
+    method: 'POST',
+    data: { phone },
+    auth: false,
+    baseUrl: serverUrl,
+    timeout: 20000,
+  });
+}
+
+/**
+ * 短信验证码登录：POST /api/auth/sms/login
+ * → { token, user_id, username, is_admin, must_bind_phone }
+ * 未注册的手机号验证通过后由服务端自动建号。
+ */
+function smsLogin(serverUrl, phone, code) {
+  return request('/api/auth/sms/login', {
+    method: 'POST',
+    data: { phone, code },
+    auth: false,
+    baseUrl: serverUrl,
+    timeout: 20000,
+  });
+}
+
+/**
+ * 管理员引导登录：POST /api/auth/login → 同 smsLogin 的响应结构。
+ * 仅供 admin 首次进入并绑定手机号；绑定后该账号的密码登录永久关闭。
+ */
+function adminLogin(serverUrl, username, password) {
   return request('/api/auth/login', {
     method: 'POST',
     data: { username, password },
@@ -123,15 +213,16 @@ function login(serverUrl, username, password) {
   });
 }
 
-/** 注册：POST /api/auth/register → { token, user_id, username, is_public, is_admin } */
-function register(serverUrl, username, password, isPublic) {
-  return request('/api/auth/register', {
-    method: 'POST',
-    data: { username, password, is_public: !!isPublic },
-    auth: false,
-    baseUrl: serverUrl,
-    timeout: 20000,
-  });
+// ─── 账号资料 ────────────────────────────────────────────
+
+/** 当前账号资料：GET /api/profile → { username, phone_masked, phone_bound, is_admin } */
+function fetchProfile() {
+  return request('/api/profile');
+}
+
+/** 绑定手机号：POST /api/profile/phone → 同 fetchProfile */
+function bindPhone(phone, code) {
+  return request('/api/profile/phone', { method: 'POST', data: { phone, code } });
 }
 
 // ─── 其他 ────────────────────────────────────────────────
@@ -143,8 +234,11 @@ function fetchProviders() {
 
 module.exports = {
   request,
-  login,
-  register,
+  sendSmsCode,
+  smsLogin,
+  adminLogin,
+  fetchProfile,
+  bindPhone,
   fetchProviders,
   currentServerUrl,
   currentToken,

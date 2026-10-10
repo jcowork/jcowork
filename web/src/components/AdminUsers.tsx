@@ -14,22 +14,30 @@ interface AdminUserRow {
   created_at: string;
   deleted_at: string | null;
   days_left: number | null;
+  /** Masked, e.g. `*******8000`. Empty when no number is bound. */
+  phone_masked: string;
+  phone_bound: boolean;
 }
 
 /** Pending destructive action awaiting confirmation in the custom modal. */
 type ConfirmAction =
   | { type: 'trash'; user: AdminUserRow }
-  | { type: 'purge'; user: AdminUserRow };
+  | { type: 'purge'; user: AdminUserRow }
+  | { type: 'removePhone'; user: AdminUserRow };
 
 /**
  * Super-user user management view.
  *
  * Two tabs: active users and the recycle bin. Users can be searched by
- * username, moved to the trash, restored, or permanently deleted.
- * Trashed accounts are purged automatically 7 days after deletion.
+ * username or phone number, moved to the trash, restored, or permanently
+ * deleted. Trashed accounts are purged automatically 7 days after deletion.
  *
- * Note: window.confirm is unsupported in Tauri's WKWebView, so destructive
- * actions go through a custom confirmation modal.
+ * Phone assignment matters more than the rest: an SMS code is the only way a
+ * normal account can authenticate, so an account with no number is unreachable
+ * until someone gives it one here.
+ *
+ * Note: window.confirm and window.prompt are unsupported in Tauri's WKWebView,
+ * so destructive actions and the number entry both go through custom modals.
  */
 export default function AdminUsers({ token }: AdminUsersProps) {
   const t = useT();
@@ -42,6 +50,11 @@ export default function AdminUsers({ token }: AdminUsersProps) {
   const [notice, setNotice] = useState('');
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
   const [busyUserId, setBusyUserId] = useState<string | null>(null);
+  // User whose number is being assigned, and the number typed so far
+  const [phoneTarget, setPhoneTarget] = useState<AdminUserRow | null>(null);
+  const [phoneInput, setPhoneInput] = useState('');
+  // Shown inside the modal, which covers the page-level `error` banner
+  const [phoneError, setPhoneError] = useState('');
 
   // Debounce the search box so typing does not hammer the API
   useEffect(() => {
@@ -85,8 +98,17 @@ export default function AdminUsers({ token }: AdminUsersProps) {
     loadUsers();
   }, [loadUsers]);
 
-  // Run an admin action against the given URL and refresh on success
-  const performAction = async (url: string, method: 'POST' | 'DELETE', successMessage: string, userId: string, body?: Record<string, unknown>) => {
+  /// Localize the handful of admin-action errors the server reports as prose.
+  const mapActionError = (raw: string): string => {
+    if (raw.includes('Cannot remove your own phone number')) return t('cannotRemoveOwnPhone');
+    if (raw.includes('Invalid phone number')) return t('invalidPhone');
+    if (raw.includes('already bound')) return t('phoneAlreadyBound');
+    return raw || t('operationFailed');
+  };
+
+  // Run an admin action against the given URL and refresh on success.
+  // Resolves to the localized error message, or null when it succeeded.
+  const performAction = async (url: string, method: 'POST' | 'DELETE', successMessage: string, userId: string, body?: Record<string, unknown>): Promise<string | null> => {
     setError('');
     setNotice('');
     setBusyUserId(userId);
@@ -103,13 +125,17 @@ export default function AdminUsers({ token }: AdminUsersProps) {
       if (res.ok) {
         setNotice(successMessage);
         await loadUsers();
-      } else {
-        setError(data?.error || t('operationFailed'));
+        return null;
       }
+      const message = mapActionError(data?.error || '');
+      setError(message);
+      return message;
     } catch {
       setError(t('networkError'));
+      return t('networkError');
+    } finally {
+      setBusyUserId(null);
     }
-    setBusyUserId(null);
   };
 
   // Flip a user's public flag (public ↔ private)
@@ -128,14 +154,44 @@ export default function AdminUsers({ token }: AdminUsersProps) {
     if (!confirmAction) return;
     const { type, user } = confirmAction;
     setConfirmAction(null);
+    const id = encodeURIComponent(user.user_id);
     if (type === 'trash') {
-      await performAction(`/api/admin/users/${encodeURIComponent(user.user_id)}/trash`, 'POST', t('userMovedToTrash'), user.user_id);
+      await performAction(`/api/admin/users/${id}/trash`, 'POST', t('userMovedToTrash'), user.user_id);
+    } else if (type === 'removePhone') {
+      await performAction(`/api/admin/users/${id}/phone`, 'DELETE', t('phoneRemoved'), user.user_id);
     } else {
-      await performAction(`/api/admin/users/${encodeURIComponent(user.user_id)}`, 'DELETE', t('userPermanentlyDeleted'), user.user_id);
+      await performAction(`/api/admin/users/${id}`, 'DELETE', t('userPermanentlyDeleted'), user.user_id);
     }
   };
 
-  const confirmMessage = confirmAction?.type === 'trash' ? t('confirmDeleteUser') : t('confirmPermanentDelete');
+  const closePhoneModal = () => {
+    setPhoneTarget(null);
+    setPhoneInput('');
+    setPhoneError('');
+  };
+
+  const submitPhoneAssignment = async () => {
+    if (!phoneTarget) return;
+    const user = phoneTarget;
+    const failure = await performAction(
+      `/api/admin/users/${encodeURIComponent(user.user_id)}/phone`,
+      'POST',
+      t('phoneAssigned'),
+      user.user_id,
+      { phone: phoneInput.trim() },
+    );
+    if (failure) {
+      setPhoneError(failure);
+      return;
+    }
+    closePhoneModal();
+  };
+
+  const confirmMessage = confirmAction?.type === 'trash'
+    ? t('confirmDeleteUser')
+    : confirmAction?.type === 'removePhone'
+      ? t('confirmRemovePhone')
+      : t('confirmPermanentDelete');
 
   const actionButtonStyle: React.CSSProperties = {
     padding: '4px 12px',
@@ -256,9 +312,21 @@ export default function AdminUsers({ token }: AdminUsersProps) {
                         {t('publicBadge')}
                       </span>
                     )}
+                    {tab === 'active' && !u.phone_bound && (
+                      <span
+                        title={t('assignPhoneHint')}
+                        style={{
+                          fontSize: 10, padding: '1px 8px', borderRadius: 8, fontWeight: 600, flexShrink: 0,
+                          background: '#d2992222', color: '#d29922', border: '1px solid #d2992255',
+                        }}
+                      >
+                        {t('phoneNotBoundBadge')}
+                      </span>
+                    )}
                   </div>
                   <div style={{ fontSize: 11, color: '#888', marginTop: 3, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
                     <span>{t('createdAt')}: {u.created_at}</span>
+                    {u.phone_bound && <span>📱 {u.phone_masked}</span>}
                     {tab === 'trash' && u.deleted_at && (
                       <span>{t('deletedAt')}: {u.deleted_at}</span>
                     )}
@@ -272,6 +340,28 @@ export default function AdminUsers({ token }: AdminUsersProps) {
 
                 {/* Actions */}
                 <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                  {tab === 'active' && !u.phone_bound && (
+                    <button
+                      onClick={() => { setPhoneTarget(u); setPhoneInput(''); setPhoneError(''); setError(''); }}
+                      disabled={busyUserId === u.user_id}
+                      style={{
+                        ...actionButtonStyle,
+                        borderColor: '#d2992288',
+                        color: busyUserId === u.user_id ? '#666' : '#d29922',
+                      }}
+                    >
+                      {t('assignPhone')}
+                    </button>
+                  )}
+                  {tab === 'active' && u.phone_bound && (
+                    <button
+                      onClick={() => setConfirmAction({ type: 'removePhone', user: u })}
+                      disabled={busyUserId === u.user_id}
+                      style={{ ...actionButtonStyle, color: busyUserId === u.user_id ? '#666' : '#ccc' }}
+                    >
+                      {t('removePhone')}
+                    </button>
+                  )}
                   {tab === 'active' && (
                     <button
                       onClick={() => togglePublic(u)}
@@ -376,6 +466,93 @@ export default function AdminUsers({ token }: AdminUsersProps) {
                 }}
               >
                 {t('confirm')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Assign-phone modal (window.prompt is unsupported in Tauri WKWebView) */}
+      {phoneTarget && (
+        <div
+          onClick={closePhoneModal}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.6)',
+            zIndex: 999,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: '#1f1f1f',
+              border: '1px solid #333',
+              borderRadius: 10,
+              padding: 20,
+              width: 360,
+              boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
+            }}
+          >
+            <div style={{ color: '#eee', fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
+              {t('assignPhoneTitle')}
+            </div>
+            <div style={{ color: '#888', fontSize: 12, marginBottom: 12 }}>
+              {phoneTarget.username}
+            </div>
+            <div style={{ color: '#888', fontSize: 12, lineHeight: 1.6, marginBottom: 12 }}>
+              {t('assignPhoneHint')}
+            </div>
+            {phoneError && (
+              <div
+                style={{
+                  background: '#3d1c1c', border: '1px solid #e74c3c', borderRadius: 6,
+                  padding: '6px 10px', marginBottom: 12, color: '#f5a5a5', fontSize: 12, lineHeight: 1.5,
+                }}
+              >
+                {phoneError}
+              </div>
+            )}
+            <input
+              type="tel"
+              inputMode="numeric"
+              value={phoneInput}
+              onChange={(e) => { setPhoneInput(e.target.value); setPhoneError(''); }}
+              placeholder={t('phoneNumber')}
+              maxLength={20}
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && phoneInput.trim()) submitPhoneAssignment();
+              }}
+              style={{
+                width: '100%', padding: '8px 12px', borderRadius: 6, marginBottom: 16,
+                border: `1px solid ${phoneError ? '#e74c3c' : '#555'}`, background: '#1a1a1a', color: '#eee',
+                fontSize: 14, outline: 'none', boxSizing: 'border-box',
+              }}
+            />
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button
+                onClick={closePhoneModal}
+                style={{
+                  padding: '6px 16px', borderRadius: 6, border: '1px solid #555',
+                  background: 'transparent', color: '#ccc', cursor: 'pointer', fontSize: 13,
+                }}
+              >
+                {t('cancel')}
+              </button>
+              <button
+                onClick={submitPhoneAssignment}
+                disabled={!phoneInput.trim()}
+                style={{
+                  padding: '6px 16px', borderRadius: 6, border: 'none',
+                  background: phoneInput.trim() ? '#1f6feb' : '#333', color: '#fff',
+                  cursor: phoneInput.trim() ? 'pointer' : 'not-allowed', fontSize: 13,
+                }}
+              >
+                {t('assignPhone')}
               </button>
             </div>
           </div>

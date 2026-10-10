@@ -8,8 +8,10 @@ import Settings from './components/Settings';
 import SkillsSquare from './components/SkillsSquare';
 import PublicProfile from './components/PublicProfile';
 import AdminUsers from './components/AdminUsers';
+import PhoneCodeFields from './components/PhoneCode';
 import { I18nProvider, useT } from './i18n';
 import { API_BASE } from './config';
+import { mapAuthError as translateAuthError, type AuthErrorDetail } from './authErrors';
 import {
   type Conversation,
   loadConversations,
@@ -67,6 +69,37 @@ window.fetch = async function(input: RequestInfo | URL, init?: RequestInit) {
   return res;
 };
 
+// Auth-screen styling. Module-level because the login card and the forced
+// phone-binding card are two separate early returns that must look the same.
+const authInputStyle: React.CSSProperties = {
+  width: '100%', padding: 10, marginBottom: 12, borderRadius: 8,
+  border: '1px solid #555', background: '#1a1a1a', color: '#eee', fontSize: 16,
+};
+
+const authBtnStyle: React.CSSProperties = {
+  width: '100%', padding: 10, borderRadius: 8, border: 'none',
+  background: '#1a73e8', color: '#fff', fontSize: 16, cursor: 'pointer',
+};
+
+function AuthBanner({ msg, type }: { msg: string; type: 'error' | 'success' }) {
+  if (!msg) return null;
+  return (
+    <div style={{
+      background: type === 'error' ? '#3d1c1c' : '#123322',
+      border: `1px solid ${type === 'error' ? '#e74c3c' : '#22aa55'}`,
+      borderRadius: 8,
+      padding: '8px 12px',
+      marginBottom: 12,
+      color: type === 'error' ? '#f5a5a5' : '#7bd88f',
+      fontSize: 14,
+      textAlign: 'center',
+      lineHeight: 1.4,
+    }}>
+      {msg}
+    </div>
+  );
+}
+
 export default function App() {
   return (
     <I18nProvider>
@@ -97,16 +130,22 @@ function AppInner() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConvId, setActiveConvIdState] = useState<string>('');
   const [, setTick] = useState(0); // periodic re-render for 1h history threshold
-  const [loginForm, setLoginForm] = useState({ username: '', password: '', publicAccount: false });
-  const [authView, setAuthView] = useState<'login' | 'register' | 'forgot'>('login');
-  const [forgotStep, setForgotStep] = useState<'request' | 'reset'>('request');
-  const [forgotUsername, setForgotUsername] = useState('');
-  const [generatedCode, setGeneratedCode] = useState<string | null>(null);
-  const [resetForm, setResetForm] = useState({ code: '', password: '', confirmPassword: '' });
+  // SMS code is the only way in; the password form exists solely so a
+  // freshly seeded admin can reach the forced phone-binding screen.
+  const [authMode, setAuthMode] = useState<'sms' | 'admin'>('sms');
+  const [smsForm, setSmsForm] = useState({ phone: '', code: '' });
+  const [adminForm, setAdminForm] = useState({ username: '', password: '' });
+  const [authBusy, setAuthBusy] = useState(false);
+  const [sendingCode, setSendingCode] = useState(false);
+  const [codeCountdown, setCodeCountdown] = useState(0);
   const [authError, setAuthError] = useState('');
-  const [authSuccess, setAuthSuccess] = useState('');
-  const [forgotError, setForgotError] = useState('');
-  const [resetError, setResetError] = useState('');
+  // Forced phone binding (admin bootstrap). The two forms are never on screen
+  // together, but a cooldown started on one must not carry over to the other.
+  const [bindForm, setBindForm] = useState({ phone: '', code: '' });
+  const [bindBusy, setBindBusy] = useState(false);
+  const [bindSendingCode, setBindSendingCode] = useState(false);
+  const [bindCountdown, setBindCountdown] = useState(0);
+  const [bindError, setBindError] = useState('');
   const hiddenTimeRef = useRef(0);
 
   // Per-account conversation storage (background accounts keep their convs here)
@@ -124,18 +163,8 @@ function AppInner() {
 
   const activeAccount = accounts.find((a) => a.userId === activeUserId) ?? null;
 
-  // Map backend error strings to localized, user-friendly messages.
-  const mapAuthError = (raw: string): string => {
-    if (raw.includes('User not found')) return t('userNotFound');
-    if (raw.includes('Invalid username or password')) return t('authFailed');
-    if (raw.includes('already exists')) return t('usernameExists');
-    if (raw.includes('Password must be at least')) return t('passwordTooShort');
-    if (raw.includes('Invalid or expired')) return t('invalidOrExpiredCode');
-    if (raw.includes('Reset code has expired')) return t('resetCodeExpired');
-    if (raw.includes('Invalid reset code')) return t('invalidResetCode');
-    if (raw.includes('Account has been deleted')) return t('accountDeletedMessage');
-    return raw;
-  };
+  // Localized backend error text; see authErrors.ts for the string matching.
+  const mapAuthError = (raw: string, extra?: AuthErrorDetail) => translateAuthError(t, raw, extra);
 
   // Sleep/wake recovery: when the page becomes visible again after being hidden
   // for a while (e.g. laptop lid closed), reload to restore WebView rendering.
@@ -254,117 +283,177 @@ function AppInner() {
     }
   }, [activeAccount, activeConvId]);
 
-  const handleAuth = async (e: React.FormEvent) => {
+  /// POST a JSON body and hand back the parsed response.
+  /// A non-JSON body yields `{}` rather than throwing, so callers only ever
+  /// have to look at the status code plus whatever fields are present.
+  const postJson = async (path: string, body: Record<string, unknown>, token?: string) => {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    return { ok: res.ok, data };
+  };
+
+  /// Ask the server to text a code, then start the countdown it reports.
+  /// Returns false after writing the reason into `setError`.
+  const requestSmsCode = async (
+    phone: string,
+    hooks: {
+      setError: (msg: string) => void;
+      setBusy: (busy: boolean) => void;
+      startCountdown: (secs: number) => void;
+    },
+  ): Promise<boolean> => {
+    const { setError, setBusy, startCountdown } = hooks;
+    setError('');
+    if (!phone.trim()) {
+      setError(t('invalidPhone'));
+      return false;
+    }
+    setBusy(true);
+    try {
+      const { ok, data } = await postJson('/api/auth/sms/send', { phone: phone.trim() });
+      if (!ok) {
+        setError(mapAuthError(data.error ?? '', data));
+        return false;
+      }
+      // Let the server pick the cooldown so the disabled button stays in step
+      // with the throttle that will actually reject the next request.
+      startCountdown(Number(data.resend_after) || 60);
+      return true;
+    } catch {
+      setError(t('networkError'));
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /// Store a freshly issued session and leave the login screens behind.
+  const signIn = (data: {
+    token: string;
+    user_id: string;
+    username: string;
+    is_admin?: boolean;
+    must_bind_phone?: boolean;
+  }) => {
+    const authState: AuthState = {
+      token: data.token,
+      userId: data.user_id,
+      username: data.username,
+      isAdmin: !!data.is_admin,
+      mustBindPhone: !!data.must_bind_phone,
+    };
+    // Upsert into multi-account store
+    const updated = upsertAccount(authState);
+    setAccounts(updated);
+    setActiveUserId(authState.userId);
+    setActiveAccount(authState.userId);
+    setAddingAccount(false);
+    setSmsForm({ phone: '', code: '' });
+    setAdminForm({ username: '', password: '' });
+  };
+
+  /// Report a failed auth response, or sign in if it carried a token.
+  const finishAuth = (
+    ok: boolean,
+    data: { token?: string; error?: string } & AuthErrorDetail,
+    setError: (msg: string) => void,
+  ) => {
+    if (ok && data.token) {
+      signIn(data as { token: string; user_id: string; username: string });
+      return;
+    }
+    setError(mapAuthError(data.error ?? '', data));
+  };
+
+  const handleSendLoginCode = () =>
+    requestSmsCode(smsForm.phone, {
+      setError: setAuthError,
+      setBusy: setSendingCode,
+      startCountdown: setCodeCountdown,
+    });
+
+  /// An unknown number auto-provisions an account, so this doubles as signup.
+  const handleSmsLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError('');
-    setAuthSuccess('');
-    const isRegister = authView === 'register';
-    const endpoint = isRegister ? '/api/auth/register' : '/api/auth/login';
+    setAuthBusy(true);
     try {
-      const res = await fetch(`${API_BASE}${endpoint}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username: loginForm.username,
-          password: loginForm.password,
-          // Register only: opt the new account into the public directory
-          is_public: isRegister ? loginForm.publicAccount : undefined,
-        }),
+      const { ok, data } = await postJson('/api/auth/sms/login', {
+        phone: smsForm.phone.trim(),
+        code: smsForm.code.trim(),
       });
-      const data = await res.json();
-      if (data.token) {
-        const authState: AuthState = {
-          token: data.token,
-          userId: data.user_id,
-          username: data.username,
-          isAdmin: !!data.is_admin,
-        };
-        // Upsert into multi-account store
-        const updated = upsertAccount(authState);
-        setAccounts(updated);
-        setActiveUserId(authState.userId);
-        setActiveAccount(authState.userId);
-        setAddingAccount(false);
-      } else if (data.error) {
-        setAuthError(mapAuthError(data.error));
-      } else {
-        setAuthError(t('authFailed'));
-      }
+      finishAuth(ok, data, setAuthError);
     } catch {
-      console.error('Auth failed');
       setAuthError(t('networkError'));
+    } finally {
+      setAuthBusy(false);
     }
   };
 
-  const handleForgotPassword = async (e: React.FormEvent) => {
+  /// Only reaches a session for the seeded admin with no phone bound; the
+  /// server refuses everyone else, so a successful call means "go bind".
+  const handleAdminLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    setForgotError('');
-    try {
-      const res = await fetch(`${API_BASE}/api/auth/forgot-password`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: forgotUsername }),
-      });
-      const data = await res.json();
-      if (data.code) {
-        setGeneratedCode(data.code);
-        setForgotStep('reset');
-      } else if (data.error) {
-        setForgotError(mapAuthError(data.error));
-      } else {
-        setForgotError(t('networkError'));
-      }
-    } catch {
-      setForgotError(t('networkError'));
-    }
-  };
-
-  const handleResetPassword = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setResetError('');
-    if (resetForm.password !== resetForm.confirmPassword) {
-      setResetError(t('passwordMismatch'));
-      return;
-    }
-    if (resetForm.password.length < 6) {
-      setResetError(t('passwordTooShort'));
-      return;
-    }
-    try {
-      const res = await fetch(`${API_BASE}/api/auth/reset-password`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: forgotUsername, code: resetForm.code, password: resetForm.password }),
-      });
-      const data = await res.json();
-      if (data.message) {
-        setAuthView('login');
-        setForgotStep('request');
-        setGeneratedCode(null);
-        setResetForm({ code: '', password: '', confirmPassword: '' });
-        setForgotUsername('');
-        setAuthError('');
-        setAuthSuccess(t('resetSuccess'));
-      } else if (data.error) {
-        setResetError(mapAuthError(data.error));
-      } else {
-        setResetError(t('networkError'));
-      }
-    } catch {
-      setResetError(t('networkError'));
-    }
-  };
-
-  const goBackToLogin = () => {
-    setAuthView('login');
-    setForgotStep('request');
-    setGeneratedCode(null);
-    setResetForm({ code: '', password: '', confirmPassword: '' });
-    setForgotUsername('');
-    setForgotError('');
-    setResetError('');
     setAuthError('');
-    setAuthSuccess('');
+    setAuthBusy(true);
+    try {
+      const { ok, data } = await postJson('/api/auth/login', {
+        username: adminForm.username.trim(),
+        password: adminForm.password,
+      });
+      finishAuth(ok, data, setAuthError);
+    } catch {
+      setAuthError(t('networkError'));
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleSendBindCode = () =>
+    requestSmsCode(bindForm.phone, {
+      setError: setBindError,
+      setBusy: setBindSendingCode,
+      startCountdown: setBindCountdown,
+    });
+
+  /// Submit the forced binding. The bootstrap token keeps working afterwards —
+  /// the server re-reads the account on every request — so there is no need to
+  /// sign in again.
+  const handleBindPhone = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeAccount) return;
+    setBindError('');
+    setBindBusy(true);
+    try {
+      const { ok, data } = await postJson(
+        '/api/profile/phone',
+        { phone: bindForm.phone.trim(), code: bindForm.code.trim() },
+        activeAccount.token,
+      );
+      if (ok && data.phone_bound) {
+        const updated = upsertAccount({ ...activeAccount, mustBindPhone: false });
+        setAccounts(updated);
+        setBindForm({ phone: '', code: '' });
+      } else {
+        setBindError(mapAuthError(data.error ?? '', data));
+      }
+    } catch {
+      setBindError(t('networkError'));
+    } finally {
+      setBindBusy(false);
+    }
+  };
+
+  const switchAuthMode = (mode: 'sms' | 'admin') => {
+    setAuthMode(mode);
+    setAuthError('');
   };
 
   const logout = () => {
@@ -410,9 +499,46 @@ function AppInner() {
 
   const handleAddAccount = useCallback(() => {
     setAddingAccount(true);
-    setAuthView('login');
-    setAuthError(''); setAuthSuccess('');
-    setLoginForm({ username: '', password: '', publicAccount: false });
+    setAuthMode('sms');
+    setAuthError('');
+    setSmsForm({ phone: '', code: '' });
+    setAdminForm({ username: '', password: '' });
+  }, []);
+
+  // Resend cooldowns. The server enforces them too; ticking here only stops
+  // the button from looking broken while it refuses to send.
+  useEffect(() => {
+    if (codeCountdown <= 0) return;
+    const h = window.setTimeout(() => setCodeCountdown((c) => c - 1), 1000);
+    return () => window.clearTimeout(h);
+  }, [codeCountdown]);
+
+  useEffect(() => {
+    if (bindCountdown <= 0) return;
+    const h = window.setTimeout(() => setBindCountdown((c) => c - 1), 1000);
+    return () => window.clearTimeout(h);
+  }, [bindCountdown]);
+
+  // Probe every stored account once on load. `/api/profile` is one of the two
+  // endpoints an account with no phone number may still call, so it doubles as
+  // the check — and accounts saved before phone binding existed all need it.
+  useEffect(() => {
+    loadAccounts().forEach((acct) => {
+      if (acct.mustBindPhone) return;
+      fetch('/api/profile', {
+        headers: { Authorization: `Bearer ${acct.token}` },
+      })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (!data || data.phone_bound !== false) return;
+          setAccounts((prev) => {
+            const next = prev.map((a) => (a.userId === acct.userId ? { ...a, mustBindPhone: true } : a));
+            saveAccounts(next);
+            return next;
+          });
+        })
+        .catch(() => {});
+    });
   }, []);
 
   const handleRemoveAccount = useCallback((userId: string) => {
@@ -472,160 +598,113 @@ function AppInner() {
   }, [activeUserId]);
 
   if (accounts.length === 0 || addingAccount) {
-    const inputStyle = { width: '100%', padding: 10, marginBottom: 12, borderRadius: 8, border: '1px solid #555', background: '#1a1a1a', color: '#eee', fontSize: 16 };
-    const btnStyle = { width: '100%', padding: 10, borderRadius: 8, border: 'none', background: '#1a73e8', color: '#fff', fontSize: 16, cursor: 'pointer' };
-    const banner = (msg: string, type: 'error' | 'success') => msg ? (
-      <div style={{
-        background: type === 'error' ? '#3d1c1c' : '#123322',
-        border: `1px solid ${type === 'error' ? '#e74c3c' : '#22aa55'}`,
-        borderRadius: 8,
-        padding: '8px 12px',
-        marginBottom: 12,
-        color: type === 'error' ? '#f5a5a5' : '#7bd88f',
-        fontSize: 14,
-        textAlign: 'center',
-        lineHeight: 1.4,
-      }}>
-        {msg}
-      </div>
-    ) : null;
-
-    if (authView === 'forgot') {
-      return (
-        <div className="login-container">
-          <div className="login-card">
-            <img src="/logo.png" className="login-logo" alt="Jcowork" />
-            <h1 style={{ fontSize: 28, marginBottom: 24 }}>Jcowork Agent</h1>
-            {forgotStep === 'request' ? (
-              <form onSubmit={handleForgotPassword}>
-                <p style={{ color: '#888', marginBottom: 16, fontSize: 14 }}>{t('forgotPassword')}</p>
-                {banner(forgotError, 'error')}
-                <input
-                  type="text"
-                  placeholder={t('username')}
-                  value={forgotUsername}
-                  onChange={(e) => { setForgotUsername(e.target.value); setForgotError(''); }}
-                  required
-                  autoFocus
-                  style={forgotError ? { ...inputStyle, border: '1px solid #e74c3c' } : inputStyle}
-                />
-                <button type="submit" style={btnStyle}>
-                  {t('getResetCode')}
-                </button>
-              </form>
-            ) : (
-              <form onSubmit={handleResetPassword}>
-                <div style={{ background: '#1a2744', border: '1px solid #1a73e8', borderRadius: 8, padding: 12, marginBottom: 16, textAlign: 'center' }}>
-                  <p style={{ color: '#1a73e8', fontSize: 13, marginBottom: 4 }}>{t('resetCodeGenerated')}</p>
-                  <p style={{ color: '#888', fontSize: 12, marginBottom: 8 }}>{t('resetCodeExpiresIn')}</p>
-                  <p style={{ fontSize: 32, fontFamily: 'monospace', letterSpacing: 6, margin: 0, color: '#fff' }}>
-                    {generatedCode}
-                  </p>
-                </div>
-                {banner(resetError, 'error')}
-                <input
-                  type="text"
-                  placeholder={t('resetCode')}
-                  value={resetForm.code}
-                  onChange={(e) => { setResetForm({ ...resetForm, code: e.target.value }); setResetError(''); }}
-                  required
-                  maxLength={6}
-                  style={{ ...inputStyle, letterSpacing: 4, textAlign: 'center', fontSize: 20 }}
-                />
-                <input
-                  type="password"
-                  placeholder={t('newPassword')}
-                  value={resetForm.password}
-                  onChange={(e) => { setResetForm({ ...resetForm, password: e.target.value }); setResetError(''); }}
-                  required
-                  style={inputStyle}
-                />
-                <input
-                  type="password"
-                  placeholder={t('confirmPassword')}
-                  value={resetForm.confirmPassword}
-                  onChange={(e) => { setResetForm({ ...resetForm, confirmPassword: e.target.value }); setResetError(''); }}
-                  required
-                  style={{ ...inputStyle, marginBottom: 16 }}
-                />
-                <button type="submit" style={btnStyle}>
-                  {t('resetPassword')}
-                </button>
-              </form>
-            )}
-            <p style={{ marginTop: 16, textAlign: 'center' }}>
-              <a href="#" onClick={goBackToLogin} style={{ color: '#1a73e8' }}>
-                {t('backToLogin')}
-              </a>
-            </p>
-          </div>
-        </div>
-      );
-    }
-
     return (
       <div className="login-container">
         <div className="login-card">
           <img src="/logo.png" className="login-logo" alt="Jcowork" />
           <h1 style={{ fontSize: 28, marginBottom: 24 }}>Jcowork Agent</h1>
-          <form onSubmit={handleAuth}>
-            {banner(authError, 'error')}
-            {banner(authSuccess, 'success')}
-            <input
-              type="text"
-              placeholder={t('username')}
-              value={loginForm.username}
-              onChange={(e) => { setLoginForm({ ...loginForm, username: e.target.value }); setAuthError(''); setAuthSuccess(''); }}
-              style={inputStyle}
-              autoFocus
-            />
-            <input
-              type="password"
-              placeholder={t('password')}
-              value={loginForm.password}
-              onChange={(e) => { setLoginForm({ ...loginForm, password: e.target.value }); setAuthError(''); }}
-              style={inputStyle}
-            />
-            {authView === 'register' && (
-              <div style={{ marginBottom: 12 }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 14, color: '#ccc' }}>
-                  <input
-                    type="checkbox"
-                    checked={loginForm.publicAccount}
-                    onChange={(e) => setLoginForm({ ...loginForm, publicAccount: e.target.checked })}
-                    style={{ width: 16, height: 16, accentColor: '#1a73e8', cursor: 'pointer', flexShrink: 0 }}
-                  />
-                  <span>🌐 {t('publicAccount')}</span>
-                </label>
-                {loginForm.publicAccount && (
-                  <p style={{ color: '#888', fontSize: 12, lineHeight: 1.5, margin: '6px 0 0' }}>
-                    {t('publicAccountHint')}
-                  </p>
-                )}
-              </div>
-            )}
-            <button type="submit" style={{ ...btnStyle, marginBottom: 0 }}>
-              {authView === 'register' ? t('register') : t('login')}
-            </button>
-          </form>
+          {authMode === 'sms' ? (
+            <form onSubmit={handleSmsLogin}>
+              <AuthBanner msg={authError} type="error" />
+              <PhoneCodeFields
+                phone={smsForm.phone}
+                code={smsForm.code}
+                onPhoneChange={(v) => { setSmsForm({ ...smsForm, phone: v }); setAuthError(''); }}
+                onCodeChange={(v) => { setSmsForm({ ...smsForm, code: v }); setAuthError(''); }}
+                onSendCode={handleSendLoginCode}
+                countdown={codeCountdown}
+                sending={sendingCode}
+              />
+              <p style={{ color: '#888', fontSize: 12, lineHeight: 1.5, margin: '0 0 16px' }}>
+                {t('smsLoginHint')}
+              </p>
+              <button
+                type="submit"
+                disabled={authBusy}
+                style={{ ...authBtnStyle, marginBottom: 0, background: authBusy ? '#333' : '#1a73e8', cursor: authBusy ? 'not-allowed' : 'pointer' }}
+              >
+                {authBusy ? t('loggingIn') : t('login')}
+              </button>
+            </form>
+          ) : (
+            <form onSubmit={handleAdminLogin}>
+              <p style={{ color: '#888', marginBottom: 16, fontSize: 13, lineHeight: 1.5 }}>{t('adminLoginHint')}</p>
+              <AuthBanner msg={authError} type="error" />
+              <input
+                type="text"
+                placeholder={t('username')}
+                value={adminForm.username}
+                onChange={(e) => { setAdminForm({ ...adminForm, username: e.target.value }); setAuthError(''); }}
+                style={authInputStyle}
+                autoFocus
+              />
+              <input
+                type="password"
+                placeholder={t('password')}
+                value={adminForm.password}
+                onChange={(e) => { setAdminForm({ ...adminForm, password: e.target.value }); setAuthError(''); }}
+                style={authInputStyle}
+              />
+              <button
+                type="submit"
+                disabled={authBusy}
+                style={{ ...authBtnStyle, marginBottom: 0, background: authBusy ? '#333' : '#1a73e8', cursor: authBusy ? 'not-allowed' : 'pointer' }}
+              >
+                {authBusy ? t('loggingIn') : t('login')}
+              </button>
+            </form>
+          )}
           {addingAccount && (
             <p style={{ marginTop: 12, textAlign: 'center' }}>
-              <a href="#" onClick={() => { setAddingAccount(false); setAuthError(''); setAuthSuccess(''); }} style={{ color: '#1a73e8', fontSize: 14 }}>
+              <a href="#" onClick={() => { setAddingAccount(false); setAuthError(''); }} style={{ color: '#1a73e8', fontSize: 14 }}>
                 {t('cancel')}
               </a>
             </p>
           )}
-          {!addingAccount && authView === 'login' && (
-            <p style={{ marginTop: 12, textAlign: 'center' }}>
-              <a href="#" onClick={() => { setAuthView('forgot'); setAuthError(''); setAuthSuccess(''); }} style={{ color: '#1a73e8', fontSize: 14 }}>
-                {t('forgotPassword')}
-              </a>
-            </p>
-          )}
           <p style={{ marginTop: 16, textAlign: 'center' }}>
-            <span style={{ color: '#888' }}>{authView === 'register' ? t('alreadyHaveAccount') : t('dontHaveAccount')}</span>{' '}
-            <a href="#" onClick={() => { setAuthView(authView === 'register' ? 'login' : 'register'); setAuthError(''); setAuthSuccess(''); }} style={{ color: '#1a73e8' }}>
-              {authView === 'register' ? t('login') : t('register')}
+            <a href="#" onClick={() => switchAuthMode(authMode === 'sms' ? 'admin' : 'sms')} style={{ color: '#888', fontSize: 13 }}>
+              {authMode === 'sms' ? t('adminLoginEntry') : t('smsLoginEntry')}
+            </a>
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // Forced binding. This account holds a valid token but no phone number, and
+  // the server answers every other endpoint with 403 until one exists — so
+  // there is deliberately no way past this screen except binding or signing out.
+  if (activeAccount?.mustBindPhone) {
+    return (
+      <div className="login-container">
+        <div className="login-card">
+          <img src="/logo.png" className="login-logo" alt="Jcowork" />
+          <h1 style={{ fontSize: 24, marginBottom: 8 }}>{t('bindPhoneTitle')}</h1>
+          <p style={{ color: '#888', fontSize: 13, lineHeight: 1.6, marginBottom: 20 }}>
+            {t('bindPhoneHint')}
+          </p>
+          <form onSubmit={handleBindPhone}>
+            <AuthBanner msg={bindError} type="error" />
+            <PhoneCodeFields
+              phone={bindForm.phone}
+              code={bindForm.code}
+              onPhoneChange={(v) => { setBindForm({ ...bindForm, phone: v }); setBindError(''); }}
+              onCodeChange={(v) => { setBindForm({ ...bindForm, code: v }); setBindError(''); }}
+              onSendCode={handleSendBindCode}
+              countdown={bindCountdown}
+              sending={bindSendingCode}
+            />
+            <button
+              type="submit"
+              disabled={bindBusy}
+              style={{ ...authBtnStyle, marginBottom: 0, background: bindBusy ? '#333' : '#1a73e8', cursor: bindBusy ? 'not-allowed' : 'pointer' }}
+            >
+              {bindBusy ? t('saving') : t('bindPhone')}
+            </button>
+          </form>
+          <p style={{ marginTop: 16, textAlign: 'center' }}>
+            <a href="#" onClick={logout} style={{ color: '#888', fontSize: 13 }}>
+              {t('logout')}
             </a>
           </p>
         </div>

@@ -13,6 +13,7 @@ members = [
     "crates/jcowork-cron",
     "crates/jcowork-logs",
     "crates/jcowork-feishu",
+    "crates/jcowork-sms",
     "crates/jcowork-desktop",
 ]
 
@@ -34,6 +35,7 @@ jcowork-llm = { path = "crates/jcowork-llm" }
 jcowork-storage = { path = "crates/jcowork-storage" }
 jcowork-cron = { path = "crates/jcowork-cron" }
 jcowork-feishu = { path = "crates/jcowork-feishu" }
+jcowork-sms = { path = "crates/jcowork-sms" }
 jcowork-logs = { path = "crates/jcowork-logs" }
 
 # Async runtime
@@ -106,6 +108,13 @@ shellexpand = "3"
 # Crypto / hashing
 sha2 = "0.10"
 hex = "0.4"
+# Aliyun SMS RPC signature (HMAC-SHA1 + Base64 + RFC3986 percent-encoding).
+# All three are already in Cargo.lock via transitive deps, so declaring them
+# here adds no new compilation units.
+hmac = "0.12"
+sha1 = "0.10"
+base64 = "0.22"
+percent-encoding = "2.3"
 
 # Test utilities
 tempfile = "3"

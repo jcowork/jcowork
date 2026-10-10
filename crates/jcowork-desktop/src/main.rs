@@ -363,6 +363,14 @@ async fn main() {
         token_duration_hours: config.token_duration_hours,
     };
 
+    let sms = match router::SmsRuntime::from_env() {
+        Ok(sms) => sms,
+        Err(e) => {
+            show_error_and_exit(&format!("短信通道配置错误:\n\n{}", e));
+            return;
+        }
+    };
+
     let state = AppState {
         session_manager,
         auth_config,
@@ -377,7 +385,7 @@ async fn main() {
         log_writer,
         feishu_config_store: Arc::new(FeishuConfigStore::new(pool)),
         feishu_client_cache: Arc::new(dashmap::DashMap::new()),
-        reset_codes: Arc::new(dashmap::DashMap::new()),
+        sms,
         data_dir: data_dir.clone(),
     };
 

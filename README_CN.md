@@ -374,15 +374,18 @@ curl http://localhost:3000/api/health
 # 查看已注册的提供者
 curl http://localhost:3000/api/providers
 
-# 注册用户
-curl -X POST http://localhost:3000/api/auth/register \
+# 获取短信验证码。未配置 JCWORK_SMS_* 时走 dev 通道，
+# 验证码只打印在服务端日志里，不会真正发送短信。
+curl -X POST http://localhost:3000/api/auth/sms/send \
   -H "Content-Type: application/json" \
-  -d '{"username":"testuser","password":"test123"}'
+  -d '{"phone":"13800000000"}'
+# → {"expires_in":300,"resend_after":60}   （响应里永远不含验证码）
 
-# 登录（返回 JWT token）
-curl -X POST http://localhost:3000/api/auth/login \
+# 用服务端日志里的验证码登录（返回 JWT token）
+# 未注册的手机号验证通过后会自动建号
+curl -X POST http://localhost:3000/api/auth/sms/login \
   -H "Content-Type: application/json" \
-  -d '{"username":"testuser","password":"test123"}'
+  -d '{"phone":"13800000000","code":"123456"}'
 ```
 
 ## 测试
@@ -409,7 +412,7 @@ cargo test -p jcowork-gateway
 | `jcowork-storage` | 数据库创建、每用户连接池、文件操作、路径穿越防护 |
 | `jcowork-memory` | 记忆保存/召回/搜索、FTS5 全文检索 |
 | `jcowork-skills` | 技能 CRUD、patch 版本控制、frontmatter 解析 |
-| `jcowork-gateway` | JWT token 创建/验证、Argon2 密码哈希/验证 |
+| `jcowork-gateway` | JWT 创建/验证、Argon2 密码哈希/验证、手机号规范化、短信登录与绑定 |
 | `jcowork-agent` | PromptBuilder 组装、注入扫描 |
 | `jcowork-tools` | ToolRegistry 分发、schema 生成 |
 
@@ -419,10 +422,14 @@ cargo test -p jcowork-gateway
 # 用 DeepSeek 测试 key 启动服务器
 DEEPSEEK_API_KEY=sk-test JCWORK_PORT=3001 cargo run --bin jcowork &
 
-# 测试认证流程
-TOKEN=$(curl -s -X POST http://localhost:3001/api/auth/register \
+# 测试认证流程 —— dev 短信通道会把验证码打印到服务端日志
+curl -s -X POST http://localhost:3001/api/auth/sms/send \
   -H "Content-Type: application/json" \
-  -d '{"username":"integration","password":"test123"}' | jq -r '.token')
+  -d '{"phone":"13800000000"}'
+
+TOKEN=$(curl -s -X POST http://localhost:3001/api/auth/sms/login \
+  -H "Content-Type: application/json" \
+  -d '{"phone":"13800000000","code":"<服务端日志里的验证码>"}' | jq -r '.token')
 
 echo "获取到 token: $TOKEN"
 
@@ -690,6 +697,15 @@ server {
 | `JCWORK_DATA_DIR` | `~/.jcowork/data` | 数据目录（每用户数据库和工作空间） |
 | `JCWORK_JWT_SECRET` | `change-me-in-production` | JWT 签名密钥（生产环境务必修改！） |
 | `JCWORK_TOKEN_DURATION_HOURS` | `24` | JWT token 有效期（小时） |
+| `JCWORK_SMS_PROVIDER` | `auto` | 短信通道：`auto`、`aliyun` 或 `dev`（dev 只把验证码写进服务端日志，不真正发送） |
+| `JCWORK_SMS_ACCESS_KEY_ID` | （空） | 阿里云短信 AccessKey ID |
+| `JCWORK_SMS_ACCESS_KEY_SECRET` | （空） | 阿里云短信 AccessKey Secret |
+| `JCWORK_SMS_SIGN_NAME` | （空） | 阿里云短信签名 |
+| `JCWORK_SMS_TEMPLATE_CODE` | （空） | 阿里云短信模板 CODE（模板需接受一个 `code` 变量） |
+| `JCWORK_SMS_DAILY_GLOBAL_CAP` | `500` | 全进程每个 UTC 日的发送上限，防短信盗刷的主要防线 |
+| `JCWORK_SMS_ALLOW_REGISTER` | `true` | 设为 `false` 即邀请制：未注册号码直接拒绝，不再自动开户 |
+| `JCWORK_ADMIN_PHONE` | （空） | 启动时绑定 admin 手机号，在首次登录前就关闭默认密码入口；填 `clear` 表示解绑 |
+| `JCWORK_ADMIN_BOOTSTRAP_PASSWORD` | （空） | 初始 admin 密码，仅在首次创建该账号时生效 |
 | `JCWORK_DEFAULT_MODEL` | `moonshot:kimi-k2.6` | 默认 LLM 模型（`provider:model` 格式） |
 | `DEEPSEEK_API_KEY` | （空） | DeepSeek API Key |
 | `QWEN_API_KEY` | （空） | 通义千问 API Key |
@@ -874,14 +890,56 @@ python app.py
 
 对于较长文档或更精确的检索，LLM 还可使用 `doc_retrieve` 工具对文档分块进行语义搜索。
 
+## 认证与登录方式
+
+短信验证码是唯一的登录凭据。用户名密码注册与密码找回均已下线，
+`/api/auth/register`、`/api/auth/forgot-password`、`/api/auth/reset-password` 三个接口不再存在。
+
+**普通账号。** `POST /api/auth/sms/send` 下发验证码，`POST /api/auth/sms/login`
+用验证码换取 JWT。验证通过但尚未注册的手机号会当场自动建号，显示名称取号码后四位
+（如 `用户1111`），可在「设置 → 账号资料」中自行修改。验证码一次性有效、5 分钟过期，
+且永远不会出现在任何 HTTP 响应里 —— 使用 `dev` 短信通道时，唯一能读到它的地方是服务端日志。
+
+**管理员引导登录。** `admin` 账号带有公开的初始密码（`admin123`，首次创建时可用
+`JCWORK_ADMIN_BOOTSTRAP_PASSWORD` 覆盖），否则全新实例无从进入。`POST /api/auth/login`
+只在该账号尚未绑定手机号时接受这个密码；引导登录成功会返回 `must_bind_phone: true`，
+前端随即展示一个无法跳过的绑定页面，绑定成功后密码哈希被替换为不可解析的哨兵值。
+此后该账号只能用验证码登录，`/api/auth/login` 对它一律返回 401。
+更推荐直接配置 `JCWORK_ADMIN_PHONE`：服务启动时就把手机号绑定好，
+默认密码从头到尾都不会被接受，也就不必依赖首次登录的绑定页面。
+注意：绑定之前签发的引导令牌在自然过期前（默认 24 小时）仍然有效，
+因为库里没有可用于吊销的令牌版本字段。
+
+**未绑定手机号时的锁定。** 处于 `must_bind_phone` 状态时，除 `/api/profile` 与
+`/api/profile/phone` 之外的所有接口都返回 `403 {"code":"phone_bind_required"}`。
+
+**存量账号。** 本次改造之前创建的账号都没有手机号，因此无法登录，数据未做迁移。
+管理员需要在「用户管理」中为其分配手机号（`POST /api/admin/users/{id}/phone`），
+或将其删除。仍持有这类账号令牌的 Web 客户端会在加载时自动发现：`/api/profile` 探测
+返回 `phone_bound: false`，于是把用户送进绑定页面而不是撞一屏 403 ——
+换句话说，绑定手机号本身就是存量账号的迁移路径。
+
+**公开账号。** 把自己的账号设为公开，原先是注册表单上的一个勾选项。注册表单已经移除，
+因此 `is_public` 现在只能由管理员修改（`POST /api/admin/users/{id}/public`）。
+
+**冒烟脚本。** `scripts/smoke_mp_client.js` 与 `scripts/smoke_mp_page.js` 无法再自行注册账号，
+改为从 `JCWORK_SMOKE_TOKEN` 读取预先签发的令牌，缺失时以非零码退出。
+令牌的获取步骤写在这两个脚本的文件头部注释里。
+
 ## API 参考
 
 ### 认证
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/auth/register` | 注册新用户 |
-| POST | `/api/auth/login` | 登录，返回 JWT |
+| POST | `/api/auth/sms/send` | 发送验证码（响应中永远不含验证码） |
+| POST | `/api/auth/sms/login` | 验证码登录；未注册的号码自动建号 |
+| POST | `/api/auth/login` | 仅管理员引导登录，绑定手机号后永久失效 |
+| GET | `/api/profile` | 自己的用户名、掩码手机号、`phone_bound`、`is_admin` |
+| POST | `/api/profile/phone` | 用验证码绑定或更换自己的手机号 |
+| PUT | `/api/profile/username` | 修改自己的显示名称 |
+| POST | `/api/admin/users/{id}/phone` | 管理员为用户分配手机号 |
+| DELETE | `/api/admin/users/{id}/phone` | 管理员解除用户手机号 |
 
 ### 聊天
 

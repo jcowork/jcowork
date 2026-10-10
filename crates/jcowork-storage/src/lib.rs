@@ -20,6 +20,6 @@ pub use embedding_client::{EmbeddingClient, cosine_similarity, embedding_to_byte
 pub use feishu_store::FeishuConfigStore;
 pub use docling_manager::{DoclingManager, DoclingStatus, PreWarmStatus, SetupState};
 pub use file_store::FileStore;
-pub use user_store::UserStore;
+pub use user_store::{UserStore, sms_only_password_hash};
 pub use vector_index::VectorIndex;
 pub use workspace_index::{WorkspaceIndex, ScoredChunk, DocChunkRow, locate_offset};

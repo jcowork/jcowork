@@ -20,6 +20,10 @@ pub struct User {
     pub username: String,
     pub password_hash: String,
     pub feishu_open_id: Option<String>,
+    /// Phone number used for SMS verification-code login. `None` means the
+    /// account has not bound one yet and therefore cannot log in by SMS.
+    /// Unique across accounts; stored normalized to digits only.
+    pub phone: Option<String>,
     pub created_at: String,
     /// Public account flag (chosen at registration). Public accounts are
     /// visible in every user's contacts list and their public documents /
@@ -68,6 +72,7 @@ impl UserStore {
                 username TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
                 feishu_open_id TEXT UNIQUE,
+                phone TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 is_public INTEGER NOT NULL DEFAULT 0,
                 is_admin INTEGER NOT NULL DEFAULT 0,
@@ -111,8 +116,25 @@ impl UserStore {
         .execute(&pool)
         .await; // Ignore error if column already exists
 
+        // Add phone column if it doesn't exist (migration for existing DBs).
+        // Pre-existing accounts have no phone, so they cannot log in by SMS
+        // until an admin assigns one.
+        let _ = sqlx::query(
+            "ALTER TABLE users ADD COLUMN phone TEXT",
+        )
+        .execute(&pool)
+        .await; // Ignore error if column already exists
+
         let _ = sqlx::query(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_feishu_open_id ON users(feishu_open_id)",
+        )
+        .execute(&pool)
+        .await; // Ignore error if index already exists
+
+        // A unique index treats NULLs as distinct, so legacy rows with no phone
+        // coexist fine while bound numbers stay one-per-account.
+        let _ = sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users(phone)",
         )
         .execute(&pool)
         .await; // Ignore error if index already exists
@@ -146,6 +168,7 @@ impl UserStore {
             username: username.to_string(),
             password_hash: password_hash.to_string(),
             feishu_open_id: None,
+            phone: None,
             created_at: chrono::Utc::now().naive_utc().to_string(),
             is_public,
             is_admin: false,
@@ -156,7 +179,7 @@ impl UserStore {
     /// Look up a user by username.
     pub async fn get_user_by_username(&self, username: &str) -> Result<Option<User>> {
         let user = sqlx::query_as::<_, User>(
-            "SELECT id, username, password_hash, feishu_open_id, created_at, is_public, is_admin, deleted_at FROM users WHERE username = ?",
+            "SELECT id, username, password_hash, feishu_open_id, phone, created_at, is_public, is_admin, deleted_at FROM users WHERE username = ?",
         )
         .bind(username)
         .fetch_optional(&self.pool)
@@ -168,7 +191,7 @@ impl UserStore {
     /// Look up a user by ID.
     pub async fn get_user_by_id(&self, user_id: &str) -> Result<Option<User>> {
         let user = sqlx::query_as::<_, User>(
-            "SELECT id, username, password_hash, feishu_open_id, created_at, is_public, is_admin, deleted_at FROM users WHERE id = ?",
+            "SELECT id, username, password_hash, feishu_open_id, phone, created_at, is_public, is_admin, deleted_at FROM users WHERE id = ?",
         )
         .bind(user_id)
         .fetch_optional(&self.pool)
@@ -183,7 +206,7 @@ impl UserStore {
     /// Callers must only expose safe fields (never `password_hash`).
     pub async fn list_public_users(&self) -> Result<Vec<User>> {
         let users = sqlx::query_as::<_, User>(
-            "SELECT id, username, password_hash, feishu_open_id, created_at, is_public, is_admin, deleted_at FROM users WHERE is_public = 1 AND deleted_at IS NULL ORDER BY username",
+            "SELECT id, username, password_hash, feishu_open_id, phone, created_at, is_public, is_admin, deleted_at FROM users WHERE is_public = 1 AND deleted_at IS NULL ORDER BY username",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -205,10 +228,28 @@ impl UserStore {
         Ok(())
     }
 
+    /// Rename an account. Fails if the new name is already taken.
+    pub async fn update_username(&self, user_id: &str, username: &str) -> Result<()> {
+        let result = sqlx::query("UPDATE users SET username = ? WHERE id = ?")
+            .bind(username)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await;
+
+        match result {
+            Ok(r) if r.rows_affected() == 0 => anyhow::bail!("User not found"),
+            Ok(_) => Ok(()),
+            Err(e) if e.to_string().contains("UNIQUE constraint") => {
+                anyhow::bail!("Username '{}' already exists", username)
+            }
+            Err(e) => Err(anyhow::anyhow!("Failed to update username: {}", e)),
+        }
+    }
+
     /// Look up a user by Feishu open_id.
     pub async fn get_user_by_feishu_open_id(&self, open_id: &str) -> Result<Option<User>> {
         let user = sqlx::query_as::<_, User>(
-            "SELECT id, username, password_hash, feishu_open_id, created_at, is_public, is_admin, deleted_at FROM users WHERE feishu_open_id = ?",
+            "SELECT id, username, password_hash, feishu_open_id, phone, created_at, is_public, is_admin, deleted_at FROM users WHERE feishu_open_id = ?",
         )
         .bind(open_id)
         .fetch_optional(&self.pool)
@@ -247,11 +288,125 @@ impl UserStore {
             username,
             password_hash,
             feishu_open_id: Some(open_id.to_string()),
+            phone: None,
             created_at: chrono::Utc::now().naive_utc().to_string(),
             is_public: false,
             is_admin: false,
             deleted_at: None,
         })
+    }
+
+    // ── Phone numbers (SMS verification-code login) ──
+
+    /// Look up a user by phone number.
+    ///
+    /// Deliberately does **not** filter on `deleted_at`: a trashed account still
+    /// occupies its phone number in the unique index, so filtering here would
+    /// make a re-login attempt fall through to INSERT and fail with a 500.
+    /// Callers must inspect `deleted_at` themselves and report the account as
+    /// deleted.
+    pub async fn get_user_by_phone(&self, phone: &str) -> Result<Option<User>> {
+        let user = sqlx::query_as::<_, User>(
+            "SELECT id, username, password_hash, feishu_open_id, phone, created_at, is_public, is_admin, deleted_at FROM users WHERE phone = ?",
+        )
+        .bind(phone)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(user)
+    }
+
+    /// Get or create the account owning `phone`.
+    ///
+    /// SMS signup collects no username, so a display name is derived from the
+    /// last four digits. The password is a sentinel that Argon2 cannot parse,
+    /// making password login fail closed for these accounts.
+    pub async fn get_or_create_by_phone(&self, phone: &str) -> Result<User> {
+        if let Some(user) = self.get_user_by_phone(phone).await? {
+            return Ok(user);
+        }
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let password_hash = sms_only_password_hash();
+        let created_at = chrono::Utc::now().naive_utc().to_string();
+        let base = default_username(phone);
+
+        for attempt in 0..5 {
+            let username = if attempt == 0 {
+                base.clone()
+            } else {
+                format!("{}{}", base, random_suffix())
+            };
+
+            let result = sqlx::query(
+                "INSERT INTO users (id, username, password_hash, phone) VALUES (?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(&username)
+            .bind(&password_hash)
+            .bind(phone)
+            .execute(&self.pool)
+            .await;
+
+            match result {
+                Ok(_) => {
+                    return Ok(User {
+                        id,
+                        username,
+                        password_hash,
+                        feishu_open_id: None,
+                        phone: Some(phone.to_string()),
+                        created_at,
+                        is_public: false,
+                        is_admin: false,
+                        deleted_at: None,
+                    });
+                }
+                Err(e) if e.to_string().contains("UNIQUE constraint") => {
+                    // A concurrent login may have created this phone first —
+                    // that is a success, not a collision to retry.
+                    if let Some(user) = self.get_user_by_phone(phone).await? {
+                        return Ok(user);
+                    }
+                    // Otherwise the display name is taken; loop for a new suffix.
+                }
+                Err(e) => return Err(anyhow::anyhow!("Failed to create user: {}", e)),
+            }
+        }
+
+        anyhow::bail!("Failed to allocate a username for phone number")
+    }
+
+    /// Bind or rebind `phone` to an account. Fails if another account already
+    /// holds the number.
+    pub async fn set_user_phone(&self, user_id: &str, phone: &str) -> Result<()> {
+        let result = sqlx::query("UPDATE users SET phone = ? WHERE id = ?")
+            .bind(phone)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await;
+
+        match result {
+            Ok(r) if r.rows_affected() == 0 => anyhow::bail!("User not found"),
+            Ok(_) => Ok(()),
+            Err(e) if e.to_string().contains("UNIQUE constraint") => anyhow::bail!(
+                "Phone number is already bound to another account"
+            ),
+            Err(e) => Err(anyhow::anyhow!("Failed to bind phone number: {}", e)),
+        }
+    }
+
+    /// Remove the phone binding from an account (admin recovery action).
+    pub async fn clear_user_phone(&self, user_id: &str) -> Result<()> {
+        let result = sqlx::query("UPDATE users SET phone = NULL WHERE id = ?")
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            anyhow::bail!("User not found");
+        }
+        Ok(())
     }
 
     // ── Admin user management (super user) ──
@@ -287,8 +442,9 @@ impl UserStore {
     /// List users for the admin management page.
     ///
     /// `status`: "active" (not in trash), "trash" (in trash), anything else
-    /// = all users. `query` filters by username substring (case-insensitive).
-    /// Callers must only expose safe fields (never `password_hash`).
+    /// = all users. `query` filters by username or phone substring
+    /// (case-insensitive). Callers must only expose safe fields (never
+    /// `password_hash`).
     pub async fn list_users(&self, query: Option<&str>, status: &str) -> Result<Vec<User>> {
         let status_clause = match status {
             "active" => " AND deleted_at IS NULL",
@@ -297,15 +453,19 @@ impl UserStore {
         };
         let search = query.map(|q| format!("%{}%", q.trim().to_lowercase()));
         let sql = format!(
-            "SELECT id, username, password_hash, feishu_open_id, created_at, is_public, is_admin, deleted_at \
+            "SELECT id, username, password_hash, feishu_open_id, phone, created_at, is_public, is_admin, deleted_at \
              FROM users WHERE 1=1{}{} ORDER BY created_at DESC",
             status_clause,
-            if search.is_some() { " AND LOWER(username) LIKE ?" } else { "" },
+            if search.is_some() {
+                " AND (LOWER(username) LIKE ? OR phone LIKE ?)"
+            } else {
+                ""
+            },
         );
 
         let mut q = sqlx::query_as::<_, User>(&sql);
         if let Some(s) = &search {
-            q = q.bind(s);
+            q = q.bind(s).bind(s);
         }
         let users = q.fetch_all(&self.pool).await?;
         Ok(users)
@@ -385,5 +545,152 @@ impl UserStore {
             anyhow::bail!("User not found");
         }
         Ok(())
+    }
+}
+
+/// Password hash for an account that may only authenticate by SMS.
+///
+/// The `!sms-auth-only!:` prefix is not a valid Argon2 encoding, so
+/// `PasswordHash::new` rejects it and password verification fails closed rather
+/// than silently matching. The random tail keeps every sentinel distinct.
+pub fn sms_only_password_hash() -> String {
+    format!("!sms-auth-only!:{}", uuid::Uuid::new_v4())
+}
+
+/// Display name for an account provisioned by SMS signup, which collects none.
+///
+/// Only the last four digits are used. A full number would publish it to every
+/// other user through `list_public_users` and into LLM prompts; a masked form
+/// like `138****8000` still reveals 7 of 11 digits, leaving only 10^4
+/// candidates to brute-force the rest. "尾号 8000" is the convention banks and
+/// carriers already use, and it keeps `@`-mentions typeable.
+fn default_username(phone: &str) -> String {
+    let tail = &phone[phone.len().saturating_sub(4)..];
+    format!("用户{}", tail)
+}
+
+/// Short suffix used when the derived display name is already taken.
+/// Ambiguous characters (0, 1, i, l, o) are excluded so the name stays legible.
+fn random_suffix() -> String {
+    const ALPHABET: &[u8] = b"23456789abcdefghjkmnpqrstuvwxyz";
+    uuid::Uuid::new_v4()
+        .as_bytes()
+        .iter()
+        .take(4)
+        .map(|b| ALPHABET[(*b % ALPHABET.len() as u8) as usize] as char)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The TempDir must be returned and held by the test — dropping it deletes
+    /// the database file underneath the pool.
+    async fn setup() -> (tempfile::TempDir, UserStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = UserStore::new(dir.path().to_str().unwrap()).await.unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn default_username_shows_only_the_last_four_digits() {
+        assert_eq!(default_username("13800138000"), "用户8000");
+        assert_eq!(default_username("123"), "用户123");
+        assert_eq!(default_username(""), "用户");
+    }
+
+    #[test]
+    fn random_suffix_is_four_legible_characters() {
+        let s = random_suffix();
+        assert_eq!(s.chars().count(), 4);
+        assert!(s.chars().all(|c| "23456789abcdefghjkmnpqrstuvwxyz".contains(c)));
+        assert_ne!(random_suffix(), random_suffix());
+    }
+
+    #[tokio::test]
+    async fn get_or_create_by_phone_is_idempotent() {
+        let (_dir, store) = setup().await;
+        let first = store.get_or_create_by_phone("13800001111").await.unwrap();
+        let second = store.get_or_create_by_phone("13800001111").await.unwrap();
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(first.username, "用户1111");
+        assert_eq!(second.phone.as_deref(), Some("13800001111"));
+        assert!(!second.is_public, "SMS-provisioned accounts start private");
+        assert!(
+            second.password_hash.starts_with("!sms-auth-only!:"),
+            "password must be an unusable sentinel"
+        );
+    }
+
+    #[tokio::test]
+    async fn colliding_display_names_get_distinct_usernames() {
+        let (_dir, store) = setup().await;
+        let a = store.get_or_create_by_phone("13800001111").await.unwrap();
+        let b = store.get_or_create_by_phone("13900001111").await.unwrap();
+
+        assert_eq!(a.username, "用户1111");
+        assert_ne!(a.id, b.id);
+        assert!(
+            b.username.starts_with("用户1111"),
+            "suffixed name keeps the recognizable prefix, got {}",
+            b.username
+        );
+        assert!(b.username.len() > a.username.len());
+    }
+
+    #[tokio::test]
+    async fn set_user_phone_rejects_a_number_held_by_another_account() {
+        let (_dir, store) = setup().await;
+        let owner = store.get_or_create_by_phone("13800002222").await.unwrap();
+        let other = store
+            .create_user("legacy", "somehash", false)
+            .await
+            .unwrap();
+
+        assert!(store.set_user_phone(&other.id, "13800002222").await.is_err());
+
+        let err = store
+            .set_user_phone(&other.id, "13800002222")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("already bound"), "got: {}", err);
+
+        // A free number binds fine, and the owner keeps theirs.
+        store.set_user_phone(&other.id, "13800003333").await.unwrap();
+        assert_eq!(
+            store.get_user_by_id(&other.id).await.unwrap().unwrap().phone.as_deref(),
+            Some("13800003333")
+        );
+        assert_eq!(
+            store.get_user_by_phone("13800002222").await.unwrap().unwrap().id,
+            owner.id
+        );
+    }
+
+    #[tokio::test]
+    async fn get_user_by_phone_still_finds_trashed_accounts() {
+        let (_dir, store) = setup().await;
+        let user = store.get_or_create_by_phone("13800004444").await.unwrap();
+
+        store.soft_delete_user(&user.id).await.unwrap();
+
+        // The caller decides how to report a deleted account; hiding it here
+        // would send login down the INSERT path and hit the unique index.
+        let found = store.get_user_by_phone("13800004444").await.unwrap();
+        assert!(found.is_some(), "trashed account must still be findable");
+        assert!(found.unwrap().deleted_at.is_some());
+
+        store.clear_user_phone(&user.id).await.unwrap();
+        assert!(store.get_user_by_phone("13800004444").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn set_and_clear_phone_report_missing_users() {
+        let (_dir, store) = setup().await;
+        assert!(store.set_user_phone("nope", "13800005555").await.is_err());
+        assert!(store.clear_user_phone("nope").await.is_err());
     }
 }

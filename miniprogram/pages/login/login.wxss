@@ -1,4 +1,4 @@
-/* 登录 / 注册页样式 */
+/* 登录页样式（短信验证码 / 管理员引导 / 强制绑定手机号） */
 .page {
   min-height: 100vh;
   box-sizing: border-box;
@@ -90,30 +90,63 @@
   font-size: 24rpx;
 }
 
-/* 公开账号开关行 */
-.public-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20rpx;
+/* 绑定态标题与说明 */
+.bind-title {
+  font-size: 34rpx;
+  font-weight: 600;
+  color: #e6edf3;
+  margin-bottom: 12rpx;
+}
+
+.bind-desc {
+  font-size: 24rpx;
+  color: #8b949e;
+  line-height: 1.6;
+  margin-bottom: 32rpx;
+}
+
+/* 各模式表单下方的一行说明 */
+.mode-desc {
+  font-size: 22rpx;
+  color: #8b949e;
+  line-height: 1.6;
   margin-bottom: 28rpx;
 }
 
-.public-text {
+/* 验证码输入 + 获取按钮 */
+.code-row {
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+}
+
+.code-input {
   flex: 1;
   min-width: 0;
 }
 
-.public-title {
-  font-size: 28rpx;
-  color: #e6edf3;
+.code-btn {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 0 24rpx;
+  height: 76rpx;
+  line-height: 76rpx;
+  font-size: 24rpx;
+  border-radius: 12rpx;
+  background: #21262d;
+  border: 1rpx solid #30363d;
+  color: #58a6ff;
 }
 
-.public-desc {
-  margin-top: 6rpx;
-  font-size: 22rpx;
-  color: #8b949e;
-  line-height: 1.5;
+.code-btn[disabled] {
+  background: #161b22;
+  border-color: #21262d;
+  color: #66707a;
+}
+
+.logout-row {
+  margin-top: 24rpx;
+  text-align: center;
 }
 
 .error-box {

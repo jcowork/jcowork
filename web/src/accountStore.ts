@@ -10,6 +10,12 @@ export interface AuthState {
   username: string;
   /** Super user flag returned by the backend on login/register. */
   isAdmin?: boolean;
+  /**
+   * The backend locks an account with no bound phone number down to the
+   * profile endpoints, so this flag drives a full-screen binding prompt.
+   * Persisted, because the lock has to survive a reload.
+   */
+  mustBindPhone?: boolean;
 }
 
 const ACCOUNTS_KEY = 'jcowork_accounts';

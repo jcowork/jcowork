@@ -109,8 +109,8 @@ jcowork-server (binary)
 **建议**:
 ```bash
 # 优先级 P0: 添加 API 集成测试
-crates/jcowork-gateway/tests/api_integration.rs
-- POST /api/auth/register + login
+crates/jcowork-gateway/tests/api_integration.rs   （已落地）
+- POST /api/auth/sms/send + sms/login（注册接口已下线，验证码即注册）
 - GET /api/providers
 - POST /api/chat (mock LLM provider)
 

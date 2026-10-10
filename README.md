@@ -378,15 +378,18 @@ curl http://localhost:3000/api/health
 # Check registered providers
 curl http://localhost:3000/api/providers
 
-# Register a user
-curl -X POST http://localhost:3000/api/auth/register \
+# Request a verification code. Without JCWORK_SMS_* credentials the server
+# runs the dev channel and prints the code to its own log instead of sending it.
+curl -X POST http://localhost:3000/api/auth/sms/send \
   -H "Content-Type: application/json" \
-  -d '{"username":"testuser","password":"test123"}'
+  -d '{"phone":"13800000000"}'
+# → {"expires_in":300,"resend_after":60}   (the code is never in the response)
 
-# Login (returns JWT token)
-curl -X POST http://localhost:3000/api/auth/login \
+# Log in with the code from the server log (returns a JWT).
+# An unknown number is provisioned on the first successful verification.
+curl -X POST http://localhost:3000/api/auth/sms/login \
   -H "Content-Type: application/json" \
-  -d '{"username":"testuser","password":"test123"}'
+  -d '{"phone":"13800000000","code":"123456"}'
 ```
 
 ## Testing
@@ -413,7 +416,7 @@ cargo test -p jcowork-gateway
 | `jcowork-storage` | Database creation, per-user pools, file operations, path traversal blocking |
 | `jcowork-memory` | Memory save/recall/search, FTS5 full-text search |
 | `jcowork-skills` | Skill CRUD, patch versioning, frontmatter parsing |
-| `jcowork-gateway` | JWT token create/verify, Argon2 password hash/verify |
+| `jcowork-gateway` | JWT create/verify, Argon2 hash/verify, phone normalization, SMS login & binding |
 | `jcowork-agent` | PromptBuilder assembly, injection scanning |
 | `jcowork-tools` | ToolRegistry dispatch, schema generation |
 
@@ -423,10 +426,14 @@ cargo test -p jcowork-gateway
 # Start the server with DeepSeek
 DEEPSEEK_API_KEY=sk-test JCWORK_PORT=3001 cargo run --bin jcowork &
 
-# Test the auth flow
-TOKEN=$(curl -s -X POST http://localhost:3001/api/auth/register \
+# Test the auth flow — the dev SMS channel prints the code to the server log
+curl -s -X POST http://localhost:3001/api/auth/sms/send \
   -H "Content-Type: application/json" \
-  -d '{"username":"integration","password":"test123"}' | jq -r '.token')
+  -d '{"phone":"13800000000"}'
+
+TOKEN=$(curl -s -X POST http://localhost:3001/api/auth/sms/login \
+  -H "Content-Type: application/json" \
+  -d '{"phone":"13800000000","code":"<code from the server log>"}' | jq -r '.token')
 
 echo "Got token: $TOKEN"
 
@@ -695,6 +702,15 @@ All config via environment variables:
 | `JCWORK_DATA_DIR` | `~/.jcowork/data` | Data directory for per-user DBs and workspaces |
 | `JCWORK_JWT_SECRET` | `change-me-in-production` | JWT signing secret (CHANGE IN PRODUCTION!) |
 | `JCWORK_TOKEN_DURATION_HOURS` | `24` | JWT token expiry |
+| `JCWORK_SMS_PROVIDER` | `auto` | SMS channel: `auto`, `aliyun`, or `dev` (codes go to the server log, never sent) |
+| `JCWORK_SMS_ACCESS_KEY_ID` | (empty) | Aliyun SMS access key ID |
+| `JCWORK_SMS_ACCESS_KEY_SECRET` | (empty) | Aliyun SMS access key secret |
+| `JCWORK_SMS_SIGN_NAME` | (empty) | Aliyun SMS signature name |
+| `JCWORK_SMS_TEMPLATE_CODE` | (empty) | Aliyun SMS template code (must accept a `code` variable) |
+| `JCWORK_SMS_DAILY_GLOBAL_CAP` | `500` | Messages sent process-wide per UTC day — the toll-fraud guard |
+| `JCWORK_SMS_ALLOW_REGISTER` | `true` | `false` makes login invite-only: unknown numbers are rejected, not provisioned |
+| `JCWORK_ADMIN_PHONE` | (empty) | Bind the admin's phone at startup, closing the default-password door before first login. `clear` unbinds |
+| `JCWORK_ADMIN_BOOTSTRAP_PASSWORD` | (empty) | Password for the seeded admin; only used when the account is first created |
 | `JCWORK_DEFAULT_MODEL` | `moonshot:kimi-k2.6` | Default LLM model (`provider:model` format) |
 | `DEEPSEEK_API_KEY` | (empty) | DeepSeek API key |
 | `QWEN_API_KEY` | (empty) | Qwen / Tongyi Qianwen API key |
@@ -879,14 +895,68 @@ When you attach a document to a chat message, the system automatically:
 
 For larger documents or more precise retrieval, the LLM can also use the `doc_retrieve` tool to perform semantic search over document chunks.
 
+## Authentication
+
+An SMS verification code is the only credential. There is no username/password
+signup and no password reset — `/api/auth/register`, `/api/auth/forgot-password`
+and `/api/auth/reset-password` no longer exist.
+
+**Normal accounts.** `POST /api/auth/sms/send` issues a code and
+`POST /api/auth/sms/login` exchanges it for a JWT. A number that verifies
+successfully and does not exist yet is provisioned on the spot, with a display
+name derived from its last four digits (`用户1111`) that the user can change
+under Settings → Account profile. Codes are single-use, expire after 5 minutes,
+and are never included in any HTTP response — with the `dev` SMS channel the
+only place to read one is the server log.
+
+**The admin bootstrap.** `admin` is seeded with a published default password
+(`admin123`, overridable at first creation with `JCWORK_ADMIN_BOOTSTRAP_PASSWORD`)
+so a fresh instance is reachable at all. `POST /api/auth/login` accepts it only
+while the account has no bound phone number; a successful bootstrap login returns
+`must_bind_phone: true`, the UI shows a binding screen that cannot be dismissed,
+and binding replaces the password hash with an unparseable sentinel. From then on
+that account can only sign in with a code, and `/api/auth/login` returns a plain
+401 for it. Set `JCWORK_ADMIN_PHONE` instead and the number is bound at startup,
+so the default password is never accepted at all — prefer it over relying on the
+first-login binding screen. Bootstrap tokens issued before the bind stay valid
+until they expire (24h by default) — there is no token-version column to revoke
+them with.
+
+**Locked accounts.** While `must_bind_phone` applies, every endpoint except
+`/api/profile` and `/api/profile/phone` answers
+`403 {"code":"phone_bind_required"}`.
+
+**Legacy accounts.** Accounts created before this change have no phone number and
+therefore cannot sign in; no data was migrated. An admin either assigns them a
+number under User management (`POST /api/admin/users/{id}/phone`) or deletes them.
+A web client that still holds such an account's token detects this on load — the
+`/api/profile` probe reports `phone_bound: false`, which routes the user to the
+binding screen instead of a wall of 403s, so binding a number is also the
+migration path.
+
+**Public accounts.** Making your own account public used to be a checkbox on the
+registration form. That form is gone, so `is_public` can now only be changed by an
+admin (`POST /api/admin/users/{id}/public`).
+
+**Smoke scripts.** `scripts/smoke_mp_client.js` and `scripts/smoke_mp_page.js`
+can no longer create their own account, so they read a pre-issued token from
+`JCWORK_SMOKE_TOKEN` and exit non-zero without one. Their file headers document
+how to mint one against the dev SMS channel.
+
 ## API Reference
 
 ### Authentication
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/auth/register` | Register new user |
-| POST | `/api/auth/login` | Login, returns JWT |
+| POST | `/api/auth/sms/send` | Send a verification code (never returned in the response) |
+| POST | `/api/auth/sms/login` | Log in with a code; unknown numbers are provisioned |
+| POST | `/api/auth/login` | Admin bootstrap only — rejected once a phone is bound |
+| GET | `/api/profile` | Own username, masked phone, `phone_bound`, `is_admin` |
+| POST | `/api/profile/phone` | Bind or rebind own phone with a code |
+| PUT | `/api/profile/username` | Change own display name |
+| POST | `/api/admin/users/{id}/phone` | Admin assigns a phone number |
+| DELETE | `/api/admin/users/{id}/phone` | Admin removes a phone number |
 
 ### Chat
 

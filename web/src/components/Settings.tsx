@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useT, useLang } from '../i18n';
 import ProviderManager from './ProviderManager';
+import PhoneCodeFields from './PhoneCode';
+import { mapAuthError } from '../authErrors';
 
 interface ModelInfo {
   id: string;
@@ -12,6 +14,14 @@ interface ProviderInfo {
   id: string;
   name: string;
   models: ModelInfo[];
+}
+
+/** Shape of every `/api/profile` response. */
+interface ProfileDto {
+  username: string;
+  phone_masked: string;
+  phone_bound: boolean;
+  is_admin: boolean;
 }
 
 interface SettingsProps {
@@ -43,6 +53,20 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
   const [feishuLoading, setFeishuLoading] = useState(true);
   const [feishuSaving, setFeishuSaving] = useState(false);
   const [feishuStatus, setFeishuStatus] = useState<'idle' | 'saved' | 'deleted' | 'error'>('idle');
+
+  // Account profile (display name + bound phone number)
+  const [profileName, setProfileName] = useState('');
+  const [phoneMasked, setPhoneMasked] = useState('');
+  const [phoneBound, setPhoneBound] = useState(false);
+  const [profileLoading, setProfileLoading] = useState(true);
+  const [profileError, setProfileError] = useState('');
+  const [profileNotice, setProfileNotice] = useState('');
+  const [nameSaving, setNameSaving] = useState(false);
+  const [changingPhone, setChangingPhone] = useState(false);
+  const [phoneForm, setPhoneForm] = useState({ phone: '', code: '' });
+  const [phoneSaving, setPhoneSaving] = useState(false);
+  const [phoneSending, setPhoneSending] = useState(false);
+  const [phoneCountdown, setPhoneCountdown] = useState(0);
 
   const MODEL_KEY = `jcowork_model_${userId}`;
 
@@ -159,6 +183,117 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
       })
       .catch(() => setFeishuStatus('error'))
       .finally(() => setFeishuSaving(false));
+  };
+
+  // --- Account profile ---
+
+  const applyProfile = (data: ProfileDto) => {
+    setProfileName(data.username || '');
+    setPhoneMasked(data.phone_masked || '');
+    setPhoneBound(!!data.phone_bound);
+  };
+
+  useEffect(() => {
+    fetch('/api/profile', { headers: { 'Authorization': `Bearer ${token}` } })
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((data: ProfileDto) => {
+        applyProfile(data);
+        setProfileLoading(false);
+      })
+      .catch(() => setProfileLoading(false));
+  }, []);
+
+  // Auto-dismiss the success banner
+  useEffect(() => {
+    if (!profileNotice) return;
+    const handle = setTimeout(() => setProfileNotice(''), 2500);
+    return () => clearTimeout(handle);
+  }, [profileNotice]);
+
+  // Resend cooldown. The server enforces it too; this only keeps the button
+  // from looking broken while it refuses to send.
+  useEffect(() => {
+    if (phoneCountdown <= 0) return;
+    const handle = setTimeout(() => setPhoneCountdown(c => c - 1), 1000);
+    return () => clearTimeout(handle);
+  }, [phoneCountdown]);
+
+  const saveDisplayName = async () => {
+    setProfileError('');
+    setProfileNotice('');
+    setNameSaving(true);
+    try {
+      const res = await fetch('/api/profile/username', {
+        method: 'PUT',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: profileName.trim() }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data) {
+        applyProfile(data);
+        setProfileNotice(t('nameUpdated'));
+      } else {
+        setProfileError(mapAuthError(t, data?.error || '', data || undefined));
+      }
+    } catch {
+      setProfileError(t('networkError'));
+    }
+    setNameSaving(false);
+  };
+
+  const sendPhoneCode = async () => {
+    setProfileError('');
+    if (!phoneForm.phone.trim()) {
+      setProfileError(t('invalidPhone'));
+      return;
+    }
+    setPhoneSending(true);
+    try {
+      const res = await fetch('/api/auth/sms/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: phoneForm.phone.trim() }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok) {
+        // Let the server pick the cooldown so the disabled button stays in
+        // step with the throttle that will actually reject the next request.
+        setPhoneCountdown(Number(data?.resend_after) || 60);
+      } else {
+        setProfileError(mapAuthError(t, data?.error || '', data || undefined));
+      }
+    } catch {
+      setProfileError(t('networkError'));
+    }
+    setPhoneSending(false);
+  };
+
+  const savePhone = async () => {
+    setProfileError('');
+    setProfileNotice('');
+    setPhoneSaving(true);
+    try {
+      const res = await fetch('/api/profile/phone', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: phoneForm.phone.trim(), code: phoneForm.code.trim() }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data) {
+        applyProfile(data);
+        setChangingPhone(false);
+        setPhoneForm({ phone: '', code: '' });
+        setProfileNotice(t('phoneUpdated'));
+      } else {
+        setProfileError(mapAuthError(t, data?.error || '', data || undefined));
+      }
+    } catch {
+      setProfileError(t('networkError'));
+    }
+    setPhoneSaving(false);
   };
 
   useEffect(() => {
@@ -303,6 +438,129 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
           ⚠️ {loadError}
         </div>
       )}
+
+      {/* Account Profile Section */}
+      <div style={{ ...cardStyle, marginBottom: 16 }}>
+        <h3 style={{ fontSize: 16, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 20 }}>🪪</span> {t('accountProfile')}
+          {phoneBound && (
+            <span style={{ ...tagStyle, background: '#23863622', color: '#3fb950' }}>{t('phoneBoundBadge')}</span>
+          )}
+        </h3>
+        <div style={{ color: '#888', fontSize: 13, lineHeight: 1.6, marginBottom: 12 }}>
+          {t('accountProfileDesc')}
+        </div>
+        {profileError && (
+          <div style={{
+            padding: '8px 12px', marginBottom: 12, borderRadius: 6,
+            background: '#3a1f1f', border: '1px solid #e5393555', color: '#e57373', fontSize: 12,
+            display: 'flex', alignItems: 'center', gap: 8,
+          }}>
+            <span style={{ flex: 1 }}>{profileError}</span>
+            <button onClick={() => setProfileError('')} style={{ background: 'none', border: 'none', color: '#e57373', cursor: 'pointer', fontSize: 13 }}>✕</button>
+          </div>
+        )}
+        {profileLoading ? (
+          <div style={{ color: '#888', fontSize: 13 }}>{t('loading')}</div>
+        ) : (
+          <>
+            <div style={{ marginBottom: 16 }}>
+              <label style={labelStyle}>{t('displayName')}</label>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <input
+                  value={profileName}
+                  onChange={e => { setProfileName(e.target.value); setProfileError(''); }}
+                  maxLength={24}
+                  style={{
+                    flex: 1, padding: '10px 12px', borderRadius: 8,
+                    border: '1px solid #444', background: '#1a1a1a', color: '#eee',
+                    fontSize: 13, outline: 'none', boxSizing: 'border-box',
+                  }}
+                />
+                <button
+                  onClick={saveDisplayName}
+                  disabled={nameSaving || !profileName.trim()}
+                  style={{
+                    padding: '8px 20px', borderRadius: 8, border: 'none', flexShrink: 0,
+                    background: (nameSaving || !profileName.trim()) ? '#333' : '#1f6feb',
+                    color: '#fff', cursor: (nameSaving || !profileName.trim()) ? 'not-allowed' : 'pointer',
+                    fontSize: 13, fontWeight: 500,
+                  }}
+                >
+                  {nameSaving ? t('saving') : t('saveDisplayName')}
+                </button>
+              </div>
+              <div style={{ color: '#666', fontSize: 12, marginTop: 6 }}>{t('displayNameHint')}</div>
+            </div>
+
+            <div>
+              <label style={labelStyle}>{t('boundPhone')}</label>
+              {phoneBound && !changingPhone ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <span style={{ fontSize: 15, letterSpacing: 1, color: '#e6edf3' }}>{phoneMasked}</span>
+                  <button
+                    onClick={() => { setChangingPhone(true); setProfileError(''); setProfileNotice(''); }}
+                    style={{
+                      padding: '6px 14px', borderRadius: 8, border: '1px solid #1f6feb',
+                      background: 'transparent', color: '#58a6ff', cursor: 'pointer', fontSize: 13,
+                    }}
+                  >
+                    {t('changePhone')}
+                  </button>
+                </div>
+              ) : (
+                <form onSubmit={e => { e.preventDefault(); savePhone(); }}>
+                  {changingPhone && (
+                    <div style={{ color: '#888', fontSize: 12, lineHeight: 1.5, marginBottom: 10 }}>
+                      {t('changePhoneHint')}
+                    </div>
+                  )}
+                  <PhoneCodeFields
+                    phone={phoneForm.phone}
+                    code={phoneForm.code}
+                    onPhoneChange={v => { setPhoneForm({ ...phoneForm, phone: v }); setProfileError(''); }}
+                    onCodeChange={v => { setPhoneForm({ ...phoneForm, code: v }); setProfileError(''); }}
+                    onSendCode={sendPhoneCode}
+                    countdown={phoneCountdown}
+                    sending={phoneSending}
+                    autoFocus={false}
+                  />
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <button
+                      type="submit"
+                      disabled={phoneSaving || !phoneForm.phone.trim() || !phoneForm.code.trim()}
+                      style={{
+                        padding: '8px 20px', borderRadius: 8, border: 'none',
+                        background: (phoneSaving || !phoneForm.phone.trim() || !phoneForm.code.trim()) ? '#333' : '#1f6feb',
+                        color: '#fff',
+                        cursor: (phoneSaving || !phoneForm.phone.trim() || !phoneForm.code.trim()) ? 'not-allowed' : 'pointer',
+                        fontSize: 13, fontWeight: 500,
+                      }}
+                    >
+                      {phoneSaving ? t('saving') : t('save')}
+                    </button>
+                    {changingPhone && phoneBound && (
+                      <button
+                        type="button"
+                        onClick={() => { setChangingPhone(false); setPhoneForm({ phone: '', code: '' }); setProfileError(''); }}
+                        style={{
+                          padding: '8px 16px', borderRadius: 8, border: '1px solid #444',
+                          background: 'transparent', color: '#888', cursor: 'pointer', fontSize: 13,
+                        }}
+                      >
+                        {t('cancel')}
+                      </button>
+                    )}
+                  </div>
+                </form>
+              )}
+            </div>
+            {profileNotice && (
+              <div style={{ color: '#3fb950', fontSize: 13, marginTop: 12 }}>{profileNotice}</div>
+            )}
+          </>
+        )}
+      </div>
 
       {/* LLM Provider Section */}
       <div style={cardStyle}>

@@ -2398,6 +2398,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "argon2",
+ "async-trait",
  "axum",
  "chrono",
  "dashmap",
@@ -2410,6 +2411,7 @@ dependencies = [
  "jcowork-logs",
  "jcowork-memory",
  "jcowork-skills",
+ "jcowork-sms",
  "jcowork-storage",
  "jcowork-tools",
  "jsonwebtoken",
@@ -2522,6 +2524,25 @@ dependencies = [
  "serde_json",
  "sqlx",
  "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "jcowork-sms"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "hmac",
+ "percent-encoding",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha1",
  "tokio",
  "tracing",
  "uuid",

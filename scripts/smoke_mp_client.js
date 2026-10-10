@@ -5,12 +5,19 @@
  * 直接复用 miniprogram/utils 下的模块，验证：
  *  1. 服务器地址规范化 / WebSocket 地址推导
  *  2. Markdown → rich-text 节点解析
- *  3. 注册 → WebSocket 连接 → 发送消息 → 流式事件 → done（或 error）
+ *  3. WebSocket 连接 → 发送消息 → 流式事件 → done（或 error）
  *  4. stop 停止生成
  *  5. 断线重连 + load_history 恢复上下文
  *
- * 用法：node scripts/smoke_mp_client.js [server_url]
+ * 用法：JCWORK_SMOKE_TOKEN=<token> node scripts/smoke_mp_client.js [server_url]
  * 默认服务器：http://localhost:3000
+ *
+ * 注册接口已下线，短信验证码是唯一的登录方式，而验证码只写进服务端日志、
+ * 从不出现在 HTTP 响应里，所以脚本无法自助申请账号。获取令牌：
+ *   1. 不配置 JCWORK_SMS_* 启动 server（dev 通道，验证码打印在日志里）
+ *   2. POST /api/auth/sms/send {"phone":"13800000000"}
+ *   3. 从 server 日志取 code=XXXXXX
+ *   4. POST /api/auth/sms/login {"phone":"13800000000","code":"XXXXXX"} → token
  */
 const path = require('path');
 
@@ -18,8 +25,17 @@ const { normalizeServerUrl, wsBase } = require(path.join(__dirname, '..', 'minip
 const { parseMarkdown } = require(path.join(__dirname, '..', 'miniprogram', 'utils', 'markdown.js'));
 
 const BASE = normalizeServerUrl(process.argv[2] || process.env.JC_SERVER || 'http://localhost:3000');
-const USERNAME = 'mp_smoke_' + Date.now().toString(36);
-const PASSWORD = 'smoke-test-1234';
+const TOKEN = (process.env.JCWORK_SMOKE_TOKEN || '').trim();
+
+/** 从 JWT 载荷里取 user_id（sub），免得再依赖一个注册接口 */
+function userIdFromToken(token) {
+  try {
+    const payload = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    return JSON.parse(Buffer.from(payload, 'base64').toString('utf8')).sub || '';
+  } catch (e) {
+    return '';
+  }
+}
 
 let failures = 0;
 function check(name, ok, detail) {
@@ -72,19 +88,6 @@ function testMarkdown() {
 }
 
 // ─── HTTP 帮助函数 ──────────────────────────────────────
-async function postJson(url, body, token) {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: 'Bearer ' + token } : {}),
-    },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json().catch(() => ({}));
-  return { status: res.status, data };
-}
-
 async function getJson(url, token) {
   const res = await fetch(url, { headers: token ? { Authorization: 'Bearer ' + token } : {} });
   const data = await res.json().catch(() => ({}));
@@ -129,17 +132,15 @@ function waitFor(sock, predicate, timeoutMs) {
 
 async function testEndToEnd() {
   console.log('\n== HTTP / WebSocket 端到端 ==');
-  console.log('服务器:', BASE, '测试账号:', USERNAME);
-
-  const reg = await postJson(BASE + '/api/auth/register', {
-    username: USERNAME,
-    password: PASSWORD,
-    is_public: false,
-  });
-  check('注册成功', reg.status === 200 && !!reg.data.token, JSON.stringify(reg.data).slice(0, 120));
-  const token = reg.data.token;
-  const userId = reg.data.user_id;
-  if (!token) return;
+  if (!TOKEN) {
+    console.log('SKIP  未设置 JCWORK_SMOKE_TOKEN，跳过端到端部分');
+    console.log('      注册接口已下线，请按文件头部的步骤用短信验证码换取一个令牌');
+    process.exit(1);
+  }
+  const token = TOKEN;
+  const userId = userIdFromToken(token);
+  console.log('服务器:', BASE, 'user_id:', userId || '(无法解析)');
+  check('令牌可解析出 user_id', !!userId);
 
   const prov = await getJson(BASE + '/api/providers', token);
   check('providers 接口可用', prov.status === 200, JSON.stringify(prov.data).slice(0, 160));
