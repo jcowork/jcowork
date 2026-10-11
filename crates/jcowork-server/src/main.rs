@@ -194,6 +194,7 @@ async fn main() -> Result<()> {
         user_store,
         log_writer,
         app_settings: Arc::new(AppSettingsStore::new(pool.clone())),
+        captcha: Arc::new(router::CaptchaService::new()),
         feishu_config_store: Arc::new(FeishuConfigStore::new(pool)),
         feishu_client_cache: Arc::new(dashmap::DashMap::new()),
         sms,

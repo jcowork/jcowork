@@ -59,11 +59,11 @@ impl SmtpMailSender {
             from,
         })
     }
-}
 
-#[async_trait]
-impl MailSender for SmtpMailSender {
-    async fn send_code(&self, email: &str, code: &str) -> Result<()> {
+    /// Compose and send a plain-text message. Both `send_code` and
+    /// `send_message` funnel through here so the TLS/auth/timeout setup has
+    /// exactly one delivery path.
+    async fn send_raw(&self, email: &str, subject: &str, body: String) -> Result<()> {
         let to: Mailbox = email
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid recipient address: {e}"))?;
@@ -71,11 +71,11 @@ impl MailSender for SmtpMailSender {
         let mail = Message::builder()
             .from(self.from.clone())
             .to(to)
-            .subject("Jcowork 验证码")
+            .subject(subject)
             .singlepart(
                 SinglePart::builder()
                     .header(ContentType::TEXT_PLAIN)
-                    .body(format!("您的验证码是 {code}，5 分钟内有效。\n若非本人操作，请忽略本邮件。")),
+                    .body(body),
             )
             .map_err(|e| anyhow::anyhow!("failed to compose the email: {e}"))?;
 
@@ -84,6 +84,22 @@ impl MailSender for SmtpMailSender {
             .await
             .map_err(|e| anyhow::anyhow!("SMTP send failed: {e}"))?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl MailSender for SmtpMailSender {
+    async fn send_code(&self, email: &str, code: &str) -> Result<()> {
+        self.send_raw(
+            email,
+            "Jcowork 验证码",
+            format!("您的验证码是 {code}，5 分钟内有效。\n若非本人操作，请忽略本邮件。"),
+        )
+        .await
+    }
+
+    async fn send_message(&self, email: &str, subject: &str, body: &str) -> Result<()> {
+        self.send_raw(email, subject, body.to_string()).await
     }
 
     fn name(&self) -> &'static str {

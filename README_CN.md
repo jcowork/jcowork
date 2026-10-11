@@ -704,13 +704,13 @@ server {
 | `JCWORK_SMS_TEMPLATE_CODE` | （空） | 阿里云短信模板 CODE（模板需接受一个 `code` 变量） |
 | `JCWORK_SMS_DAILY_GLOBAL_CAP` | `500` | 全进程每个 UTC 日的发送上限，防短信盗刷的主要防线 |
 | `JCWORK_SMS_ALLOW_REGISTER` | `true` | 设为 `false` 即邀请制：未注册号码直接拒绝，不再自动开户 |
-| `JCWORK_MAIL_PROVIDER` | `auto` | 邮件通道：`auto`、`smtp` 或 `dev`（dev 只把验证码写进服务端日志，不真正发送）。也可登录后在「设置 → 邮件登录」中配置，已存储的配置优先于这些变量 |
+| `JCWORK_MAIL_PROVIDER` | `auto` | 邮件通道：`auto`、`smtp` 或 `dev`（dev 只把重置验证码与注册凭据邮件写进服务端日志，不真正发送）。也可登录后在「设置 → 邮件登录」中配置，已存储的配置优先于这些变量 |
 | `JCWORK_SMTP_HOST` | （空） | SMTP 服务器地址，任意邮件服务商均可（阿里云邮件推送、Gmail、SendGrid 等） |
 | `JCWORK_SMTP_PORT` | `587` | `465` 为隐式 TLS；`587`/`25` 为 STARTTLS |
 | `JCWORK_SMTP_USERNAME` | （空） | SMTP 用户名 |
 | `JCWORK_SMTP_PASSWORD` | （空） | SMTP 密码 |
-| `JCWORK_SMTP_FROM` | （空） | 验证码邮件的发件地址 |
-| `JCWORK_MAIL_DAILY_GLOBAL_CAP` | `500` | 全进程每个 UTC 日的邮件发送上限，与短信上限相互独立 |
+| `JCWORK_SMTP_FROM` | （空） | 发件地址（重置验证码、注册凭据邮件） |
+| `JCWORK_MAIL_DAILY_GLOBAL_CAP` | `500` | 全进程每个 UTC 日的邮件发送上限（重置验证码与注册凭据邮件），与短信上限相互独立 |
 | `JCWORK_MAIL_ALLOW_REGISTER` | `true` | 设为 `false` 关闭邮箱注册；已有邮箱账号仍可正常登录 |
 | `JCWORK_ADMIN_PHONE` | （空） | 启动时为 admin 绑定手机号，使其可同时用短信登录；填 `clear` 表示解绑 |
 | `JCWORK_ADMIN_BOOTSTRAP_PASSWORD` | （空） | admin 初始密码，首次登录会被要求更换；仅在首次创建该账号时生效 |
@@ -910,13 +910,20 @@ python app.py
 （如 `用户1111`），可在「设置 → 账号资料」中自行修改。验证码一次性有效、5 分钟过期，
 且永远不会出现在任何 HTTP 响应里 —— 使用 `dev` 短信通道时，唯一能读到它的地方是服务端日志。
 
-**邮箱账号。** `POST /api/auth/email/send` 向邮箱发送验证码；
-`POST /api/auth/email/register` 用验证码加自选密码（8–128 位）完成注册并直接登录，
-显示名称取邮箱 `@` 前的部分。之后用 `POST /api/auth/email/login` 登录，
-忘记密码时用 `POST /api/auth/password/reset` 凭邮件验证码重置。验证码规则与短信
-完全一致 —— 一次性有效、5 分钟过期、绝不进 HTTP 响应；发送接口对任何语法合法的
-邮箱返回完全相同的响应，无法用来探测账号是否存在。将
-`JCWORK_MAIL_ALLOW_REGISTER` 设为 `false` 可关闭邮箱注册（不影响短信注册）。
+**邮箱账号。** `POST /api/auth/email/register` 凭图形验证码加自选密码（8–128 位）
+完成注册并直接登录：`GET /api/auth/captcha` 现场签发图形验证码（答案不分大小写、
+5 分钟过期、无论对错验证一次即作废），显示名称取邮箱 `@` 前的部分。注册不再要求
+邮件验证码，因此**不再证明邮箱控制权** —— 取而代之，服务端会把账号和密码寄到该
+邮箱作为留存，响应中的 `email_sent` 标明这封邮件是否发出；发送失败不回滚注册，
+账号直接可用，且这封凭据邮件与普通邮件一样受节流（每地址 60 秒冷却、每日 10 封，
+并计入每日邮件总配额）。若你莫名收到这样一封注册邮件，随时可通过下方的找回密码
+流程夺回该邮箱对应的账号。之后用 `POST /api/auth/email/login` 登录；忘记密码时用
+`POST /api/auth/password/reset` 凭邮件验证码重置 —— 验证码由 `POST /api/auth/email/send`
+下发，该接口从此只服务找回密码。验证码规则与短信完全一致 —— 一次性有效、5 分钟
+过期、绝不进 HTTP 响应；发送接口对任何语法合法的邮箱返回完全相同的响应，无法用来
+探测账号是否存在。注册接口对已注册邮箱返回 409，但必须先消耗一个图形验证码 ——
+这是放弃邮件验证码确权后有意的取舍。将 `JCWORK_MAIL_ALLOW_REGISTER` 设为 `false`
+可关闭邮箱注册（不影响短信注册）。
 
 **管理员引导登录。** `admin` 账号带有公开的初始密码（`admin123`，首次创建时可用
 `JCWORK_ADMIN_BOOTSTRAP_PASSWORD` 覆盖），否则全新实例无从进入。`POST /api/auth/login`
@@ -966,8 +973,9 @@ python app.py
 |------|------|------|
 | POST | `/api/auth/sms/send` | 发送短信验证码（响应中永远不含验证码） |
 | POST | `/api/auth/sms/login` | 验证码登录；未注册的号码自动建号 |
-| POST | `/api/auth/email/send` | 发送邮件验证码（注册与找回密码共用） |
-| POST | `/api/auth/email/register` | 邮箱 + 密码注册 |
+| GET | `/api/auth/captcha` | 签发注册用图形验证码（一次性，5 分钟过期） |
+| POST | `/api/auth/email/send` | 发送邮件验证码（仅找回密码使用） |
+| POST | `/api/auth/email/register` | 图形验证码门槛的邮箱 + 密码注册；寄出账号密码邮件并返回 `email_sent` |
 | POST | `/api/auth/email/login` | 邮箱 + 密码登录 |
 | POST | `/api/auth/password/reset` | 凭邮件验证码重置密码 |
 | POST | `/api/auth/login` | 仅管理员的密码登录；引导门禁生效期间返回 `must_change_password` / `must_configure_mail` |

@@ -15,6 +15,11 @@ Page({
     confirmPassword: '',
     username: '',
     password: '',
+    // 图形验证码（仅注册子页）：captchaId 与服务端存储配对，图片为 data URL
+    captchaId: '',
+    captchaImage: '',
+    captchaCode: '',
+    captchaBusy: false,
     loading: false,
     sendingCode: false,
     countdown: 0,
@@ -59,10 +64,29 @@ Page({
     this.setData({ mode: e.currentTarget.dataset.mode, emailMode: 'login', error: '', code: '', countdown: 0 });
   },
 
-  /** 邮箱模式内部切换：登录 / 注册账号 / 找回密码（共用同一发送接口，倒计时保留） */
+  /** 邮箱模式内部切换：登录 / 注册账号 / 找回密码。进入注册页时换一张新图形验证码 */
   switchEmailMode(e) {
     if (this.data.loading) return;
-    this.setData({ emailMode: e.currentTarget.dataset.emode, error: '' });
+    const emailMode = e.currentTarget.dataset.emode;
+    this.setData({ emailMode, error: '' });
+    if (emailMode === 'register') this.refreshCaptcha();
+  },
+
+  /** 拉取图形验证码：注册门槛，一次性使用，注册失败后必须换新的 */
+  async refreshCaptcha() {
+    if (this.data.captchaBusy) return;
+    const serverUrl = normalizeServerUrl(this.data.serverUrl);
+    if (!serverUrl) return;
+    this.setData({ captchaBusy: true });
+    try {
+      const data = await api.getCaptcha(serverUrl);
+      if (data && data.captcha_id && data.image) {
+        this.setData({ captchaId: data.captcha_id, captchaImage: data.image, captchaCode: '' });
+      }
+    } catch (err) {
+      // 图片拉取失败：保留旧图（若有），用户点图即可重试
+    }
+    this.setData({ captchaBusy: false });
   },
 
   onInput(e) {
@@ -98,7 +122,7 @@ Page({
     }, 1000);
   },
 
-  /** 获取验证码：短信（登录）与邮件（注册与找回密码）共用入口 */
+  /** 获取验证码：短信（登录）与邮件（找回密码）共用入口；注册改用图形验证码 */
   async sendCode() {
     if (this.data.sendingCode || this.data.countdown > 0) return;
     if (this.data.mode === 'email') return this.sendEmailCode();
@@ -214,9 +238,19 @@ Page({
     if (!email) return this.setError('请输入邮箱地址');
     if (emailMode === 'login') {
       if (!password) return this.setError('请输入密码');
-    } else {
+    } else if (emailMode === 'forgot') {
       if (!code) return this.setError('请输入验证码');
-      if (!password) return this.setError(emailMode === 'register' ? '请设置密码' : '请输入新密码');
+      if (!password) return this.setError('请输入新密码');
+      if (password.length < 8) return this.setError('密码至少 8 位');
+      if (password !== confirmPassword) return this.setError('两次输入的密码不一致');
+    } else {
+      // 注册：图形验证码（不消耗邮件额度），不要求邮件验证码
+      if (!this.data.captchaId) {
+        this.refreshCaptcha();
+        return this.setError('图形验证码未就绪，请稍候或点击图片刷新');
+      }
+      if (!String(this.data.captchaCode || '').trim()) return this.setError('请输入图形验证码');
+      if (!password) return this.setError('请设置密码');
       if (password.length < 8) return this.setError('密码至少 8 位');
       if (password !== confirmPassword) return this.setError('两次输入的密码不一致');
     }
@@ -235,7 +269,13 @@ Page({
       const data =
         emailMode === 'login'
           ? await api.emailLogin(serverUrl, email, password)
-          : await api.emailRegister(serverUrl, email, password, code);
+          : await api.emailRegister(
+              serverUrl,
+              email,
+              password,
+              this.data.captchaId,
+              String(this.data.captchaCode || '').trim()
+            );
       if (!data || !data.token) {
         throw new Error('服务器响应异常（缺少令牌）');
       }
@@ -246,9 +286,21 @@ Page({
         username: data.username || email,
         mustChangePassword: !!data.must_change_password,
       });
-      this.setData({ password: '', confirmPassword: '', code: '' });
+      this.setData({ password: '', confirmPassword: '', code: '', captchaCode: '' });
+      if (emailMode === 'register' && data.email_sent === false) {
+        // 账号已建好可直接登录，只是账号密码邮件没发出去
+        wx.showModal({
+          title: '注册成功',
+          content: '账号与密码的邮件发送失败，账号现在就可以使用；稍后可通过「找回密码」重置。',
+          showCancel: false,
+          success: () => this.enterApp(),
+        });
+        return;
+      }
       this.enterApp();
     } catch (err) {
+      // 注册的验证码无论对错都被服务端销毁，必须换一张再试
+      if (emailMode === 'register') this.refreshCaptcha();
       this.setError((err && err.message) || '请求失败，请稍后重试');
     }
   },
@@ -278,6 +330,7 @@ Page({
     this.setData({
       mode: 'sms', emailMode: 'login', phone: '', code: '', email: '',
       password: '', confirmPassword: '', countdown: 0, error: '',
+      captchaId: '', captchaImage: '', captchaCode: '',
     });
   },
 });

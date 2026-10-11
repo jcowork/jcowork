@@ -99,6 +99,8 @@ function localizeAuthError(body) {
   if (raw.includes('Daily limit reached for this email address')) return '该邮箱今日获取验证码次数已达上限';
   if (raw.includes('Email quota exhausted')) return '邮件额度已用尽，请明天再试';
   if (raw.includes('Email registration is disabled')) return '邮箱注册已关闭';
+  if (raw.includes('Captcha is required')) return '请输入图形验证码';
+  if (raw.includes('Captcha is incorrect or has expired')) return '图形验证码不正确或已过期，请刷新后重试';
   if (raw.includes('Password must be at least')) return '密码至少 8 位';
   if (raw.includes('Password must be at most')) return '密码不能超过 128 位';
   if (raw.includes('Password cannot be only whitespace')) return '密码不能为纯空白字符';
@@ -225,7 +227,16 @@ function adminLogin(serverUrl, username, password) {
   });
 }
 
-/** 发送邮件验证码：POST /api/auth/email/send → { expires_in, resend_after }（注册与找回密码共用） */
+/** 拉取图形验证码：GET /api/auth/captcha → { captcha_id, image, expires_in }（仅注册用，不耗邮件额度） */
+function getCaptcha(serverUrl) {
+  return request('/api/auth/captcha', {
+    auth: false,
+    baseUrl: serverUrl,
+    timeout: 20000,
+  });
+}
+
+/** 发送邮件验证码：POST /api/auth/email/send → { expires_in, resend_after }（仅找回密码使用） */
 function sendEmailCode(serverUrl, email) {
   return request('/api/auth/email/send', {
     method: 'POST',
@@ -237,13 +248,14 @@ function sendEmailCode(serverUrl, email) {
 }
 
 /**
- * 邮箱注册：POST /api/auth/email/register → 同 smsLogin 的响应结构。
- * 邮件验证码确权 + 自选密码，成功即登录。
+ * 邮箱注册：POST /api/auth/email/register → 同 smsLogin 的响应结构，外加
+ * email_sent（账号密码邮件是否送达）。图形验证码门槛，不再要求邮件验证码；
+ * 注册本身即登录。
  */
-function emailRegister(serverUrl, email, password, code) {
+function emailRegister(serverUrl, email, password, captchaId, captchaCode) {
   return request('/api/auth/email/register', {
     method: 'POST',
-    data: { email, password, code },
+    data: { email, password, captcha_id: captchaId, captcha_code: captchaCode },
     auth: false,
     baseUrl: serverUrl,
     timeout: 20000,
@@ -296,6 +308,7 @@ module.exports = {
   sendSmsCode,
   smsLogin,
   adminLogin,
+  getCaptcha,
   sendEmailCode,
   emailRegister,
   emailLogin,

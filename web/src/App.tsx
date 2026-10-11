@@ -158,6 +158,11 @@ function AppInner() {
   const [mailForm, setMailForm] = useState({ host: '', port: '465', username: '', password: '', from: '' });
   const [mailBusy, setMailBusy] = useState(false);
   const [mailError, setMailError] = useState('');
+  // Image captcha for the register screen (id + data-URL image).
+  const [captcha, setCaptcha] = useState<{ id: string; image: string }>({ id: '', image: '' });
+  const [captchaBusy, setCaptchaBusy] = useState(false);
+  // One-shot notice shown after signing in (e.g. the credentials email failed).
+  const [postLoginNotice, setPostLoginNotice] = useState('');
   const hiddenTimeRef = useRef(0);
 
   // Per-account conversation storage (background accounts keep their convs here)
@@ -478,8 +483,42 @@ function AppInner() {
     }
   };
 
-  /// New account: the mailed code proves the mailbox, the password is chosen
-  /// here. A successful response carries a session, like login.
+  /// Fetch a fresh image captcha for the register screen. Called on entering
+  /// the mode, on image click, and after every failed attempt — the server
+  /// burns the challenge either way.
+  const refreshCaptcha = async () => {
+    if (captchaBusy) return;
+    setCaptchaBusy(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/captcha`);
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.captcha_id) {
+        setCaptcha({ id: data.captcha_id, image: data.image });
+        setEmailForm((f) => ({ ...f, code: '' }));
+      }
+    } catch {
+      // Network hiccup: keep the old image; a retry click will refetch.
+    } finally {
+      setCaptchaBusy(false);
+    }
+  };
+
+  // A captcha is only valid for the register screen, so mint one whenever the
+  // user lands there.
+  useEffect(() => {
+    if (authMode === 'email' && emailMode === 'register') {
+      // Minting on entry is exactly the external-system sync effects are for;
+      // the transient busy-state flicker is accepted.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      refreshCaptcha();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authMode, emailMode]);
+
+  /// New account: email + password + a solved image captcha (no emailed code
+  /// anymore). A successful response carries a session, like login, plus
+  /// `email_sent` saying whether the account/password record reached the
+  /// mailbox.
   const handleEmailRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError('');
@@ -487,14 +526,29 @@ function AppInner() {
       setAuthError(t('passwordMismatch'));
       return;
     }
+    if (!captcha.id || !emailForm.code.trim()) {
+      setAuthError(t('captchaRequired'));
+      return;
+    }
     setAuthBusy(true);
     try {
       const { ok, data } = await postJson('/api/auth/email/register', {
         email: emailForm.email.trim(),
         password: emailForm.password,
-        code: emailForm.code.trim(),
+        captcha_id: captcha.id,
+        captcha_code: emailForm.code.trim(),
       });
-      finishAuth(ok, data, setAuthError);
+      if (ok && data.token) {
+        // The credentials email failed: the account works, but the user
+        // asked for that record, so surface it instead of staying silent.
+        if (data.email_sent === false) {
+          setPostLoginNotice(t('registeredMailFailed'));
+        }
+        finishAuth(ok, data, setAuthError);
+      } else {
+        setAuthError(mapAuthError(data.error ?? '', data));
+        refreshCaptcha();
+      }
     } catch {
       setAuthError(t('networkError'));
     } finally {
@@ -896,15 +950,42 @@ function AppInner() {
               ) : emailMode === 'register' ? (
                 <form onSubmit={handleEmailRegister}>
                   <AuthBanner msg={authError} type="error" />
-                  <EmailCodeFields
-                    email={emailForm.email}
-                    code={emailForm.code}
-                    onEmailChange={(v) => { setEmailForm({ ...emailForm, email: v }); setAuthError(''); }}
-                    onCodeChange={(v) => { setEmailForm({ ...emailForm, code: v }); setAuthError(''); }}
-                    onSendCode={handleSendEmailCode}
-                    countdown={emailCountdown}
-                    sending={sendingEmailCode}
+                  <input
+                    type="email"
+                    placeholder={t('emailAddress')}
+                    value={emailForm.email}
+                    onChange={(e) => { setEmailForm({ ...emailForm, email: e.target.value }); setAuthError(''); }}
+                    style={authInputStyle}
                   />
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <input
+                      placeholder={t('captchaPlaceholder')}
+                      value={emailForm.code}
+                      onChange={(e) => { setEmailForm({ ...emailForm, code: e.target.value }); setAuthError(''); }}
+                      style={{ ...authInputStyle, flex: 1, marginBottom: 0 }}
+                      autoComplete="off"
+                    />
+                    {/* Click to refresh: the server burns a challenge on every
+                        attempt, so a new image must come with each retry. */}
+                    {captcha.image ? (
+                      <img
+                        src={captcha.image}
+                        alt="captcha"
+                        onClick={refreshCaptcha}
+                        title={t('captchaClickToRefresh')}
+                        style={{ height: 42, borderRadius: 6, cursor: captchaBusy ? 'wait' : 'pointer', opacity: captchaBusy ? 0.5 : 1 }}
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={refreshCaptcha}
+                        disabled={captchaBusy}
+                        style={{ height: 42, padding: '0 10px', borderRadius: 6, border: '1px solid #444', background: 'transparent', color: '#888', cursor: captchaBusy ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap' }}
+                      >
+                        {t('captchaClickToRefresh')}
+                      </button>
+                    )}
+                  </div>
                   <input
                     type="password"
                     autoComplete="new-password"
@@ -1199,6 +1280,24 @@ function AppInner() {
         onClose={() => setMobileSidebar(false)}
       />
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+        {/* One-shot notice (e.g. the registration-credentials email failed) */}
+        {postLoginNotice && (
+          <div
+            style={{
+              display: 'flex', alignItems: 'center', gap: 10,
+              padding: '8px 14px', background: '#4a3b1a', borderBottom: '1px solid #6b5620',
+              fontSize: 13, color: '#e8d9b0',
+            }}
+          >
+            <span style={{ flex: 1 }}>{postLoginNotice}</span>
+            <button
+              onClick={() => setPostLoginNotice('')}
+              style={{ background: 'none', border: 'none', color: '#e8d9b0', fontSize: 15, cursor: 'pointer', padding: '0 4px' }}
+            >
+              ✕
+            </button>
+          </div>
+        )}
         {/* Mobile top bar with hamburger */}
         <div className="mobile-topbar">
           <button

@@ -22,6 +22,18 @@ impl MailSender for DevMailSender {
         Ok(())
     }
 
+    async fn send_message(&self, email: &str, subject: &str, body: &str) -> Result<()> {
+        tracing::warn!(
+            email = %mask(email),
+            subject = %subject,
+            body = %body,
+            "Email dev channel: message printed to the SERVER LOG only. \
+             Set JCWORK_SMTP_HOST / _PORT / _USERNAME / _PASSWORD / _FROM \
+             to deliver real messages."
+        );
+        Ok(())
+    }
+
     fn name(&self) -> &'static str {
         "dev"
     }
@@ -50,5 +62,13 @@ mod tests {
     #[tokio::test]
     async fn dev_sender_always_succeeds() {
         assert!(DevMailSender.send_code("alice@example.com", "123456").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dev_sender_message_always_succeeds() {
+        assert!(DevMailSender
+            .send_message("alice@example.com", "hi", "body text")
+            .await
+            .is_ok());
     }
 }

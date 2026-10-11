@@ -1,16 +1,26 @@
-//! Email + password authentication endpoints: verification-code send,
-//! registration, login, and password reset.
+//! Email + password authentication endpoints: image-captcha-guarded
+//! registration, code send, login, and password reset.
 //!
-//! Security contract shared with the SMS flow in [`super::auth_api`]:
-//! - The code and the channel name never appear in an HTTP response; in dev
-//!   mode the code exists only in the server log.
+//! Security contract:
+//! - Neither the emailed code nor the captcha text ever appears in an HTTP
+//!   response; in dev mode the code exists only in the server log, the
+//!   captcha text only inside the rendered image.
 //! - `/api/auth/email/send` answers every syntactically-valid address
-//!   identically, so it cannot be used to enumerate accounts. Registration
-//!   and password reset burn a code first and may then reveal account
-//!   existence — the caller has proven control of the mailbox by then.
-//! - Throttling (cooldown, per-address daily cap, brute-force lockout) and the
-//!   process-wide daily budget live in the shared `CodeStore`, identical rules
-//!   to SMS but with an independent budget.
+//!   identically, so it cannot be used to enumerate accounts. Password reset
+//!   burns a code first and may then reveal account existence — the caller
+//!   has proven control of the mailbox by then.
+//! - Registration does NOT prove mailbox control (no emailed code anymore);
+//!   its human-check is the image captcha. The endpoint may reveal that an
+//!   address is taken (409) — a deliberate trade-off: probing costs one
+//!   captcha per attempt, and the true mailbox owner can always reclaim the
+//!   account through the code-verified password reset.
+//! - The registration-credentials email (account + password, by explicit
+//!   product decision) is throttled through the shared `CodeStore` under the
+//!   `regcred:<email>` key, so it obeys the same cooldown / per-address daily
+//!   cap / global daily budget as reset codes.
+//! - Code-channel throttling (cooldown, per-address daily cap, brute-force
+//!   lockout) and the process-wide daily budget live in the shared
+//!   `CodeStore`, identical rules to SMS but with an independent budget.
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 
@@ -25,10 +35,12 @@ use crate::auth::password_error;
 
 /// Send a verification code to an email address.
 ///
-/// Registration and password reset share this endpoint, so the response must
-/// not depend on whether the address holds an account: a syntax-valid address
-/// always gets a 200 with the same body. The code is only ever delivered
-/// through the mail channel.
+/// Password reset is the only remaining consumer: registration switched to
+/// the image captcha and mails the credentials instead. The response must
+/// still not depend on whether the address holds an account — a syntax-valid
+/// address always gets a 200 with the same body — because the caller has not
+/// proven anything at this point. The code is only ever delivered through the
+/// mail channel.
 pub(crate) async fn email_send(
     State(state): State<AppState>,
     Json(req): Json<EmailSendRequest>,
@@ -76,10 +88,15 @@ pub(crate) async fn email_send(
     )
 }
 
-/// Register an account from a verified email address and a chosen password.
+/// Register an account from an email address, a chosen password, and a
+/// solved image captcha — no mailbox proof required. On success the account
+/// and password are mailed to the address as a record; the response's
+/// `email_sent` says whether that delivery worked. A failed delivery never
+/// rolls the registration back: the account is fully usable without it.
 ///
-/// The code is consumed only after every cheap precondition passes, so a
-/// malformed request never burns the code that was mailed out.
+/// Check order is load-bearing: the captcha is burned before the 409
+/// exists-check, so probing whether an address is registered costs one
+/// captcha per attempt.
 pub(crate) async fn email_register(
     State(state): State<AppState>,
     Json(req): Json<EmailRegisterRequest>,
@@ -102,8 +119,35 @@ pub(crate) async fn email_register(
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": msg})));
     }
 
-    // By now the caller has proven control of the mailbox, so revealing that
-    // the address is taken leaks nothing an attacker could use.
+    let (captcha_id, captcha_code) = match (req.captcha_id, req.captcha_code) {
+        (Some(id), Some(code)) if !id.trim().is_empty() && !code.trim().is_empty() => {
+            (id, code)
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Captcha is required"})),
+            );
+        }
+    };
+
+    // Single use in every direction: a wrong (or unknown) id burns the
+    // challenge, so the client must refresh the image between attempts.
+    if !state
+        .captcha
+        .verify(captcha_id.trim(), captcha_code.trim())
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Captcha is incorrect or has expired",
+            })),
+        );
+    }
+
+    // The captcha is spent, so the caller paid for this answer. A mailbox
+    // owner who dislikes what they learn can reclaim the address through the
+    // code-verified password reset at any time.
     if let Ok(Some(_)) = state.user_store.get_user_by_email(&email).await {
         return (
             StatusCode::CONFLICT,
@@ -111,9 +155,14 @@ pub(crate) async fn email_register(
         );
     }
 
-    if let Err(resp) = consume_email_code(&state, &email, req.code.trim()) {
-        return resp;
-    }
+    // The credentials email is a real send: reserve the mail budget under a
+    // dedicated key before creating anything. Refusal releases the budget
+    // internally, exactly like the send endpoint.
+    let mail = state.mail.read().expect("mail runtime lock poisoned").clone();
+    let (_staged_code, pending) = match mail.store.issue(&format!("regcred:{email}")) {
+        Ok(issued) => issued,
+        Err(e) => return e.into_response("Email", "email address"),
+    };
 
     let hash = match auth::hash_password(&req.password) {
         Ok(h) => h,
@@ -146,6 +195,29 @@ pub(crate) async fn email_register(
         "Email account registered"
     );
 
+    // Deliver the account + password record. The staged regcred entry is
+    // never consumed — commit just books the budget and the cooldown.
+    let subject = "Jcowork 注册成功";
+    let body = format!(
+        "您的账号：{email}\n您的密码：{}\n请妥善保管本邮件。\n若非本人操作，可忽略或通过忘记密码重置。",
+        req.password
+    );
+    let email_sent = match mail.sender.send_message(&email, subject, &body).await {
+        Ok(()) => {
+            pending.commit();
+            true
+        }
+        Err(e) => {
+            drop(pending);
+            tracing::error!(
+                error = %e,
+                email = %mask_email(&email),
+                "Registration credentials email failed"
+            );
+            false
+        }
+    };
+
     let token = match auth::create_token(&state.auth_config, &user.id, &user.username) {
         Ok(t) => t,
         Err(e) => {
@@ -167,6 +239,7 @@ pub(crate) async fn email_register(
             // bootstrap gate in the middleware never applies to it.
             "must_change_password": false,
             "must_configure_mail": false,
+            "email_sent": email_sent,
         })),
     )
 }

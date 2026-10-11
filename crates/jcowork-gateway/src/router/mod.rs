@@ -19,6 +19,7 @@
 pub(crate) mod admin_mail;
 pub(crate) mod admin_users;
 pub(crate) mod auth_api;
+pub(crate) mod captcha;
 pub(crate) mod code_store;
 pub(crate) mod connectors;
 pub(crate) mod cron;
@@ -33,6 +34,10 @@ pub(crate) mod public_users;
 pub(crate) mod skills;
 pub(crate) mod upload;
 pub(crate) mod workspace;
+
+/// Re-exported because `AppState` exposes the service; integration tests use
+/// `CaptchaProvider` to inject a recording generator.
+pub use captcha::{CaptchaProvider, CaptchaService};
 
 use axum::{
     extract::State,
@@ -223,6 +228,8 @@ pub struct AppState {
     pub mail: Arc<std::sync::RwLock<MailRuntime>>,
     /// Deployment-level admin settings (stored mail config overrides env).
     pub app_settings: Arc<jcowork_storage::AppSettingsStore>,
+    /// Image captchas for the email registration form.
+    pub captcha: Arc<captcha::CaptchaService>,
     /// Data directory for per-user workspaces.
     pub data_dir: String,
 }
@@ -309,7 +316,10 @@ pub struct EmailSendRequest {
 pub struct EmailRegisterRequest {
     pub email: String,
     pub password: String,
-    pub code: String,
+    /// `Option` so a legacy client (or a missing field) gets a readable 400
+    /// from the handler instead of axum's opaque 422.
+    pub captcha_id: Option<String>,
+    pub captcha_code: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -423,6 +433,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/auth/login", post(auth_api::login))
         .route("/api/auth/sms/send", post(auth_api::sms_send))
         .route("/api/auth/sms/login", post(auth_api::sms_login))
+        .route("/api/auth/captcha", get(captcha::get_captcha))
         .route("/api/auth/email/send", post(email_api::email_send))
         .route("/api/auth/email/register", post(email_api::email_register))
         .route("/api/auth/email/login", post(email_api::email_login))

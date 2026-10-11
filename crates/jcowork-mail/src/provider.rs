@@ -16,6 +16,11 @@ pub trait MailSender: Send + Sync {
     /// accept a registration or password reset for a send that failed.
     async fn send_code(&self, email: &str, code: &str) -> Result<()>;
 
+    /// Send an arbitrary message (e.g. the registration-credentials mail).
+    /// Same delivery contract as [`MailSender::send_code`]: `Err` means the
+    /// message was NOT delivered.
+    async fn send_message(&self, email: &str, subject: &str, body: &str) -> Result<()>;
+
     /// Stable channel identifier, used in the startup banner and logs.
     fn name(&self) -> &'static str;
 }

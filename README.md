@@ -709,13 +709,13 @@ All config via environment variables:
 | `JCWORK_SMS_TEMPLATE_CODE` | (empty) | Aliyun SMS template code (must accept a `code` variable) |
 | `JCWORK_SMS_DAILY_GLOBAL_CAP` | `500` | Messages sent process-wide per UTC day — the toll-fraud guard |
 | `JCWORK_SMS_ALLOW_REGISTER` | `true` | `false` makes login invite-only: unknown numbers are rejected, not provisioned |
-| `JCWORK_MAIL_PROVIDER` | `auto` | Mail channel: `auto`, `smtp`, or `dev` (codes go to the server log, never sent). Can also be configured in-app under Settings → Email login; a stored configuration takes precedence over these variables |
+| `JCWORK_MAIL_PROVIDER` | `auto` | Mail channel: `auto`, `smtp`, or `dev` (reset codes and registration credentials go to the server log, never sent). Can also be configured in-app under Settings → Email login; a stored configuration takes precedence over these variables |
 | `JCWORK_SMTP_HOST` | (empty) | SMTP host of any mail provider (Aliyun DirectMail, Gmail, SendGrid, …) |
 | `JCWORK_SMTP_PORT` | `587` | `465` = implicit TLS; `587`/`25` = STARTTLS |
 | `JCWORK_SMTP_USERNAME` | (empty) | SMTP username |
 | `JCWORK_SMTP_PASSWORD` | (empty) | SMTP password |
-| `JCWORK_SMTP_FROM` | (empty) | Envelope sender address for verification emails |
-| `JCWORK_MAIL_DAILY_GLOBAL_CAP` | `500` | Emails sent process-wide per UTC day, independent of the SMS cap |
+| `JCWORK_SMTP_FROM` | (empty) | Envelope sender address for the mails (reset codes, registration credentials) |
+| `JCWORK_MAIL_DAILY_GLOBAL_CAP` | `500` | Emails sent process-wide per UTC day (reset codes and registration credentials), independent of the SMS cap |
 | `JCWORK_MAIL_ALLOW_REGISTER` | `true` | `false` disables new email registrations; existing email logins keep working |
 | `JCWORK_ADMIN_PHONE` | (empty) | Bind the admin's phone at startup so SMS login works alongside the password. `clear` unbinds |
 | `JCWORK_ADMIN_BOOTSTRAP_PASSWORD` | (empty) | Bootstrap password for the seeded admin, replaced on first login; only used when the account is first created |
@@ -919,16 +919,28 @@ under Settings → Account profile. Codes are single-use, expire after 5 minutes
 and are never included in any HTTP response — with the `dev` SMS channel the
 only place to read one is the server log.
 
-**Email accounts.** `POST /api/auth/email/send` mails a code to an address;
-`POST /api/auth/email/register` exchanges it (plus a chosen password of 8–128
-characters) for a logged-in session, with the display name derived from the
-address's local part. `POST /api/auth/email/login` signs in afterwards, and a
-forgotten password is reset through `POST /api/auth/password/reset` with an
-emailed code. The same code hygiene as SMS applies — single-use, 5-minute
-expiry, never in an HTTP response — and the send endpoint answers every
-syntactically-valid address identically, so it cannot be used to enumerate
-accounts. Close new registrations with `JCWORK_MAIL_ALLOW_REGISTER=false`
-(SMS signup is unaffected).
+**Email accounts.** `POST /api/auth/email/register` creates the account behind
+an image captcha — `GET /api/auth/captcha` mints one; the answer is
+case-insensitive, expires after 5 minutes, and is spent by any verification
+attempt, right or wrong — plus a chosen password of 8–128 characters, with the
+display name derived from the address's local part, and the session starts
+immediately. No emailed code is involved, so registration no longer proves
+mailbox control: instead the server mails the account and password to the
+address as a record. `email_sent` in the response says whether that mail went
+out; a delivery failure does not roll the registration back, and the
+credentials mail is throttled like any other (60 s and 10/day per address,
+sharing the daily mail budget). Someone who receives such a mail uninvited can
+take the address back through the reset flow below. `POST /api/auth/email/login`
+signs in afterwards, and a forgotten password is reset through
+`POST /api/auth/password/reset` with an emailed code from
+`POST /api/auth/email/send` — the send endpoint's only remaining job. The same
+code hygiene as SMS applies — single-use, 5-minute expiry, never in an HTTP
+response — and the send endpoint answers every syntactically-valid address
+identically, so it cannot be used to enumerate accounts. The register endpoint
+does answer a duplicate address with 409, but only after a captcha has been
+spent — the accepted cost of dropping the mailed-code proof. Close new
+registrations with `JCWORK_MAIL_ALLOW_REGISTER=false` (SMS signup is
+unaffected).
 
 **The admin bootstrap.** `admin` is seeded with a published default password
 (`admin123`, overridable at first creation with `JCWORK_ADMIN_BOOTSTRAP_PASSWORD`)
@@ -993,8 +1005,9 @@ how to mint one against the dev SMS channel.
 |--------|------|-------------|
 | POST | `/api/auth/sms/send` | Send a verification code (never returned in the response) |
 | POST | `/api/auth/sms/login` | Log in with a code; unknown numbers are provisioned |
-| POST | `/api/auth/email/send` | Email a verification code (registration and reset share it) |
-| POST | `/api/auth/email/register` | Register an email + password account |
+| GET | `/api/auth/captcha` | Mint an image captcha for the register form (single-use, 5-minute expiry) |
+| POST | `/api/auth/email/send` | Email a verification code (password reset only) |
+| POST | `/api/auth/email/register` | Register an email + password account behind an image captcha; mails the credentials and returns `email_sent` |
 | POST | `/api/auth/email/login` | Log in with email + password |
 | POST | `/api/auth/password/reset` | Reset the password with an emailed code |
 | POST | `/api/auth/login` | Admin-only password login; flags `must_change_password` / `must_configure_mail` while the bootstrap gates apply |

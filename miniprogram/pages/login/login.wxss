@@ -168,6 +168,15 @@
   color: #66707a;
 }
 
+/* 图形验证码图片：高度与输入框齐平，点击即刷新 */
+.captcha-img {
+  flex-shrink: 0;
+  width: 200rpx;
+  height: 76rpx;
+  border-radius: 8rpx;
+  background: #fff;
+}
+
 .logout-row {
   margin-top: 24rpx;
   text-align: center;

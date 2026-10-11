@@ -28,6 +28,8 @@ export function mapAuthError(t: Translate, raw: string, extra?: AuthErrorDetail)
   if (raw.includes('Daily limit reached for this email address')) return t('emailDailyLimit');
   if (raw.includes('Email quota exhausted')) return t('emailQuotaExhausted');
   if (raw.includes('Email registration is disabled')) return t('emailRegisterDisabled');
+  if (raw.includes('Captcha is required')) return t('captchaRequired');
+  if (raw.includes('Captcha is incorrect or has expired')) return t('captchaIncorrect');
   if (raw.includes('Password must be at least')) return t('passwordMinLength');
   if (raw.includes('Password must be at most')) return t('passwordMaxLength');
   if (raw.includes('Password cannot be only whitespace')) return t('passwordMinLength');

@@ -60,6 +60,8 @@ impl jcowork_sms::SmsSender for CaptureSms {
 #[derive(Default)]
 struct CaptureMail {
     sent: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    /// Full messages (registration credentials), as (email, subject, body).
+    messages: Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
 }
 
 #[async_trait::async_trait]
@@ -72,8 +74,39 @@ impl jcowork_mail::MailSender for CaptureMail {
         Ok(())
     }
 
+    async fn send_message(
+        &self,
+        email: &str,
+        subject: &str,
+        body: &str,
+    ) -> anyhow::Result<()> {
+        self.messages
+            .lock()
+            .expect("capture lock poisoned")
+            .push((email.to_string(), subject.to_string(), body.to_string()));
+        Ok(())
+    }
+
     fn name(&self) -> &'static str {
         "capture"
+    }
+}
+
+/// Deterministic captcha generator: records every `(id, code)` it issues so
+/// tests can complete a registration without reading the rendered image.
+/// Same rule as `CaptureSms`/`CaptureMail`: the fake lives in the test binary
+/// only — a readable code path in production code would defeat the captcha.
+struct RecordingCaptcha {
+    issued: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+}
+
+impl router::CaptchaProvider for RecordingCaptcha {
+    fn generate(&self) -> (String, String, String) {
+        let mut issued = self.issued.lock().expect("capture lock poisoned");
+        let id = format!("cap-{}", issued.len());
+        let code = format!("CAP{:04}", issued.len());
+        issued.push((id.clone(), code.clone()));
+        (id, code, "data:image/png;base64,fake".to_string())
     }
 }
 
@@ -88,6 +121,11 @@ struct TestApp {
     sms_sent: Arc<std::sync::Mutex<Vec<(String, String)>>>,
     /// Codes captured from the fake mail channel, as (email, code) pairs.
     mail_sent: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    /// Full messages captured from the fake mail channel (registration
+    /// credentials), as (email, subject, body) triples.
+    mail_messages: Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
+    /// Captchas issued by the recording provider, as (id, code) pairs.
+    captcha_issued: Arc<std::sync::Mutex<Vec<(String, String)>>>,
     /// Counter behind `next_phone`.
     phone_seq: AtomicU32,
     /// Counter behind `next_email`.
@@ -104,18 +142,18 @@ impl TestApp {
     /// mode without touching the process environment.
     async fn with_sms(config: jcowork_sms::config::SmsConfig) -> Self {
         let mail_capture = CaptureMail::default();
-        let mail_sent = mail_capture.sent.clone();
+        let (mail_sent, mail_messages) = (mail_capture.sent.clone(), mail_capture.messages.clone());
         let mail = router::MailRuntime::new(Arc::new(mail_capture), 500, true);
-        Self::build(config, mail, mail_sent).await
+        Self::build(config, mail, mail_sent, mail_messages).await
     }
 
     /// Build the test app with email registration turned off
     /// (`JCWORK_MAIL_ALLOW_REGISTER=false`).
     async fn with_email_registration(allow: bool) -> Self {
         let mail_capture = CaptureMail::default();
-        let mail_sent = mail_capture.sent.clone();
+        let (mail_sent, mail_messages) = (mail_capture.sent.clone(), mail_capture.messages.clone());
         let mail = router::MailRuntime::new(Arc::new(mail_capture), 500, allow);
-        Self::build(jcowork_sms::config::SmsConfig::default(), mail, mail_sent).await
+        Self::build(jcowork_sms::config::SmsConfig::default(), mail, mail_sent, mail_messages).await
     }
 
     /// A test app whose mail channel sits on the unconfigured auto→dev
@@ -126,18 +164,19 @@ impl TestApp {
     async fn with_mail_auto_dev() -> Self {
         let mail = router::MailRuntime::from_config(&jcowork_mail::config::MailConfig::default())
             .expect("the default mail config must build");
-        Self::build(
-            jcowork_sms::config::SmsConfig::default(),
-            mail,
-            Arc::new(std::sync::Mutex::new(Vec::new())),
-        )
-        .await
+        let empty_codes: Arc<std::sync::Mutex<Vec<(String, String)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let empty_messages: Arc<std::sync::Mutex<Vec<(String, String, String)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        Self::build(jcowork_sms::config::SmsConfig::default(), mail, empty_codes, empty_messages)
+            .await
     }
 
     async fn build(
         config: jcowork_sms::config::SmsConfig,
         mail: router::MailRuntime,
         mail_sent: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+        mail_messages: Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
     ) -> Self {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let data_dir = temp_dir.path().to_str().unwrap().to_string();
@@ -186,6 +225,12 @@ impl TestApp {
             config.allow_register,
         );
 
+        let captcha_issued: Arc<std::sync::Mutex<Vec<(String, String)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captcha = router::CaptchaService::with_provider(Arc::new(RecordingCaptcha {
+            issued: captcha_issued.clone(),
+        }));
+
         let state = AppState {
             session_manager,
             auth_config: AuthConfig {
@@ -202,6 +247,7 @@ impl TestApp {
             user_store,
             log_writer,
             app_settings: Arc::new(jcowork_storage::AppSettingsStore::new(pool.clone())),
+            captcha: Arc::new(captcha),
             feishu_config_store,
             feishu_client_cache: Arc::new(dashmap::DashMap::new()),
             sms,
@@ -218,6 +264,8 @@ impl TestApp {
             user_store: user_store_handle,
             sms_sent,
             mail_sent,
+            mail_messages,
+            captcha_issued,
             phone_seq: AtomicU32::new(0),
             email_seq: AtomicU32::new(0),
         }
@@ -254,6 +302,47 @@ impl TestApp {
             matches.len()
         );
         matches[0].clone()
+    }
+
+    /// Fetch a fresh image captcha through the public endpoint and return its
+    /// (id, code) as recorded by the fake provider — the code itself never
+    /// leaves the server, so tests can only read it from the recording.
+    async fn fetch_captcha(&self) -> (String, String) {
+        let res = self
+            .make_request_with_token(None, "GET", "/api/auth/captcha", None)
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = json_body(res).await;
+        let id = body["captcha_id"].as_str().expect("captcha_id").to_string();
+        assert!(
+            body["image"].as_str().unwrap_or("").starts_with("data:"),
+            "the image must be a data URL: {:?}",
+            body["image"]
+        );
+        assert_eq!(body["expires_in"], json!(300));
+        let issued = self.captcha_issued.lock().expect("capture lock poisoned");
+        let (_, code) = issued
+            .iter()
+            .rev()
+            .find(|(i, _)| i == &id)
+            .expect("the endpoint must have used the recording provider");
+        (id, code.clone())
+    }
+
+    /// Register an email account through the public flow: fetch a captcha,
+    /// then submit it with the form fields. Returns (status, body).
+    async fn register_email(&self, email: &str, password: &str) -> (StatusCode, serde_json::Value) {
+        let (captcha_id, captcha_code) = self.fetch_captcha().await;
+        self.post_public(
+            "/api/auth/email/register",
+            json!({
+                "email": email,
+                "password": password,
+                "captcha_id": captcha_id,
+                "captcha_code": captcha_code,
+            }),
+        )
+        .await
     }
 
     /// Provision a fresh account through the SMS flow, returning
@@ -2225,24 +2314,28 @@ async fn test_email_send_response_never_leaks_the_code() {
     }
 }
 
-/// Register → token works despite having no phone (the gate keys on
-/// phone-or-email) → password login in both directions → duplicate
-/// registration is a conflict, case-insensitively.
+/// Register (image captcha, no mailed code) → token works despite having no
+/// phone (the gate keys on phone-or-email) → the credentials mail carries the
+/// address and the plaintext password → password login in both directions →
+/// duplicate registration is a conflict, case-insensitively.
 #[tokio::test]
 async fn test_email_register_login_and_gate_passes_without_phone() {
     let app = TestApp::new().await;
     let email = app.next_email();
     let password = "initial-pass-1";
 
-    let (status, _) = app.post_public("/api/auth/email/send", json!({ "email": email })).await;
-    assert_eq!(status, StatusCode::OK);
-    let code = app.mail_code(&email);
-
-    // Cheap rejections happen before the code is spent.
+    // Cheap rejections happen before the captcha is spent, so one captcha can
+    // carry both the bad attempt and the good one.
+    let (captcha_id, captcha_code) = app.fetch_captcha().await;
     let (status, body) = app
         .post_public(
             "/api/auth/email/register",
-            json!({ "email": email, "password": "short", "code": code }),
+            json!({
+                "email": email,
+                "password": "short",
+                "captcha_id": captcha_id,
+                "captcha_code": captcha_code,
+            }),
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{:?}", body);
@@ -2251,11 +2344,17 @@ async fn test_email_register_login_and_gate_passes_without_phone() {
     let (status, body) = app
         .post_public(
             "/api/auth/email/register",
-            json!({ "email": email, "password": password, "code": code }),
+            json!({
+                "email": email,
+                "password": password,
+                "captcha_id": captcha_id,
+                "captcha_code": captcha_code,
+            }),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{:?}", body);
     assert_eq!(body["is_admin"], json!(false));
+    assert_eq!(body["email_sent"], json!(true));
     assert_eq!(
         body["must_change_password"],
         json!(false),
@@ -2266,6 +2365,25 @@ async fn test_email_register_login_and_gate_passes_without_phone() {
     assert!(
         username.starts_with("user"),
         "username is derived from the local part: got {username}"
+    );
+
+    // The credentials mail went to the right address and contains both the
+    // account and the password the user chose.
+    {
+        let messages = app.mail_messages.lock().expect("capture lock poisoned");
+        let matches: Vec<&(String, String, String)> =
+            messages.iter().filter(|(e, _, _)| e == &email).collect();
+        assert_eq!(matches.len(), 1, "exactly one credentials mail: {:?}", messages);
+        let (_, subject, body) = matches[0];
+        assert_eq!(subject, "Jcowork 注册成功");
+        assert!(body.contains(&email), "the mail names the account: {body}");
+        assert!(body.contains(password), "the mail carries the password: {body}");
+    }
+    // Registration is captcha-gated, not code-gated: nothing was mailed as a
+    // verification code.
+    assert!(
+        app.mail_sent.lock().expect("capture lock poisoned").is_empty(),
+        "registration must not mint an emailed code"
     );
 
     // The token reaches normal endpoints even though the account has no phone.
@@ -2313,64 +2431,136 @@ async fn test_email_register_login_and_gate_passes_without_phone() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["error"], json!("Invalid email or password"));
 
-    // Re-registering the address is a conflict — whatever code is offered, the
-    // duplicate check runs before the code is consumed.
-    let (status, body) = app
-        .post_public(
-            "/api/auth/email/register",
-            json!({ "email": email, "password": "another-pass-2", "code": "000000" }),
-        )
-        .await;
+    // Re-registering the address is a conflict — behind a fresh captcha, since
+    // every attempt burns one.
+    let (status, body) = app.register_email(&email, "another-pass-2").await;
     assert_eq!(status, StatusCode::CONFLICT, "{:?}", body);
     assert_eq!(body["error"], json!("Email address is already registered"));
     // ...and the case-insensitive spelling is the same address.
-    let (status, _) = app
-        .post_public(
-            "/api/auth/email/register",
-            json!({ "email": email.to_uppercase(), "password": "another-pass-2", "code": "000000" }),
-        )
-        .await;
+    let (status, _) = app.register_email(&email.to_uppercase(), "another-pass-2").await;
     assert_eq!(status, StatusCode::CONFLICT);
+    // The duplicates never mailed anything.
+    let messages = app.mail_messages.lock().expect("capture lock poisoned");
+    assert_eq!(
+        messages.iter().filter(|(e, _, _)| e == &email).count(),
+        1,
+        "only the successful registration mailed credentials"
+    );
 }
 
-/// Wrong codes count attempts before the right one succeeds, and a consumed
-/// code never verifies a second time.
+/// The registration captcha: missing fields read as a readable 400 (not
+/// axum's 422), a wrong answer is refused, every attempt burns the captcha —
+/// even a correct code cannot revive a spent one — and a fresh captcha carries
+/// the registration through. Registration never touches the mailed-code
+/// channel, whose attempt counting belongs to password reset alone.
 #[tokio::test]
-async fn test_email_code_wrong_then_correct_and_single_use() {
+async fn test_register_captcha_wrong_burns_and_single_use() {
     let app = TestApp::new().await;
     let email = app.next_email();
 
-    let (status, _) = app.post_public("/api/auth/email/send", json!({ "email": email })).await;
-    assert_eq!(status, StatusCode::OK);
-    let code = app.mail_code(&email);
-
+    // Missing captcha fields: readable 400 rather than the extractor's 422,
+    // so a legacy client sees prose it can localize.
     let (status, body) = app
         .post_public(
             "/api/auth/email/register",
-            json!({ "email": email, "password": "some-pass-123", "code": "000000" }),
+            json!({ "email": email, "password": "some-pass-123" }),
         )
         .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "{:?}", body);
-    assert_eq!(body["error"], json!("Invalid verification code"));
-    assert_eq!(body["attempts_left"], json!(4));
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{:?}", body);
+    assert_eq!(body["error"], json!("Captcha is required"));
 
+    let (captcha_id, captcha_code) = app.fetch_captcha().await;
+
+    // Wrong answer: refused...
     let (status, body) = app
         .post_public(
             "/api/auth/email/register",
-            json!({ "email": email, "password": "some-pass-123", "code": code }),
+            json!({
+                "email": email,
+                "password": "some-pass-123",
+                "captcha_id": captcha_id,
+                "captcha_code": "NOPE0",
+            }),
         )
         .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{:?}", body);
+    assert_eq!(body["error"], json!("Captcha is incorrect or has expired"));
+
+    // ...and burned: the attempt itself spent it, so even the right code
+    // cannot pass a second time.
+    let (status, body) = app
+        .post_public(
+            "/api/auth/email/register",
+            json!({
+                "email": email,
+                "password": "some-pass-123",
+                "captcha_id": captcha_id,
+                "captcha_code": captcha_code,
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{:?}", body);
+    assert_eq!(body["error"], json!("Captcha is incorrect or has expired"));
+
+    // An unknown id fails the same way — nothing is revealed about which ids
+    // ever existed.
+    let (status, body) = app
+        .post_public(
+            "/api/auth/email/register",
+            json!({
+                "email": email,
+                "password": "some-pass-123",
+                "captcha_id": "cap-never-issued",
+                "captcha_code": "WHATEVER",
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{:?}", body);
+    assert_eq!(body["error"], json!("Captcha is incorrect or has expired"));
+
+    // A fresh captcha carries the same registration through.
+    let (status, body) = app.register_email(&email, "some-pass-123").await;
     assert_eq!(status, StatusCode::OK, "{:?}", body);
 
-    // The code is spent: password reset may not reuse it.
-    let (status, body) = app
-        .post_public(
-            "/api/auth/password/reset",
-            json!({ "email": email, "code": code, "new_password": "fresh-pass-45" }),
-        )
-        .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "{:?}", body);
-    assert_eq!(body["error"], json!("Verification code has expired, please request a new one"));
+    // All of the above cost no mailed code: that channel is reset-only now.
+    assert!(
+        app.mail_sent.lock().expect("capture lock poisoned").is_empty(),
+        "captcha rejections must not mint emailed codes"
+    );
+}
+
+/// The credentials mail is real mail, so it is throttled like one: a second
+/// registration for the same address inside the 60-second cooldown is a 429.
+/// The duplicate check has to pass first, which in practice means the first
+/// account was removed in the meantime.
+#[tokio::test]
+async fn test_register_credentials_mail_shares_the_cooldown() {
+    let app = TestApp::new().await;
+    let email = app.next_email();
+
+    let (status, body) = app.register_email(&email, "throttle-pass-1").await;
+    assert_eq!(status, StatusCode::OK, "{:?}", body);
+    let user_id = body["user_id"].as_str().unwrap().to_string();
+
+    // Remove the account so the duplicate check passes again; the regcred
+    // cooldown is keyed on the address, not on the account.
+    app.user_store.permanently_delete_user(&user_id).await.unwrap();
+
+    let (status, body) = app.register_email(&email, "throttle-pass-2").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{:?}", body);
+    assert_eq!(body["error"], json!("Please wait before requesting another code"));
+    assert!(
+        body["retry_after"].as_u64().unwrap_or(0) > 0,
+        "the 429 carries a retry hint: {:?}",
+        body
+    );
+    // The refused attempt never reached the mail channel.
+    let messages = app.mail_messages.lock().expect("capture lock poisoned");
+    assert_eq!(
+        messages.iter().filter(|(e, _, _)| e == &email).count(),
+        1,
+        "only the first registration mailed credentials"
+    );
 }
 
 /// Forgot password: a mailed code unlocks setting a new one, after which only
@@ -2446,7 +2636,8 @@ async fn test_email_reset_unknown_address_is_not_found() {
 }
 
 /// `JCWORK_MAIL_ALLOW_REGISTER=false` turns the mailbox into a recovery-only
-/// channel: codes still go out, but registration is refused outright.
+/// channel: codes still go out, but registration is refused outright — before
+/// the captcha is even judged.
 #[tokio::test]
 async fn test_email_registration_can_be_disabled() {
     let app = TestApp::with_email_registration(false).await;
@@ -2459,9 +2650,29 @@ async fn test_email_registration_can_be_disabled() {
     let (status, body) = app
         .post_public(
             "/api/auth/email/register",
-            json!({ "email": email, "password": "some-pass-89", "code": code }),
+            json!({
+                "email": email,
+                "password": "some-pass-89",
+                "captcha_id": "cap-anything",
+                "captcha_code": "ANYPE",
+            }),
         )
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{:?}", body);
     assert_eq!(body["error"], json!("Email registration is disabled"));
+    // Refused before the mail channel was touched for credentials.
+    assert!(
+        app.mail_messages.lock().expect("capture lock poisoned").is_empty(),
+        "a refused registration mails nothing"
+    );
+
+    // The code that did go out still serves the reset flow.
+    let (status, body) = app
+        .post_public(
+            "/api/auth/password/reset",
+            json!({ "email": email, "code": code, "new_password": "fresh-pass-89" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{:?}", body);
+    assert_eq!(body["error"], json!("Account not found"));
 }
