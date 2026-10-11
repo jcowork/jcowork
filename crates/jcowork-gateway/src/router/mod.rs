@@ -17,6 +17,7 @@
 
 pub(crate) mod admin_users;
 pub(crate) mod auth_api;
+pub(crate) mod code_store;
 pub(crate) mod connectors;
 pub(crate) mod cron;
 pub(crate) mod doc_index;
@@ -74,15 +75,8 @@ use jcowork_tools::registry::ToolRegistry;
 pub struct SmsRuntime {
     /// Pluggable SMS channel (Aliyun in production, log-only in dev).
     pub sender: Arc<dyn SmsSender>,
-    /// Verification codes keyed by normalized phone number.
-    pub codes: Arc<DashMap<String, SmsCodeEntry>>,
-    /// Messages sent process-wide on the current UTC day. Per-phone throttling
-    /// alone cannot stop an attacker enumerating the number space and draining
-    /// the SMS balance, so this global ceiling is the real cost guard.
-    pub sent_today: Arc<AtomicU32>,
-    /// `YYYY-MM-DD` key for [`SmsRuntime::sent_today`], reset on rollover.
-    pub day_key: Arc<Mutex<String>>,
-    pub daily_global_cap: u32,
+    /// Throttled verification-code storage, keyed by normalized phone number.
+    pub store: code_store::CodeStore,
     /// When false, `/api/auth/sms/login` refuses numbers with no account
     /// instead of auto-provisioning one.
     pub allow_register: bool,
@@ -92,10 +86,7 @@ impl SmsRuntime {
     pub fn new(sender: Arc<dyn SmsSender>, daily_global_cap: u32, allow_register: bool) -> Self {
         Self {
             sender,
-            codes: Arc::new(DashMap::new()),
-            sent_today: Arc::new(AtomicU32::new(0)),
-            day_key: Arc::new(Mutex::new(String::new())),
-            daily_global_cap,
+            store: code_store::CodeStore::new(daily_global_cap),
             allow_register,
         }
     }
@@ -173,17 +164,6 @@ pub struct LoginRequest {
 
 // --- SMS verification-code login ---
 
-/// Lifetime of a code once sent, in seconds.
-pub const SMS_CODE_TTL_SECS: i64 = 300;
-/// Minimum gap between two sends to the same number.
-pub const SMS_RESEND_COOLDOWN_SECS: i64 = 60;
-/// Per-number ceiling within a single UTC day.
-pub const SMS_PER_PHONE_DAILY: u32 = 10;
-/// Wrong guesses before the code is locked out.
-pub const SMS_MAX_ATTEMPTS: u8 = 5;
-/// Length of the lockout, in seconds.
-pub const SMS_LOCK_SECS: i64 = 900;
-
 #[derive(Debug, Deserialize)]
 pub struct SmsSendRequest {
     pub phone: String,
@@ -204,22 +184,6 @@ pub struct BindPhoneRequest {
 #[derive(Debug, Deserialize)]
 pub struct ChangeUsernameRequest {
     pub username: String,
-}
-
-/// One row of the verification-code table, keyed by normalized phone number.
-#[derive(Debug, Clone)]
-pub struct SmsCodeEntry {
-    pub code: String,
-    pub expires_at: i64,
-    /// Wrong guesses against the current code. Reset on every new send.
-    pub attempts: u8,
-    /// Brute-force lockout deadline; survives resends and successful logins.
-    pub locked_until: i64,
-    pub last_sent_at: i64,
-    /// `YYYY-MM-DD` the counters below belong to. Storing it per entry is what
-    /// keeps the daily limit a daily limit even after a long idle stretch.
-    pub day_key: String,
-    pub sent_today: u32,
 }
 
 #[derive(Debug, Deserialize)]
