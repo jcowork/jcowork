@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useT } from '../i18n';
 import { API_BASE } from '../config';
 import { type Conversation } from '../chatStore';
@@ -50,6 +50,25 @@ export default function Sidebar({ accounts, activeUserId, streamingAccounts, unr
   // Whether the web access URL was just copied (shows "copied" feedback)
   const [webCopied, setWebCopied] = useState(false);
 
+  // Collapse preference: shrink the sidebar to an icon-only rail.
+  const [collapsedPref, setCollapsedPref] = useState(
+    () => localStorage.getItem('jcowork_sidebar_collapsed') === '1',
+  );
+  // The mobile drawer is an off-canvas overlay, so the rail only applies on
+  // desktop widths — below the breakpoint the sidebar is always full width.
+  const [isNarrow, setIsNarrow] = useState(() => window.innerWidth <= 768);
+  useEffect(() => {
+    const onResize = () => setIsNarrow(window.innerWidth <= 768);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  const collapsed = collapsedPref && !isNarrow;
+  const toggleCollapsed = () => setCollapsedPref(prev => {
+    const next = !prev;
+    localStorage.setItem('jcowork_sidebar_collapsed', next ? '1' : '0');
+    return next;
+  });
+
   // Show all conversations with messages (except the currently active one)
   const historyConvs = conversations
     .filter((c) => c.messages.length > 0 && c.id !== activeConvId)
@@ -71,6 +90,18 @@ export default function Sidebar({ accounts, activeUserId, streamingAccounts, unr
     ...(isAdmin ? [{ key: 'admin', label: t('userManagement') }] : []),
     { key: 'settings', label: t('navSettings') },
   ];
+
+  // Icons shown in the collapsed rail — one logo per module (matches each
+  // page's own emoji: 📋 tasks, 📁 documents, 🧠 memory, 🔌 connectors, 👥 admin).
+  const NAV_ICONS: Record<string, string> = {
+    chat: '💬',
+    documents: '📁',
+    schedule: '📋',
+    memory: '🧠',
+    skills: '🔌',
+    admin: '👥',
+    settings: '⚙️',
+  };
 
   const navHandlers: Record<string, () => void> = { chat: onChat, documents: onDocuments, schedule: onSchedule, memory: onMemory, skills: onSkills, settings: onSettings, admin: onAdminUsers ?? (() => {}) };
 
@@ -130,22 +161,51 @@ export default function Sidebar({ accounts, activeUserId, streamingAccounts, unr
       <div
         className={`sidebar${mobileOpen ? ' sidebar-open' : ''}`}
         style={{
-          width: 240,
+          width: collapsed ? 62 : 240,
           background: '#1a1a1a',
           borderRight: '1px solid #333',
           display: 'flex',
           flexDirection: 'column',
-          padding: 16,
+          padding: collapsed ? '16px 10px' : 16,
           flexShrink: 0,
-          transition: 'transform 0.25s',
+          transition: 'width 0.2s ease, transform 0.25s',
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 24 }}>
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          rowGap: 8,
+          flexWrap: collapsed ? 'wrap' : 'nowrap',
+          justifyContent: collapsed ? 'center' : 'flex-start',
+          marginBottom: collapsed ? 16 : 24,
+        }}>
           <img src="/logo.png" alt="Jcowork" style={{ width: 26, height: 26 }} />
-          <span style={{ fontWeight: 700, fontSize: 18 }}>Jcowork</span>
+          {!collapsed && (
+            <span style={{ fontWeight: 700, fontSize: 18, flex: 1 }}>Jcowork</span>
+          )}
+          <button
+            onClick={toggleCollapsed}
+            title={collapsed ? t('expandSidebar') : t('collapseSidebar')}
+            aria-label={collapsed ? t('expandSidebar') : t('collapseSidebar')}
+            style={{
+              flexShrink: 0,
+              padding: '3px 7px',
+              borderRadius: 6,
+              border: '1px solid #444',
+              background: 'transparent',
+              color: '#888',
+              cursor: 'pointer',
+              fontSize: 14,
+              lineHeight: 1,
+            }}
+          >
+            {collapsed ? '»' : '«'}
+          </button>
         </div>
 
-        {/* Contacts section */}
+        {/* Contacts section — hidden in the collapsed rail */}
+        {!collapsed && (
         <div style={{ marginBottom: 16 }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: contactsOpen ? 8 : 0 }}>
             <div
@@ -285,13 +345,38 @@ export default function Sidebar({ accounts, activeUserId, streamingAccounts, unr
             </>
           )}
         </div>
+        )}
 
         <div style={{ flex: 1 }}>
-          <div style={{ color: '#888', fontSize: 12, marginBottom: 8, textTransform: 'uppercase' }}>
-            {t('navigation')}
-          </div>
           {NAV_ITEMS.map(item => {
             const isChat = item.key === 'chat';
+            if (collapsed) {
+              // Icon-only rail: one logo per module, full label as tooltip.
+              return (
+                <button
+                  key={item.key}
+                  onClick={() => handleNav(item.key)}
+                  title={item.label}
+                  aria-label={item.label}
+                  style={{
+                    width: '100%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    padding: '8px 0',
+                    borderRadius: 6,
+                    border: 'none',
+                    background: currentView === item.key ? '#2a2a2a' : 'transparent',
+                    color: '#eee',
+                    cursor: 'pointer',
+                    fontSize: 18,
+                    marginBottom: 4,
+                  }}
+                >
+                  {NAV_ICONS[item.key] ?? '•'}
+                </button>
+              );
+            }
             return (
               <div key={item.key}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -433,6 +518,8 @@ export default function Sidebar({ accounts, activeUserId, streamingAccounts, unr
           })}
         </div>
 
+        {/* Footer actions — hidden in the collapsed rail */}
+        {!collapsed && (
         <div style={{ display: 'flex', gap: 8 }}>
           <button
             onClick={handleWebAccess}
@@ -466,6 +553,7 @@ export default function Sidebar({ accounts, activeUserId, streamingAccounts, unr
             {t('removeAccount')}
           </button>
         </div>
+        )}
       </div>
 
       {/* Delete confirmation modal */}
