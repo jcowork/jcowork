@@ -16,6 +16,7 @@
 //! - [`doc_index`] — workspace index, vector search, excel preview, docling
 //! - [`connectors`] — user-managed API / MCP connector configuration
 
+pub(crate) mod admin_mail;
 pub(crate) mod admin_users;
 pub(crate) mod auth_api;
 pub(crate) mod code_store;
@@ -122,6 +123,11 @@ impl SmsRuntime {
 /// The email half of [`AppState`], assembled once at startup; see
 /// [`SmsRuntime`] for the rationale. Holds its own `CodeStore` so the email
 /// daily budget stays independent of the SMS budget.
+///
+/// Rebuilt in place by `PUT /api/admin/mail`, which is why [`AppState`] holds
+/// it behind an `RwLock`. Replacing the whole struct also swaps the
+/// `CodeStore`: codes pending against the old channel are dropped, which is
+/// acceptable for an admin-initiated channel switch.
 #[derive(Clone)]
 pub struct MailRuntime {
     /// Pluggable mail channel (SMTP in production, log-only in dev).
@@ -131,24 +137,32 @@ pub struct MailRuntime {
     /// When false, `/api/auth/email/register` refuses to create accounts,
     /// leaving SMS (or admin phone assignment) as the only sign-up path.
     pub allow_register: bool,
+    /// The configuration `sender` was built from — the merge base for
+    /// partial `PUT /api/admin/mail` updates.
+    pub(crate) config: jcowork_mail::config::MailConfig,
+    /// True while the channel is the *implicit* dev fallback (`provider`
+    /// auto/unknown with no SMTP credentials). An explicit `provider = "dev"`
+    /// is a deliberate choice and never sets this. Drives the admin
+    /// mail-setup gate and the `must_configure_mail` flags.
+    pub(crate) auto_dev: bool,
 }
 
 impl MailRuntime {
+    /// Build from an explicit sender (tests use a capture channel).
     pub fn new(sender: Arc<dyn MailSender>, daily_global_cap: u32, allow_register: bool) -> Self {
         Self {
             sender,
             store: code_store::CodeStore::new(daily_global_cap),
             allow_register,
+            config: jcowork_mail::config::MailConfig::default(),
+            auto_dev: false,
         }
     }
 
-    /// Build from the `JCWORK_MAIL_*` / `JCWORK_SMTP_*` environment variables.
-    ///
-    /// Fails rather than silently degrading when the operator asked for SMTP
-    /// explicitly but left credentials out — a quiet fallback to dev would look
-    /// exactly like a mail outage to anyone waiting for a code.
-    pub fn from_env() -> anyhow::Result<Self> {
-        let config = jcowork_mail::config::MailConfig::from_env();
+    /// Build from a concrete configuration — the one constructor that honors
+    /// `auto_dev`. Used at startup (env or stored settings) and by
+    /// `PUT /api/admin/mail`.
+    pub fn from_config(config: &jcowork_mail::config::MailConfig) -> anyhow::Result<Self> {
         let kind = config.resolve()?;
         let sender = config.build()?;
         if kind == jcowork_mail::config::MailProviderKind::Dev {
@@ -165,7 +179,22 @@ impl MailRuntime {
                 "Mail channel ready"
             );
         }
-        Ok(Self::new(sender, config.daily_global_cap, config.allow_register))
+        Ok(Self {
+            store: code_store::CodeStore::new(config.daily_global_cap),
+            allow_register: config.allow_register,
+            auto_dev: config.is_auto_dev(),
+            config: config.clone(),
+            sender,
+        })
+    }
+
+    /// Build from the `JCWORK_MAIL_*` / `JCWORK_SMTP_*` environment variables.
+    ///
+    /// Fails rather than silently degrading when the operator asked for SMTP
+    /// explicitly but left credentials out — a quiet fallback to dev would look
+    /// exactly like a mail outage to anyone waiting for a code.
+    pub fn from_env() -> anyhow::Result<Self> {
+        Self::from_config(&jcowork_mail::config::MailConfig::from_env())
     }
 }
 
@@ -189,10 +218,45 @@ pub struct AppState {
     pub feishu_client_cache: Arc<DashMap<String, Arc<FeishuClient>>>,
     /// SMS verification-code login.
     pub sms: SmsRuntime,
-    /// Email + password login.
-    pub mail: MailRuntime,
+    /// Email + password login. Behind an RwLock because
+    /// `PUT /api/admin/mail` rebuilds the channel without a restart.
+    pub mail: Arc<std::sync::RwLock<MailRuntime>>,
+    /// Deployment-level admin settings (stored mail config overrides env).
+    pub app_settings: Arc<jcowork_storage::AppSettingsStore>,
     /// Data directory for per-user workspaces.
     pub data_dir: String,
+}
+
+/// Replace the env-built mail channel with the one persisted by
+/// `PUT /api/admin/mail`, if any. Both binaries call this once at startup,
+/// after `AppState` is assembled. A missing, unreadable, or unbuildable
+/// stored row keeps the env channel — a corrupt settings row must not take
+/// the whole server down.
+pub async fn apply_stored_mail_config(state: &AppState) {
+    let raw = match state.app_settings.get(admin_mail::MAIL_SETTINGS_KEY).await {
+        Ok(Some(raw)) => raw,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(error = %e, "Stored mail settings unreadable; keeping the env channel");
+            return;
+        }
+    };
+    let config: jcowork_mail::config::MailConfig = match serde_json::from_str(&raw) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "Stored mail settings unparsable; keeping the env channel");
+            return;
+        }
+    };
+    match MailRuntime::from_config(&config) {
+        Ok(runtime) => {
+            *state.mail.write().expect("mail runtime lock poisoned") = runtime;
+            tracing::info!("Mail channel reconfigured from stored settings (env no longer applies)");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Stored mail settings cannot build a channel; keeping the env channel");
+        }
+    }
 }
 
 // --- Request/Response types ---
@@ -444,6 +508,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/ws", get(ws_upgrade))
         // Admin (super-user) user management
         .route("/api/admin/users", get(admin_users::list_users))
+        .route("/api/admin/mail", get(admin_mail::get_mail_config).put(admin_mail::update_mail_config).delete(admin_mail::delete_mail_config))
+        .route("/api/admin/mail/test", post(admin_mail::send_test_mail))
         .route("/api/admin/users/{id}/trash", post(admin_users::trash_user))
         .route("/api/admin/users/{id}/restore", post(admin_users::restore_user))
         .route("/api/admin/users/{id}/public", post(admin_users::set_user_public))
@@ -535,6 +601,11 @@ async fn serve_index_no_cache(path: String) -> impl IntoResponse {
 /// underneath, and the change-password screen needs precisely these two.
 const BOOTSTRAP_ALLOWLIST: &[&str] = &["/api/profile", "/api/profile/password"];
 
+/// Endpoints an admin may call while the mail channel is stuck on the
+/// unconfigured auto→dev fallback: reading the profile plus the three
+/// config endpoints the mail setup screen itself uses.
+const MAIL_SETUP_ALLOWLIST: &[&str] = &["/api/profile", "/api/admin/mail", "/api/admin/mail/test"];
+
 /// JWT authentication middleware.
 /// Extracts user_id from the Bearer token and inserts it into request extensions.
 async fn auth_middleware(
@@ -592,6 +663,36 @@ async fn auth_middleware(
                             Json(serde_json::json!({
                                 "error": "Change the admin password to continue",
                                 "code": "password_change_required",
+                            })),
+                        ).into_response();
+                    }
+                    // Mail-channel gate: while the deployment resolves `auto`
+                    // to the dev fallback (no stored config, no env creds),
+                    // the admin may only finish setting the channel up.
+                    // A declared `provider=dev` or working SMTP never lands
+                    // here — this is purely the unconfigured default. Admin
+                    // only: ordinary users cannot rescue themselves from the
+                    // screen, so they are never locked behind it.
+                    // It stays silent while the bootstrap password gate is
+                    // still in force (`password_changed_at` unset): that gate
+                    // allowlists `/api/profile/password`, and blocking the
+                    // change here would wedge the bootstrap — password first,
+                    // mail second.
+                    let mail_auto_dev = state
+                        .mail
+                        .read()
+                        .expect("mail runtime lock poisoned")
+                        .auto_dev;
+                    if user.is_admin
+                        && user.password_changed_at.is_some()
+                        && mail_auto_dev
+                        && !MAIL_SETUP_ALLOWLIST.contains(&req.uri().path())
+                    {
+                        return (
+                            StatusCode::FORBIDDEN,
+                            Json(serde_json::json!({
+                                "error": "Configure the mail channel to continue",
+                                "code": "mail_config_required",
                             })),
                         ).into_response();
                     }

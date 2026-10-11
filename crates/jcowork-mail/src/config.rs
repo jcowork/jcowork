@@ -16,7 +16,7 @@ pub enum MailProviderKind {
     Dev,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MailConfig {
     /// `auto` (default) uses SMTP when host/username/password/from are all
     /// present and silently falls back to dev otherwise; `smtp` fails fast at
@@ -81,6 +81,17 @@ impl MailConfig {
             && !self.smtp_username.is_empty()
             && !self.smtp_password.is_empty()
             && !self.smtp_from.is_empty()
+    }
+
+    /// True when `provider` is `auto` (or unknown) but no SMTP credentials are
+    /// present, so the channel silently fell back to dev.
+    ///
+    /// An explicit `provider = "dev"` is an operator's deliberate choice and
+    /// does not count: the admin setup gate keys on this so it never locks
+    /// someone who already declared "no mail".
+    pub fn is_auto_dev(&self) -> bool {
+        !self.provider.eq_ignore_ascii_case("dev")
+            && self.resolve().map(|k| k == MailProviderKind::Dev).unwrap_or(false)
     }
 
     /// Resolve `provider` into a concrete channel.
@@ -204,5 +215,45 @@ mod tests {
     fn build_produces_a_named_channel() {
         assert_eq!(MailConfig::default().build().unwrap().name(), "dev");
         assert_eq!(full().build().unwrap().name(), "smtp");
+    }
+
+    #[test]
+    fn is_auto_dev_distinguishes_unconfigured_from_declared_dev() {
+        // auto without credentials = unconfigured.
+        assert!(MailConfig::default().is_auto_dev());
+        // auto with credentials = configured.
+        assert!(!full().is_auto_dev());
+        // explicit dev = a deliberate choice, never "unconfigured".
+        assert!(!MailConfig { provider: "dev".into(), ..MailConfig::default() }.is_auto_dev());
+        assert!(!MailConfig { provider: "DEV".into(), ..MailConfig::default() }.is_auto_dev());
+        // unknown provider behaves like auto.
+        assert!(MailConfig {
+            provider: "carrier-pigeon".into(),
+            ..MailConfig::default()
+        }
+        .is_auto_dev());
+        // smtp with missing credentials is a config error, not "unconfigured".
+        assert!(!MailConfig { provider: "smtp".into(), ..MailConfig::default() }.is_auto_dev());
+    }
+
+    #[test]
+    fn config_round_trips_through_json() {
+        let cfg = MailConfig {
+            provider: "smtp".into(),
+            smtp_host: "smtp.example.com".into(),
+            smtp_port: 465,
+            smtp_username: "u".into(),
+            smtp_password: "secret".into(),
+            smtp_from: "noreply@example.com".into(),
+            daily_global_cap: 42,
+            allow_register: false,
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(!json.contains("smtp_password") == false, "password must serialize (stored config)");
+        let back: MailConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.smtp_host, cfg.smtp_host);
+        assert_eq!(back.smtp_password, "secret");
+        assert_eq!(back.daily_global_cap, 42);
+        assert!(!back.allow_register);
     }
 }

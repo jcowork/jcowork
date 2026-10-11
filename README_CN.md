@@ -704,7 +704,7 @@ server {
 | `JCWORK_SMS_TEMPLATE_CODE` | （空） | 阿里云短信模板 CODE（模板需接受一个 `code` 变量） |
 | `JCWORK_SMS_DAILY_GLOBAL_CAP` | `500` | 全进程每个 UTC 日的发送上限，防短信盗刷的主要防线 |
 | `JCWORK_SMS_ALLOW_REGISTER` | `true` | 设为 `false` 即邀请制：未注册号码直接拒绝，不再自动开户 |
-| `JCWORK_MAIL_PROVIDER` | `auto` | 邮件通道：`auto`、`smtp` 或 `dev`（dev 只把验证码写进服务端日志，不真正发送） |
+| `JCWORK_MAIL_PROVIDER` | `auto` | 邮件通道：`auto`、`smtp` 或 `dev`（dev 只把验证码写进服务端日志，不真正发送）。也可登录后在「设置 → 邮件登录」中配置，已存储的配置优先于这些变量 |
 | `JCWORK_SMTP_HOST` | （空） | SMTP 服务器地址，任意邮件服务商均可（阿里云邮件推送、Gmail、SendGrid 等） |
 | `JCWORK_SMTP_PORT` | `587` | `465` 为隐式 TLS；`587`/`25` 为 STARTTLS |
 | `JCWORK_SMTP_USERNAME` | （空） | SMTP 用户名 |
@@ -925,10 +925,22 @@ python app.py
 新密码自此成为该账号的长期登录方式（绑定手机号不再使密码登录失效）。
 可选配置 `JCWORK_ADMIN_PHONE`：服务启动时就把手机号绑定好，短信登录与密码登录并行可用，
 它不会关闭任何登录方式。注意：改密之前签发的引导令牌在自然过期前（默认 24 小时）仍然有效，
-因为库里没有可用于吊销的令牌版本字段。
+因为库里没有可用于吊销的令牌版本字段。全新安装的引导流程在改密之后还有一幕邮件配置页
+（见下方「邮件通道门禁」）。
 
 **初始密码未改时的锁定。** 处于 `must_change_password` 状态时，除 `/api/profile` 与
 `/api/profile/password` 之外的所有接口都返回 `403 {"code":"password_change_required"}`。
+
+**邮件通道门禁。** 全新部署往往没有 SMTP 凭据 —— 桌面端根本没有 `.env` 文件 ——
+因此 `JCWORK_MAIL_PROVIDER=auto` 会落到只写日志的 `dev` 兜底。管理员通过改密门禁后，
+下一个请求返回 `must_configure_mail: true`，前端展示邮件配置页；通道配置完成之前，
+除 `/api/profile`、`/api/admin/mail` 与 `/api/admin/mail/test` 之外的所有接口都返回
+`403 {"code":"mail_config_required"}`。两条出路都能立即解除门禁：保存可用的 SMTP 配置
+（存入 SQLite、不重启即生效，且自下次启动起优先于环境变量），或明确声明「暂不启用邮件
+登录」（`provider=dev`，验证码只写服务端日志）。在 `.env` 里显式声明
+`JCWORK_MAIL_PROVIDER=dev` 同样视为已声明 —— 门禁只针对 auto→dev 的**未配置**兜底，
+因此不会把任何管理员永久锁死。普通用户永远不经过此门禁：他们无法在配置页自救。
+邮件通道已配置（或已显式声明 dev）的既有部署不会看到这个页面。
 
 **升级前的老管理员。** 强制绑定手机号时代的部署里，admin 的密码哈希已被替换为不可解析的
 哨兵值。无需数据迁移：密码登录对其直接失败，下次短信验证码登录会返回
@@ -958,11 +970,15 @@ python app.py
 | POST | `/api/auth/email/register` | 邮箱 + 密码注册 |
 | POST | `/api/auth/email/login` | 邮箱 + 密码登录 |
 | POST | `/api/auth/password/reset` | 凭邮件验证码重置密码 |
-| POST | `/api/auth/login` | 仅管理员的密码登录；初始密码更换前会返回 `must_change_password` |
-| GET | `/api/profile` | 自己的用户名、掩码手机号/邮箱、`phone_bound`、`email_bound`、`is_admin`、`must_change_password` |
+| POST | `/api/auth/login` | 仅管理员的密码登录；引导门禁生效期间返回 `must_change_password` / `must_configure_mail` |
+| GET | `/api/profile` | 自己的用户名、掩码手机号/邮箱、`phone_bound`、`email_bound`、`is_admin`、`must_change_password`、`must_configure_mail` |
 | POST | `/api/profile/phone` | 用验证码绑定或更换自己的手机号 |
 | POST | `/api/profile/password` | 设置自己的新密码（管理员引导门禁） |
 | PUT | `/api/profile/username` | 修改自己的显示名称 |
+| GET | `/api/admin/mail` | 读取生效中的邮件通道配置（脱敏；SMTP 密码永不返回） |
+| PUT | `/api/admin/mail` | 合并更新邮件通道：存入 SQLite、就地重建、无需重启 |
+| DELETE | `/api/admin/mail` | 清除已存储的配置；`JCWORK_MAIL_*` 环境变量重新生效 |
+| POST | `/api/admin/mail/test` | 通过当前通道发送测试邮件（仅管理员，受节流限制） |
 | POST | `/api/admin/users/{id}/phone` | 管理员为用户分配手机号 |
 | DELETE | `/api/admin/users/{id}/phone` | 管理员解除用户手机号 |
 

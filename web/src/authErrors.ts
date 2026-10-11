@@ -51,6 +51,10 @@ export function mapAuthError(t: Translate, raw: string, extra?: AuthErrorDetail)
   if (raw.includes('Phone number is not registered')) return t('phoneNotRegistered');
   if (raw.includes('Account has been deleted')) return t('accountDeletedMessage');
   if (raw.includes('Invalid username or password')) return t('authFailed');
+  // Raised by the admin mail gate; the client normally never shows it because
+  // the setup screen appears first, but it can surface on a raced request.
+  if (raw.includes('Configure the mail channel to continue')) return t('mailConfigRequired');
+  if (raw.includes('SMTP requires host')) return t('smtpFieldsRequired');
   if (raw.includes('already bound')) return t('phoneAlreadyBound');
   if (raw.includes('Username must be between') || raw.includes('Username cannot contain')) {
     return t('displayNameHint');

@@ -10,3 +10,7 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 lettre = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

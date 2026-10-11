@@ -103,18 +103,41 @@ impl TestApp {
     /// exercise the daily cap and the invite-only (`allow_register = false`)
     /// mode without touching the process environment.
     async fn with_sms(config: jcowork_sms::config::SmsConfig) -> Self {
-        Self::build(config, true).await
+        let mail_capture = CaptureMail::default();
+        let mail_sent = mail_capture.sent.clone();
+        let mail = router::MailRuntime::new(Arc::new(mail_capture), 500, true);
+        Self::build(config, mail, mail_sent).await
     }
 
     /// Build the test app with email registration turned off
     /// (`JCWORK_MAIL_ALLOW_REGISTER=false`).
     async fn with_email_registration(allow: bool) -> Self {
-        Self::build(jcowork_sms::config::SmsConfig::default(), allow).await
+        let mail_capture = CaptureMail::default();
+        let mail_sent = mail_capture.sent.clone();
+        let mail = router::MailRuntime::new(Arc::new(mail_capture), 500, allow);
+        Self::build(jcowork_sms::config::SmsConfig::default(), mail, mail_sent).await
+    }
+
+    /// A test app whose mail channel sits on the unconfigured auto→dev
+    /// fallback — the state a fresh deployment (server or desktop) boots in
+    /// before the admin configures SMTP, and the trigger for the admin
+    /// mail-setup gate. Uses the real dev sender, so nothing is captured and
+    /// `mail_sent` stays empty.
+    async fn with_mail_auto_dev() -> Self {
+        let mail = router::MailRuntime::from_config(&jcowork_mail::config::MailConfig::default())
+            .expect("the default mail config must build");
+        Self::build(
+            jcowork_sms::config::SmsConfig::default(),
+            mail,
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        )
+        .await
     }
 
     async fn build(
         config: jcowork_sms::config::SmsConfig,
-        mail_allow_register: bool,
+        mail: router::MailRuntime,
+        mail_sent: Arc<std::sync::Mutex<Vec<(String, String)>>>,
     ) -> Self {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let data_dir = temp_dir.path().to_str().unwrap().to_string();
@@ -163,10 +186,6 @@ impl TestApp {
             config.allow_register,
         );
 
-        let mail_capture = CaptureMail::default();
-        let mail_sent = mail_capture.sent.clone();
-        let mail = router::MailRuntime::new(Arc::new(mail_capture), 500, mail_allow_register);
-
         let state = AppState {
             session_manager,
             auth_config: AuthConfig {
@@ -182,10 +201,11 @@ impl TestApp {
             connector_manager,
             user_store,
             log_writer,
+            app_settings: Arc::new(jcowork_storage::AppSettingsStore::new(pool.clone())),
             feishu_config_store,
             feishu_client_cache: Arc::new(dashmap::DashMap::new()),
             sms,
-            mail,
+            mail: Arc::new(RwLock::new(mail)),
             data_dir: data_dir.clone(),
         };
 
@@ -1760,6 +1780,297 @@ async fn test_bootstrap_admin_is_locked_to_password_endpoints() {
         StatusCode::OK,
         "replacing the bootstrap password must unlock the rest of the API"
     );
+}
+
+// ── Admin mail-channel gate & configuration ──
+
+/// A full, syntactically valid SMTP configuration body.
+fn smtp_config_body() -> serde_json::Value {
+    json!({
+        "provider": "smtp",
+        "smtp_host": "smtp.example.com",
+        "smtp_port": 465,
+        "smtp_username": "bot@example.com",
+        "smtp_password": "mailbox-auth-code",
+        "smtp_from": "bot@example.com",
+    })
+}
+
+/// On a deployment whose mail channel still resolves `auto` to the dev
+/// fallback, the admin's token is locked to the profile and mail config
+/// endpoints; a stored SMTP configuration lifts the lock in place.
+#[tokio::test]
+async fn test_mail_auto_dev_locks_admin_until_configured() {
+    let app = TestApp::with_mail_auto_dev().await;
+    let token = app.seed_and_login_admin().await;
+
+    // The gate allowlist: the profile (flag read) and the config endpoints.
+    let res = app
+        .make_request_with_token(Some(&token), "GET", "/api/profile", None)
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "profile must stay reachable");
+    assert_eq!(
+        json_body(res).await["must_configure_mail"],
+        json!(true),
+        "the profile must flag the pending mail setup"
+    );
+    let res = app
+        .make_request_with_token(Some(&token), "GET", "/api/admin/mail", None)
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "mail config read must stay reachable");
+
+    // Everything else answers with the mail gate.
+    for path in ["/api/providers", "/api/sessions", "/api/skills", "/api/admin/users"] {
+        let res = app
+            .make_request_with_token(Some(&token), "GET", path, None)
+            .await;
+        assert_eq!(res.status(), StatusCode::FORBIDDEN, "{} must be gated", path);
+        assert_eq!(json_body(res).await["code"], json!("mail_config_required"));
+    }
+
+    // Ordinary users are never locked behind the mail gate: they cannot
+    // rescue themselves from the setup screen.
+    let (_, user_token) = app.provision_user().await;
+    let res = app
+        .make_request_with_token(Some(&user_token), "GET", "/api/providers", None)
+        .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "ordinary users must keep working while the admin's mail is unset"
+    );
+
+    // Storing a working SMTP configuration lifts the gate for the same token
+    // — the runtime is rebuilt in place, no restart needed.
+    let res = app
+        .make_request_with_token(Some(&token), "PUT", "/api/admin/mail", Some(smtp_config_body()))
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "storing the SMTP config should succeed");
+    let res = app
+        .make_request_with_token(Some(&token), "GET", "/api/providers", None)
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "a configured mail channel must unlock the API");
+    let res = app
+        .make_request_with_token(Some(&token), "GET", "/api/profile", None)
+        .await;
+    assert_eq!(
+        json_body(res).await["must_configure_mail"],
+        json!(false),
+        "the profile must stop flagging the mail setup"
+    );
+}
+
+/// Declaring `provider = "dev"` is the admin's explicit choice: it lifts the
+/// gate exactly like a full SMTP configuration would, and reads back as a
+/// deliberate dev channel rather than an unconfigured one.
+#[tokio::test]
+async fn test_mail_gate_escape_hatch_declared_dev() {
+    let app = TestApp::with_mail_auto_dev().await;
+    let token = app.seed_and_login_admin().await;
+
+    let res = app
+        .make_request_with_token(Some(&token), "PUT", "/api/admin/mail", Some(json!({"provider": "dev"})))
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "declaring dev should succeed");
+    let res = app
+        .make_request_with_token(Some(&token), "GET", "/api/providers", None)
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "a declared dev channel must unlock the API");
+
+    let res = app
+        .make_request_with_token(Some(&token), "GET", "/api/admin/mail", None)
+        .await;
+    let body = json_body(res).await;
+    assert_eq!(body["resolved"], json!("dev"));
+    assert_eq!(body["auto_dev"], json!(false), "declared dev is not 'unconfigured'");
+    assert_eq!(body["source"], json!("stored"), "the declaration itself is persisted");
+}
+
+/// The two bootstrap gates compose in order on a fresh deployment: bootstrap
+/// password first, mail setup second, application after that.
+#[tokio::test]
+async fn test_sequential_admin_bootstrap_gates() {
+    let app = TestApp::with_mail_auto_dev().await;
+    let token = app.bootstrap_admin().await;
+
+    // Both gates would apply, but the password one speaks first.
+    let res = app
+        .make_request_with_token(Some(&token), "GET", "/api/providers", None)
+        .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    assert_eq!(json_body(res).await["code"], json!("password_change_required"));
+
+    app.change_admin_password(&token).await;
+    let res = app
+        .make_request_with_token(Some(&token), "GET", "/api/providers", None)
+        .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN, "the mail gate takes over");
+    assert_eq!(json_body(res).await["code"], json!("mail_config_required"));
+
+    let res = app
+        .make_request_with_token(Some(&token), "PUT", "/api/admin/mail", Some(smtp_config_body()))
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app
+        .make_request_with_token(Some(&token), "GET", "/api/providers", None)
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "both gates cleared — full access");
+}
+
+/// The mail config endpoints never echo the SMTP password; `GET` reports only
+/// whether one is set, and every response is redacted the same way.
+#[tokio::test]
+async fn test_mail_config_get_redacts_password() {
+    let app = TestApp::with_mail_auto_dev().await;
+    let token = app.seed_and_login_admin().await;
+
+    let res = app
+        .make_request_with_token(Some(&token), "PUT", "/api/admin/mail", Some(smtp_config_body()))
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let put_body = json_body(res).await;
+    assert!(put_body.get("smtp_password").is_none(), "PUT must not echo the password");
+    assert_eq!(put_body["password_set"], json!(true));
+
+    let res = app
+        .make_request_with_token(Some(&token), "GET", "/api/admin/mail", None)
+        .await;
+    let body = json_body(res).await;
+    assert!(body.get("smtp_password").is_none(), "GET must not echo the password");
+    assert_eq!(body["password_set"], json!(true));
+    assert_eq!(body["smtp_host"], json!("smtp.example.com"));
+    assert_eq!(body["resolved"], json!("smtp"));
+    assert_eq!(body["source"], json!("stored"));
+}
+
+/// `PUT /api/admin/mail` is a merge: partial updates keep unspecified fields,
+/// an empty password keeps the stored one, and `provider = "smtp"` with
+/// incomplete credentials is refused rather than silently downgraded.
+#[tokio::test]
+async fn test_mail_config_put_validation_and_merge() {
+    let app = TestApp::with_mail_auto_dev().await;
+    let token = app.seed_and_login_admin().await;
+
+    // SMTP without credentials must be refused up front.
+    let res = app
+        .make_request_with_token(Some(&token), "PUT", "/api/admin/mail", Some(json!({"provider": "smtp"})))
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST, "smtp with no credentials must be refused");
+
+    // A port outside u16 fails JSON deserialization before the handler runs;
+    // axum's Json rejection is 422 rather than a handler-level 400.
+    let res = app
+        .make_request_with_token(Some(&token), "PUT", "/api/admin/mail", Some(json!({"smtp_port": 99999})))
+        .await;
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY, "an invalid port must be refused");
+
+    // Full config, then a partial update that leaves the password out.
+    let res = app
+        .make_request_with_token(Some(&token), "PUT", "/api/admin/mail", Some(smtp_config_body()))
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app
+        .make_request_with_token(
+            Some(&token),
+            "PUT",
+            "/api/admin/mail",
+            Some(json!({"smtp_host": "smtp2.example.com", "smtp_password": "", "allow_register": false})),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "a partial update must succeed");
+
+    let res = app
+        .make_request_with_token(Some(&token), "GET", "/api/admin/mail", None)
+        .await;
+    let body = json_body(res).await;
+    assert_eq!(body["smtp_host"], json!("smtp2.example.com"), "the host must be updated");
+    assert_eq!(body["password_set"], json!(true), "an empty password must keep the stored one");
+    assert_eq!(body["allow_register"], json!(false), "the register toggle must persist");
+}
+
+/// The test endpoint goes through the same channel as real codes — capture
+/// sees the recipient — but its `test:` probe key can never collide with a
+/// real verification code, and the shared cooldown throttles repeat probes.
+#[tokio::test]
+async fn test_mail_test_endpoint_sends_and_throttles() {
+    let app = TestApp::new().await;
+    let token = app.seed_and_login_admin().await;
+
+    // Admin-only.
+    let (_, user_token) = app.provision_user().await;
+    let res = app
+        .make_request_with_token(Some(&user_token), "POST", "/api/admin/mail/test", Some(json!({"to": "a@example.com"})))
+        .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN, "non-admins may not probe the channel");
+
+    let res = app
+        .make_request_with_token(Some(&token), "POST", "/api/admin/mail/test", Some(json!({"to": "friend@example.com"})))
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "the first probe should go out");
+    let sent = app.mail_sent.lock().expect("capture lock poisoned").clone();
+    assert_eq!(sent.len(), 1, "exactly one test message");
+    assert_eq!(sent[0].0, "friend@example.com", "the recipient is the test address");
+    assert!(!sent[0].1.starts_with("test:"), "the probe key must not leak into the message key");
+
+    let res = app
+        .make_request_with_token(Some(&token), "POST", "/api/admin/mail/test", Some(json!({"to": "friend@example.com"})))
+        .await;
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS, "the shared cooldown throttles probes");
+}
+
+/// An existing deployment whose admin already changed the bootstrap password
+/// gets the mail-setup flag on the next password login — the upgrade path for
+/// `is_auto_dev` deployments.
+#[tokio::test]
+async fn test_admin_login_flags_mail_setup_on_upgrade() {
+    let app = TestApp::with_mail_auto_dev().await;
+    let token = app.seed_and_login_admin().await;
+    let new_password = "replaced-admin-pass";
+
+    let (status, resp) = app
+        .login_raw(jcowork_gateway::auth::DEFAULT_ADMIN_USERNAME, new_password)
+        .await;
+    assert_eq!(status, StatusCode::OK, "the replaced password logs in");
+    assert_eq!(resp["must_change_password"], json!(false));
+    assert_eq!(resp["must_configure_mail"], json!(true), "the mail setup must be flagged");
+
+    // Once the channel is configured the flag goes away on the next login.
+    let res = app
+        .make_request_with_token(Some(&token), "PUT", "/api/admin/mail", Some(json!({"provider": "dev"})))
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let (status, resp) = app
+        .login_raw(jcowork_gateway::auth::DEFAULT_ADMIN_USERNAME, new_password)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp["must_configure_mail"], json!(false));
+}
+
+/// `DELETE /api/admin/mail` drops the stored row and falls back to the
+/// environment — on a machine with no `JCWORK_MAIL_*` that is the auto→dev
+/// fallback again, so the admin gate re-arms.
+#[tokio::test]
+async fn test_delete_stored_mail_config_rearms_gate() {
+    let app = TestApp::with_mail_auto_dev().await;
+    let token = app.seed_and_login_admin().await;
+
+    let res = app
+        .make_request_with_token(Some(&token), "PUT", "/api/admin/mail", Some(smtp_config_body()))
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = app
+        .make_request_with_token(Some(&token), "DELETE", "/api/admin/mail", None)
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "clearing the stored config should succeed");
+    let body = json_body(res).await;
+    assert_eq!(body["source"], json!("env"), "env applies again after the delete");
+
+    let res = app
+        .make_request_with_token(Some(&token), "GET", "/api/providers", None)
+        .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN, "the gate re-arms on the fallback");
+    assert_eq!(json_body(res).await["code"], json!("mail_config_required"));
 }
 
 // ── Admin phone assignment ──

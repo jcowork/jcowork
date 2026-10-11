@@ -17,6 +17,13 @@ export interface AuthState {
    * reload.
    */
   mustChangePassword?: boolean;
+  /**
+   * The backend locks an admin whose mail channel still sits on the
+   * unconfigured auto→dev fallback down to the mail config endpoints; this
+   * flag drives the full-screen mail setup prompt. Like the password flag,
+   * persisted so the lock survives a reload.
+   */
+  mustConfigureMail?: boolean;
 }
 
 const ACCOUNTS_KEY = 'jcowork_accounts';

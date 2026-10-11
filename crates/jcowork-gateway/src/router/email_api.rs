@@ -40,9 +40,13 @@ pub(crate) async fn email_send(
         );
     };
 
+    // Snapshot the mail runtime: the RwLock is only held for the clone, so an
+    // admin PUT rebuilding the channel can never block on this request.
+    let mail = state.mail.read().expect("mail runtime lock poisoned").clone();
+
     // Reserve the throttling budget and stage the code; every refusal path
     // releases the budget internally.
-    let (code, pending) = match state.mail.store.issue(&email) {
+    let (code, pending) = match mail.store.issue(&email) {
         Ok(issued) => issued,
         Err(e) => return e.into_response("Email", "email address"),
     };
@@ -50,7 +54,7 @@ pub(crate) async fn email_send(
     // `pending` stages the code but commits nothing: a rejected send releases
     // the budget slot and restores the address's previous entry, so the failed
     // attempt costs neither side anything.
-    if let Err(e) = state.mail.sender.send_code(&email, &code).await {
+    if let Err(e) = mail.sender.send_code(&email, &code).await {
         drop(pending);
         tracing::error!(error = %e, email = %mask_email(&email), "Email send failed");
         return (
@@ -80,7 +84,7 @@ pub(crate) async fn email_register(
     State(state): State<AppState>,
     Json(req): Json<EmailRegisterRequest>,
 ) -> impl IntoResponse {
-    if !state.mail.allow_register {
+    if !state.mail.read().expect("mail runtime lock poisoned").allow_register {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "Email registration is disabled"})),
@@ -162,6 +166,7 @@ pub(crate) async fn email_register(
             // The account carries its email from birth, so the admin
             // bootstrap gate in the middleware never applies to it.
             "must_change_password": false,
+            "must_configure_mail": false,
         })),
     )
 }
@@ -232,6 +237,8 @@ pub(crate) async fn email_login(
             // Only the admin has a bootstrap-password gate; email accounts
             // set their own password at registration.
             "must_change_password": user.is_admin && user.password_changed_at.is_none(),
+            "must_configure_mail": user.is_admin
+                && state.mail.read().expect("mail runtime lock poisoned").auto_dev,
         })),
     )
 }
@@ -328,6 +335,8 @@ fn consume_email_code(
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
     state
         .mail
+        .read()
+        .expect("mail runtime lock poisoned")
         .store
         .consume(email, submitted)
         .map_err(ConsumeError::into_response)

@@ -20,7 +20,7 @@ use jcowork_logs::LogWriter;
 use jcowork_memory::{BuiltinMemoryProvider, MemoryManager};
 use jcowork_server::config::ServerConfig;
 use jcowork_skills::SkillManager;
-use jcowork_storage::FeishuConfigStore;
+use jcowork_storage::{AppSettingsStore, FeishuConfigStore};
 
 /// Port the embedded web server listens on (must match the frontend config).
 const WEB_PORT: u16 = 3000;
@@ -391,12 +391,18 @@ async fn main() {
         connector_manager,
         user_store,
         log_writer,
+        app_settings: Arc::new(AppSettingsStore::new(pool.clone())),
         feishu_config_store: Arc::new(FeishuConfigStore::new(pool)),
         feishu_client_cache: Arc::new(dashmap::DashMap::new()),
         sms,
-        mail,
+        mail: Arc::new(RwLock::new(mail)),
         data_dir: data_dir.clone(),
     };
+
+    // An admin-configured mail channel (stored by /api/admin/mail) wins over
+    // the environment on every restart — on desktop this is the only way a
+    // real SMTP channel exists at all.
+    router::apply_stored_mail_config(&state).await;
 
     // ── 14. Build router ──
     let app = router::build_router(state.clone()).layer(CorsLayer::permissive());

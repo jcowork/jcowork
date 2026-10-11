@@ -709,7 +709,7 @@ All config via environment variables:
 | `JCWORK_SMS_TEMPLATE_CODE` | (empty) | Aliyun SMS template code (must accept a `code` variable) |
 | `JCWORK_SMS_DAILY_GLOBAL_CAP` | `500` | Messages sent process-wide per UTC day — the toll-fraud guard |
 | `JCWORK_SMS_ALLOW_REGISTER` | `true` | `false` makes login invite-only: unknown numbers are rejected, not provisioned |
-| `JCWORK_MAIL_PROVIDER` | `auto` | Mail channel: `auto`, `smtp`, or `dev` (codes go to the server log, never sent) |
+| `JCWORK_MAIL_PROVIDER` | `auto` | Mail channel: `auto`, `smtp`, or `dev` (codes go to the server log, never sent). Can also be configured in-app under Settings → Email login; a stored configuration takes precedence over these variables |
 | `JCWORK_SMTP_HOST` | (empty) | SMTP host of any mail provider (Aliyun DirectMail, Gmail, SendGrid, …) |
 | `JCWORK_SMTP_PORT` | `587` | `465` = implicit TLS; `587`/`25` = STARTTLS |
 | `JCWORK_SMTP_USERNAME` | (empty) | SMTP username |
@@ -941,10 +941,28 @@ becomes the account's permanent login. `JCWORK_ADMIN_PHONE` optionally binds a
 phone number at startup so SMS login works alongside the password — it disables
 nothing. Bootstrap tokens issued before the change stay valid until they expire
 (24h by default) — there is no token-version column to revoke them with.
+On a fresh install the bootstrap continues with a second, mail-configuration
+screen (see the mail-channel gate below).
 
 **Locked accounts.** While `must_change_password` applies, every endpoint except
 `/api/profile` and `/api/profile/password` answers
 `403 {"code":"password_change_required"}`.
+
+**The mail-channel gate.** A fresh deployment often has no SMTP credentials —
+the desktop bundle has no `.env` at all — so `JCWORK_MAIL_PROVIDER=auto`
+resolves to the log-only `dev` fallback. Once the admin has cleared the
+password gate, the next request returns `must_configure_mail: true` and the UI
+shows a mail setup screen; until the channel is configured, every endpoint
+except `/api/profile`, `/api/admin/mail` and `/api/admin/mail/test` answers
+`403 {"code":"mail_config_required"}`. Both exits lift the gate immediately:
+saving working SMTP settings (persisted to SQLite, applied without a restart,
+and taking precedence over the environment from the next startup on), or
+explicitly deferring email login (`provider=dev`, codes stay in the server
+log). Declaring `JCWORK_MAIL_PROVIDER=dev` in `.env` counts as the declared
+choice too — the gate only ever fires on the *unconfigured* auto→dev fallback,
+so no admin can be locked out permanently. Ordinary users are never gated:
+they cannot rescue themselves from the setup screen. Deployments whose mail
+channel is already configured (or declared dev) never see it.
 
 **Pre-upgrade admins.** Deployments from the forced-phone-binding era have an
 admin whose password hash was replaced by an unparseable sentinel. No data
@@ -979,11 +997,15 @@ how to mint one against the dev SMS channel.
 | POST | `/api/auth/email/register` | Register an email + password account |
 | POST | `/api/auth/email/login` | Log in with email + password |
 | POST | `/api/auth/password/reset` | Reset the password with an emailed code |
-| POST | `/api/auth/login` | Admin-only password login; flags `must_change_password` until the bootstrap password is replaced |
-| GET | `/api/profile` | Own username, masked phone/email, `phone_bound`, `email_bound`, `is_admin`, `must_change_password` |
+| POST | `/api/auth/login` | Admin-only password login; flags `must_change_password` / `must_configure_mail` while the bootstrap gates apply |
+| GET | `/api/profile` | Own username, masked phone/email, `phone_bound`, `email_bound`, `is_admin`, `must_change_password`, `must_configure_mail` |
 | POST | `/api/profile/phone` | Bind or rebind own phone with a code |
 | POST | `/api/profile/password` | Replace own password (admin bootstrap gate) |
 | PUT | `/api/profile/username` | Change own display name |
+| GET | `/api/admin/mail` | Live mail-channel configuration, redacted (the SMTP password is never returned) |
+| PUT | `/api/admin/mail` | Merge-update the mail channel: persist to SQLite, rebuild in place, no restart |
+| DELETE | `/api/admin/mail` | Drop the stored configuration; the `JCWORK_MAIL_*` environment applies again |
+| POST | `/api/admin/mail/test` | Send a probe message through the live channel (admin only, throttled) |
 | POST | `/api/admin/users/{id}/phone` | Admin assigns a phone number |
 | DELETE | `/api/admin/users/{id}/phone` | Admin removes a phone number |
 

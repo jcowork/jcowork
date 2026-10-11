@@ -89,6 +89,10 @@ pub(crate) async fn login(
             // True while the bootstrap password is still in force — the
             // frontend locks the token to the change-password screen on it.
             "must_change_password": user.password_changed_at.is_none(),
+            // True while the mail channel sits on the unconfigured auto→dev
+            // fallback — steers the admin into the mail setup screen.
+            "must_configure_mail": user.is_admin
+                && state.mail.read().expect("mail runtime lock poisoned").auto_dev,
         })),
     )
 }
@@ -228,6 +232,8 @@ pub(crate) async fn sms_login(
             // Only the admin has a bootstrap-password gate; an SMS-provisioned
             // account is born with its number and never sees a true here.
             "must_change_password": user.is_admin && user.password_changed_at.is_none(),
+            "must_configure_mail": user.is_admin
+                && state.mail.read().expect("mail runtime lock poisoned").auto_dev,
         })),
     )
 }

@@ -26,6 +26,19 @@ interface ProfileDto {
   is_admin: boolean;
 }
 
+/** Shape of the redacted `/api/admin/mail` response (no password, ever). */
+interface MailConfigDto {
+  provider: string;
+  smtp_host: string;
+  smtp_port: number;
+  smtp_username: string;
+  password_set: boolean;
+  smtp_from: string;
+  allow_register: boolean;
+  resolved: 'smtp' | 'dev' | 'invalid';
+  source: 'stored' | 'env';
+}
+
 interface SettingsProps {
   onClose: () => void;
   userId: string;
@@ -55,6 +68,19 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
   const [feishuLoading, setFeishuLoading] = useState(true);
   const [feishuSaving, setFeishuSaving] = useState(false);
   const [feishuStatus, setFeishuStatus] = useState<'idle' | 'saved' | 'deleted' | 'error'>('idle');
+
+  // Admin mail-channel state (section renders for admins only)
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [mailCfg, setMailCfg] = useState<MailConfigDto | null>(null);
+  const [mailProvider, setMailProvider] = useState('auto');
+  const [mailForm, setMailForm] = useState({ host: '', port: '465', username: '', password: '', from: '' });
+  const [mailAllowRegister, setMailAllowRegister] = useState(true);
+  const [mailLoading, setMailLoading] = useState(true);
+  const [mailSaving, setMailSaving] = useState(false);
+  const [mailStatus, setMailStatus] = useState<'idle' | 'saved' | 'tested' | 'error'>('idle');
+  const [mailError, setMailError] = useState('');
+  const [testEmail, setTestEmail] = useState('');
+  const [testBusy, setTestBusy] = useState(false);
 
   // Account profile (display name + bound phone number / email)
   const [profileName, setProfileName] = useState('');
@@ -197,6 +223,106 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
     setPhoneBound(!!data.phone_bound);
     setEmailMasked(data.email_masked || '');
     setEmailBound(!!data.email_bound);
+    setIsAdmin(!!data.is_admin);
+  };
+
+  // --- Admin mail channel ---
+
+  const applyMailConfig = (data: MailConfigDto) => {
+    setMailCfg(data);
+    setMailProvider(data.provider || 'auto');
+    // Never echo the password back into the form; empty means "keep".
+    setMailForm(f => ({ ...f, password: '' }));
+    setMailAllowRegister(!!data.allow_register);
+  };
+
+  const saveMailConfig = async () => {
+    setMailSaving(true);
+    setMailStatus('idle');
+    setMailError('');
+    try {
+      const res = await fetch('/api/admin/mail', {
+        method: 'PUT',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: mailProvider,
+          smtp_host: mailForm.host.trim(),
+          smtp_port: Number(mailForm.port) || 465,
+          smtp_username: mailForm.username.trim(),
+          smtp_password: mailForm.password,
+          smtp_from: mailForm.from.trim(),
+          allow_register: mailAllowRegister,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data) {
+        applyMailConfig(data);
+        setMailStatus('saved');
+        setTimeout(() => setMailStatus('idle'), 2000);
+      } else {
+        setMailError(mapAuthError(t, data?.error || '', data || undefined));
+      }
+    } catch {
+      setMailError(t('networkError'));
+    }
+    setMailSaving(false);
+  };
+
+  const clearStoredMailConfig = async () => {
+    setMailSaving(true);
+    setMailStatus('idle');
+    setMailError('');
+    try {
+      const res = await fetch('/api/admin/mail', {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data) {
+        applyMailConfig(data);
+        setMailForm(f => ({
+          ...f,
+          host: data.smtp_host || '',
+          port: String(data.smtp_port || 465),
+          username: data.smtp_username || '',
+          from: data.smtp_from || '',
+        }));
+        setMailStatus('saved');
+        setTimeout(() => setMailStatus('idle'), 2000);
+      } else {
+        setMailError(mapAuthError(t, data?.error || '', data || undefined));
+      }
+    } catch {
+      setMailError(t('networkError'));
+    }
+    setMailSaving(false);
+  };
+
+  const sendTestMail = async () => {
+    setMailError('');
+    setMailStatus('idle');
+    if (!testEmail.trim()) {
+      setMailError(t('invalidEmail'));
+      return;
+    }
+    setTestBusy(true);
+    try {
+      const res = await fetch('/api/admin/mail/test', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: testEmail.trim() }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok) {
+        setMailStatus('tested');
+        setTimeout(() => setMailStatus('idle'), 2500);
+      } else {
+        setMailError(mapAuthError(t, data?.error || '', data || undefined));
+      }
+    } catch {
+      setMailError(t('networkError'));
+    }
+    setTestBusy(false);
   };
 
   useEffect(() => {
@@ -211,6 +337,31 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
       })
       .catch(() => setProfileLoading(false));
   }, []);
+
+  // Load the live mail channel configuration (admin only). The password field
+  // always starts empty: the server never echoes it, and an empty submit
+  // keeps the stored one. `mailLoading` starts true so the section shows its
+  // loading state as soon as the admin flag arrives.
+  useEffect(() => {
+    if (!isAdmin) return;
+    fetch('/api/admin/mail', { headers: { 'Authorization': `Bearer ${token}` } })
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((data: MailConfigDto) => {
+        applyMailConfig(data);
+        setMailForm(f => ({
+          ...f,
+          host: data.smtp_host || '',
+          port: String(data.smtp_port || 465),
+          username: data.smtp_username || '',
+          from: data.smtp_from || '',
+        }));
+        setMailLoading(false);
+      })
+      .catch(() => setMailLoading(false));
+  }, [isAdmin, token]);
 
   // Auto-dismiss the success banner
   useEffect(() => {
@@ -869,6 +1020,186 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
           </>
         )}
       </div>
+
+      {/* Mail Channel Section (admin only) */}
+      {isAdmin && (
+        <div style={{ ...cardStyle, marginTop: 16 }}>
+          <h3 style={{ fontSize: 16, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 20 }}>✉️</span> {t('mailSettingsSection')}
+            {mailCfg && (
+              <span style={{ ...tagStyle, background: mailCfg.resolved === 'smtp' ? '#23863622' : '#f0883e22', color: mailCfg.resolved === 'smtp' ? '#3fb950' : '#f0883e' }}>
+                {mailCfg.resolved === 'smtp' ? t('mailResolvedSmtp') : t('mailResolvedDev')}
+              </span>
+            )}
+            {mailCfg && (
+              <span style={{ ...tagStyle, background: '#1f6feb22', color: '#58a6ff' }}>
+                {mailCfg.source === 'stored' ? t('mailSourceStored') : t('mailSourceEnv')}
+              </span>
+            )}
+          </h3>
+          <div style={{ color: '#888', fontSize: 13, lineHeight: 1.6, marginBottom: 12 }}>
+            {t('mailSettingsDesc')}
+          </div>
+          {mailLoading ? (
+            <div style={{ color: '#888', fontSize: 13 }}>{t('loading')}</div>
+          ) : (
+            <>
+              {mailError && (
+                <div style={{
+                  padding: '8px 12px', marginBottom: 12, borderRadius: 6,
+                  background: '#3a1f1f', border: '1px solid #e5393555', color: '#e57373', fontSize: 12,
+                  display: 'flex', alignItems: 'center', gap: 8,
+                }}>
+                  <span style={{ flex: 1 }}>{mailError}</span>
+                  <button onClick={() => setMailError('')} style={{ background: 'none', border: 'none', color: '#e57373', cursor: 'pointer', fontSize: 13 }}>✕</button>
+                </div>
+              )}
+              <div style={{ marginBottom: 12 }}>
+                <label style={labelStyle}>{t('mailProviderLabel')}</label>
+                <select
+                  value={mailProvider}
+                  onChange={e => setMailProvider(e.target.value)}
+                  style={selectStyle}
+                >
+                  <option value="auto">auto</option>
+                  <option value="smtp">smtp</option>
+                  <option value="dev">dev</option>
+                </select>
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+                <div style={{ flex: 3 }}>
+                  <label style={labelStyle}>{t('smtpHost')}</label>
+                  <input
+                    value={mailForm.host}
+                    onChange={e => { setMailForm({ ...mailForm, host: e.target.value }); setMailError(''); }}
+                    placeholder="smtp.qq.com"
+                    style={{
+                      width: '100%', padding: '10px 12px', borderRadius: 8,
+                      border: '1px solid #444', background: '#1a1a1a', color: '#eee',
+                      fontSize: 13, outline: 'none', boxSizing: 'border-box',
+                    }}
+                  />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label style={labelStyle}>{t('smtpPort')}</label>
+                  <input
+                    value={mailForm.port}
+                    onChange={e => { setMailForm({ ...mailForm, port: e.target.value }); setMailError(''); }}
+                    style={{
+                      width: '100%', padding: '10px 12px', borderRadius: 8,
+                      border: '1px solid #444', background: '#1a1a1a', color: '#eee',
+                      fontSize: 13, outline: 'none', boxSizing: 'border-box',
+                    }}
+                  />
+                </div>
+              </div>
+              <div style={{ marginBottom: 12 }}>
+                <label style={labelStyle}>{t('smtpUsername')}</label>
+                <input
+                  value={mailForm.username}
+                  onChange={e => { setMailForm({ ...mailForm, username: e.target.value }); setMailError(''); }}
+                  style={{
+                    width: '100%', padding: '10px 12px', borderRadius: 8,
+                    border: '1px solid #444', background: '#1a1a1a', color: '#eee',
+                    fontSize: 13, outline: 'none', boxSizing: 'border-box',
+                  }}
+                />
+              </div>
+              <div style={{ marginBottom: 12 }}>
+                <label style={labelStyle}>{t('smtpPassword')}</label>
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  value={mailForm.password}
+                  onChange={e => { setMailForm({ ...mailForm, password: e.target.value }); setMailError(''); }}
+                  placeholder={mailCfg?.password_set ? t('smtpPasswordKeep') : t('smtpPassword')}
+                  style={{
+                    width: '100%', padding: '10px 12px', borderRadius: 8,
+                    border: '1px solid #444', background: '#1a1a1a', color: '#eee',
+                    fontSize: 13, outline: 'none', boxSizing: 'border-box',
+                  }}
+                />
+              </div>
+              <div style={{ marginBottom: 12 }}>
+                <label style={labelStyle}>{t('smtpFrom')}</label>
+                <input
+                  value={mailForm.from}
+                  onChange={e => { setMailForm({ ...mailForm, from: e.target.value }); setMailError(''); }}
+                  style={{
+                    width: '100%', padding: '10px 12px', borderRadius: 8,
+                    border: '1px solid #444', background: '#1a1a1a', color: '#eee',
+                    fontSize: 13, outline: 'none', boxSizing: 'border-box',
+                  }}
+                />
+              </div>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#ccc', fontSize: 13, marginBottom: 16, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={mailAllowRegister}
+                  onChange={e => setMailAllowRegister(e.target.checked)}
+                  style={{ accentColor: '#1f6feb', width: 15, height: 15, cursor: 'pointer' }}
+                />
+                {t('mailAllowRegister')}
+              </label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                <button
+                  onClick={saveMailConfig}
+                  disabled={mailSaving}
+                  style={{
+                    padding: '8px 20px', borderRadius: 8, border: 'none',
+                    background: mailSaving ? '#333' : '#1f6feb',
+                    color: '#fff', cursor: mailSaving ? 'not-allowed' : 'pointer',
+                    fontSize: 14, fontWeight: 500,
+                  }}
+                >
+                  {mailSaving ? t('saving') : t('save')}
+                </button>
+                {mailCfg?.source === 'stored' && (
+                  <button
+                    onClick={clearStoredMailConfig}
+                    disabled={mailSaving}
+                    title={t('clearStoredMailConfigHint')}
+                    style={{
+                      padding: '8px 16px', borderRadius: 8, border: '1px solid #f87171',
+                      background: 'transparent', color: '#f87171', cursor: mailSaving ? 'not-allowed' : 'pointer',
+                      fontSize: 14,
+                    }}
+                  >
+                    {t('clearStoredMailConfig')}
+                  </button>
+                )}
+                {mailStatus === 'saved' && <span style={{ color: '#3fb950', fontSize: 13 }}>{t('saved')}</span>}
+                {mailStatus === 'tested' && <span style={{ color: '#3fb950', fontSize: 13 }}>{t('testEmailSent')}</span>}
+                {mailStatus === 'error' && <span style={{ color: '#f87171', fontSize: 13 }}>{t('failedToSave')}</span>}
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+                <input
+                  value={testEmail}
+                  onChange={e => { setTestEmail(e.target.value); setMailError(''); }}
+                  placeholder={t('testEmailPlaceholder')}
+                  style={{
+                    flex: 1, padding: '10px 12px', borderRadius: 8,
+                    border: '1px solid #444', background: '#1a1a1a', color: '#eee',
+                    fontSize: 13, outline: 'none', boxSizing: 'border-box',
+                  }}
+                />
+                <button
+                  onClick={sendTestMail}
+                  disabled={testBusy || mailSaving}
+                  style={{
+                    padding: '8px 16px', borderRadius: 8, border: '1px solid #1f6feb',
+                    background: 'transparent', color: '#58a6ff',
+                    cursor: (testBusy || mailSaving) ? 'not-allowed' : 'pointer',
+                    fontSize: 13, fontWeight: 500, whiteSpace: 'nowrap',
+                  }}
+                >
+                  {t('sendTestEmail')}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       {/* Language Section */}
       <div style={{ ...cardStyle, marginTop: 16 }}>

@@ -18,7 +18,7 @@ use jcowork_logs::LogWriter;
 use jcowork_memory::{BuiltinMemoryProvider, MemoryManager};
 use jcowork_server::config::ServerConfig;
 use jcowork_skills::SkillManager;
-use jcowork_storage::FeishuConfigStore;
+use jcowork_storage::{AppSettingsStore, FeishuConfigStore};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -193,12 +193,17 @@ async fn main() -> Result<()> {
         connector_manager,
         user_store,
         log_writer,
+        app_settings: Arc::new(AppSettingsStore::new(pool.clone())),
         feishu_config_store: Arc::new(FeishuConfigStore::new(pool)),
         feishu_client_cache: Arc::new(dashmap::DashMap::new()),
         sms,
-        mail,
+        mail: Arc::new(RwLock::new(mail)),
         data_dir: data_dir.clone(),
     };
+
+    // An admin-configured mail channel (stored by /api/admin/mail) wins over
+    // the environment on every restart.
+    router::apply_stored_mail_config(&state).await;
 
     // Build router
     let app = router::build_router(state.clone())

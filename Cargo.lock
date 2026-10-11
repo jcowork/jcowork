@@ -2500,6 +2500,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "lettre",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]

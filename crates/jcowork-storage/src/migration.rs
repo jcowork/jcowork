@@ -245,6 +245,20 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         .execute(pool)
         .await?;
 
+    // Deployment-level key/value settings (e.g. the admin-configured mail
+    // channel, which overrides the environment on next startup).
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT NOT NULL PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     info!("Database migrations completed");
     Ok(())
 }

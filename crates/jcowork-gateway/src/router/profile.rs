@@ -22,7 +22,7 @@ pub(crate) async fn get_profile(
     axum::Extension(auth_user): axum::Extension<AuthUser>,
 ) -> impl IntoResponse {
     match state.user_store.get_user_by_id(&auth_user.user_id).await {
-        Ok(Some(user)) => (StatusCode::OK, Json(profile_json(&user))),
+        Ok(Some(user)) => (StatusCode::OK, Json(profile_json(&state, &user))),
         Ok(None) => (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "Account not found"})),
@@ -75,7 +75,7 @@ pub(crate) async fn bind_phone(
     );
 
     match state.user_store.get_user_by_id(&auth_user.user_id).await {
-        Ok(Some(user)) => (StatusCode::OK, Json(profile_json(&user))),
+        Ok(Some(user)) => (StatusCode::OK, Json(profile_json(&state, &user))),
         Ok(None) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": "Account not found"})),
@@ -134,7 +134,7 @@ pub(crate) async fn change_password(
     tracing::info!(user_id = %auth_user.user_id, "Admin password changed");
 
     match state.user_store.get_user_by_id(&auth_user.user_id).await {
-        Ok(Some(user)) => (StatusCode::OK, Json(profile_json(&user))).into_response(),
+        Ok(Some(user)) => (StatusCode::OK, Json(profile_json(&state, &user))).into_response(),
         Ok(None) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": "Account not found"})),
@@ -181,7 +181,7 @@ pub(crate) async fn change_username(
 
     match state.user_store.update_username(&auth_user.user_id, name).await {
         Ok(()) => match state.user_store.get_user_by_id(&auth_user.user_id).await {
-            Ok(Some(user)) => (StatusCode::OK, Json(profile_json(&user))),
+            Ok(Some(user)) => (StatusCode::OK, Json(profile_json(&state, &user))),
             Ok(None) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "Account not found"})),
@@ -204,7 +204,13 @@ pub(crate) async fn change_username(
 }
 
 /// Shape of every profile response. `password_hash` is never included.
-fn profile_json(user: &User) -> serde_json::Value {
+fn profile_json(state: &AppState, user: &User) -> serde_json::Value {
+    let must_configure_mail = user.is_admin
+        && state
+            .mail
+            .read()
+            .expect("mail runtime lock poisoned")
+            .auto_dev;
     serde_json::json!({
         "username": user.username,
         "phone_masked": user.phone.as_deref().map(mask_phone).unwrap_or_default(),
@@ -214,5 +220,7 @@ fn profile_json(user: &User) -> serde_json::Value {
         "is_admin": user.is_admin,
         // Drives the client's forced change-password screen after a reload.
         "must_change_password": user.is_admin && user.password_changed_at.is_none(),
+        // Drives the admin's forced mail-setup screen after a reload.
+        "must_configure_mail": must_configure_mail,
     })
 }

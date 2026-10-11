@@ -114,6 +114,8 @@ function localizeAuthError(body) {
   if (raw.includes('Account has been deleted')) return '该账号已被删除，无法登录';
   if (raw.includes('Invalid username or password')) return '用户名或密码错误';
   if (raw.includes('Change the admin password to continue')) return '请先修改管理员密码';
+  // The miniprogram has no admin console; the mail channel is set up on Web.
+  if (raw.includes('Configure the mail channel to continue')) return '请先在 Web 端完成邮件通道配置';
   if (raw.includes('already bound')) return '该手机号已被其他账号绑定';
   if (raw.includes('Username must be between') || raw.includes('Username cannot contain')) {
     return '显示名称需为 2-24 个字符，且不能包含空格与 @ / \\ 字符';

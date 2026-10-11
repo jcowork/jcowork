@@ -154,6 +154,10 @@ function AppInner() {
   const [changePwdForm, setChangePwdForm] = useState({ password: '', confirmPassword: '' });
   const [changePwdBusy, setChangePwdBusy] = useState(false);
   const [changePwdError, setChangePwdError] = useState('');
+  // Forced mail-channel setup (admin, unconfigured auto→dev fallback).
+  const [mailForm, setMailForm] = useState({ host: '', port: '465', username: '', password: '', from: '' });
+  const [mailBusy, setMailBusy] = useState(false);
+  const [mailError, setMailError] = useState('');
   const hiddenTimeRef = useRef(0);
 
   // Per-account conversation storage (background accounts keep their convs here)
@@ -349,6 +353,7 @@ function AppInner() {
     username: string;
     is_admin?: boolean;
     must_change_password?: boolean;
+    must_configure_mail?: boolean;
   }) => {
     const authState: AuthState = {
       token: data.token,
@@ -356,6 +361,7 @@ function AppInner() {
       username: data.username,
       isAdmin: !!data.is_admin,
       mustChangePassword: !!data.must_change_password,
+      mustConfigureMail: !!data.must_configure_mail,
     };
     // Upsert into multi-account store
     const updated = upsertAccount(authState);
@@ -545,7 +551,10 @@ function AppInner() {
         activeAccount.token,
       );
       if (ok) {
-        const updated = upsertAccount({ ...activeAccount, mustChangePassword: false });
+        // The response is the updated profile; its mail flag decides whether
+        // the setup screen below comes up next.
+        const mustMail = data.must_configure_mail === true;
+        const updated = upsertAccount({ ...activeAccount, mustChangePassword: false, mustConfigureMail: mustMail });
         setAccounts(updated);
         setChangePwdForm({ password: '', confirmPassword: '' });
       } else {
@@ -555,6 +564,81 @@ function AppInner() {
       setChangePwdError(t('networkError'));
     } finally {
       setChangePwdBusy(false);
+    }
+  };
+
+  /// PUT a JSON body with the admin token (mail config endpoints).
+  const putJson = async (path: string, body: Record<string, unknown>, token: string) => {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    return { ok: res.ok, data };
+  };
+
+  /// Submit the SMTP settings from the forced-setup screen. The server
+  /// rebuilds the channel in place, so success means email login works right
+  /// away — no restart, no re-login.
+  const handleSaveMailConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeAccount) return;
+    if (!mailForm.host.trim() || !mailForm.username.trim() || !mailForm.password || !mailForm.from.trim()) {
+      setMailError(t('smtpFieldsRequired'));
+      return;
+    }
+    setMailError('');
+    setMailBusy(true);
+    try {
+      const { ok, data } = await putJson(
+        '/api/admin/mail',
+        {
+          provider: 'smtp',
+          smtp_host: mailForm.host.trim(),
+          smtp_port: Number(mailForm.port) || 465,
+          smtp_username: mailForm.username.trim(),
+          smtp_password: mailForm.password,
+          smtp_from: mailForm.from.trim(),
+        },
+        activeAccount.token,
+      );
+      if (ok) {
+        const updated = upsertAccount({ ...activeAccount, mustConfigureMail: false });
+        setAccounts(updated);
+        setMailForm({ host: '', port: '465', username: '', password: '', from: '' });
+      } else {
+        setMailError(mapAuthError(data.error ?? '', data));
+      }
+    } catch {
+      setMailError(t('networkError'));
+    } finally {
+      setMailBusy(false);
+    }
+  };
+
+  /// Explicitly stay on the dev channel. This is the admin's declared choice
+  /// — email login stays disabled, codes go to the server log — and lifts the
+  /// gate the same as a full SMTP setup would.
+  const handleDisableMail = async () => {
+    if (!activeAccount) return;
+    setMailError('');
+    setMailBusy(true);
+    try {
+      const { ok, data } = await putJson('/api/admin/mail', { provider: 'dev' }, activeAccount.token);
+      if (ok) {
+        const updated = upsertAccount({ ...activeAccount, mustConfigureMail: false });
+        setAccounts(updated);
+      } else {
+        setMailError(mapAuthError(data.error ?? '', data));
+      }
+    } catch {
+      setMailError(t('networkError'));
+    } finally {
+      setMailBusy(false);
     }
   };
 
@@ -636,11 +720,11 @@ function AppInner() {
     return () => window.clearTimeout(h);
   }, [emailCountdown]);
 
-  // Probe every stored account once on load. `/api/profile` is one of the two
-  // endpoints an admin on the bootstrap password may still call, so it doubles
-  // as the check — the lock flag must be re-derived after a reload.
-  // `must_change_password` is undefined on servers predating the
-  // change-password flow; the strict check below then skips them.
+  // Probe every stored account once on load. `/api/profile` stays reachable
+  // through both admin gates, so it doubles as the check for both — the lock
+  // flags must be re-derived after a reload. `must_change_password` /
+  // `must_configure_mail` are undefined on servers predating those flows; the
+  // strict checks below then skip them.
   useEffect(() => {
     loadAccounts().forEach((acct) => {
       if (acct.mustChangePassword) return;
@@ -649,10 +733,18 @@ function AppInner() {
       })
         .then((res) => (res.ok ? res.json() : null))
         .then((data) => {
-          if (!data || data.must_change_password !== true) return;
+          if (!data) return;
           setAccounts((prev) => {
-            const next = prev.map((a) => (a.userId === acct.userId ? { ...a, mustChangePassword: true } : a));
-            saveAccounts(next);
+            let changed = false;
+            const next = prev.map((a) => {
+              if (a.userId !== acct.userId) return a;
+              const mustChange = data.must_change_password === true || a.mustChangePassword;
+              const mustMail = data.must_configure_mail === true || a.mustConfigureMail;
+              if (a.mustChangePassword === mustChange && a.mustConfigureMail === mustMail) return a;
+              changed = true;
+              return { ...a, mustChangePassword: mustChange, mustConfigureMail: mustMail };
+            });
+            if (changed) saveAccounts(next);
             return next;
           });
         })
@@ -975,6 +1067,89 @@ function AppInner() {
               {changePwdBusy ? t('saving') : t('saveAndContinue')}
             </button>
           </form>
+          <p style={{ marginTop: 16, textAlign: 'center' }}>
+            <a href="#" onClick={logout} style={{ color: '#888', fontSize: 13 }}>
+              {t('logout')}
+            </a>
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // Forced mail-channel setup, second act of the admin bootstrap. While the
+  // channel resolves `auto` to the unconfigured dev fallback the server
+  // answers everything but the mail config endpoints with 403, so the only
+  // ways past this screen are: working SMTP settings, an explicit "stay on
+  // dev" choice, or signing out.
+  if (activeAccount?.mustConfigureMail) {
+    return (
+      <div className="login-container">
+        <div className="login-card">
+          <img src="/logo.png" className="login-logo" alt="Jcowork" />
+          <h1 style={{ fontSize: 24, marginBottom: 8 }}>{t('mailSetupTitle')}</h1>
+          <p style={{ color: '#888', fontSize: 13, lineHeight: 1.6, marginBottom: 20 }}>
+            {t('mailSetupHint')}
+          </p>
+          <form onSubmit={handleSaveMailConfig}>
+            <AuthBanner msg={mailError} type="error" />
+            <input
+              autoFocus
+              placeholder={t('smtpHost')}
+              value={mailForm.host}
+              onChange={(e) => { setMailForm({ ...mailForm, host: e.target.value }); setMailError(''); }}
+              style={authInputStyle}
+            />
+            <input
+              type="number"
+              placeholder={t('smtpPort')}
+              value={mailForm.port}
+              onChange={(e) => { setMailForm({ ...mailForm, port: e.target.value }); setMailError(''); }}
+              style={authInputStyle}
+            />
+            <input
+              placeholder={t('smtpUsername')}
+              value={mailForm.username}
+              onChange={(e) => { setMailForm({ ...mailForm, username: e.target.value }); setMailError(''); }}
+              style={authInputStyle}
+            />
+            <input
+              type="password"
+              autoComplete="new-password"
+              placeholder={t('smtpPassword')}
+              value={mailForm.password}
+              onChange={(e) => { setMailForm({ ...mailForm, password: e.target.value }); setMailError(''); }}
+              style={authInputStyle}
+            />
+            <input
+              placeholder={t('smtpFrom')}
+              value={mailForm.from}
+              onChange={(e) => { setMailForm({ ...mailForm, from: e.target.value }); setMailError(''); }}
+              style={authInputStyle}
+            />
+            <button
+              type="submit"
+              disabled={mailBusy}
+              style={{ ...authBtnStyle, marginBottom: 0, background: mailBusy ? '#333' : '#1a73e8', cursor: mailBusy ? 'not-allowed' : 'pointer' }}
+            >
+              {mailBusy ? t('saving') : t('saveAndEnable')}
+            </button>
+          </form>
+          <button
+            type="button"
+            onClick={handleDisableMail}
+            disabled={mailBusy}
+            style={{
+              width: '100%', padding: 10, marginTop: 10, borderRadius: 8,
+              border: '1px solid #555', background: 'transparent', color: '#aaa',
+              fontSize: 14, cursor: mailBusy ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {t('disableMailLogin')}
+          </button>
+          <p style={{ color: '#666', fontSize: 12, lineHeight: 1.6, marginTop: 10, marginBottom: 0 }}>
+            {t('disableMailLoginHint')}
+          </p>
           <p style={{ marginTop: 16, textAlign: 'center' }}>
             <a href="#" onClick={logout} style={{ color: '#888', fontSize: 13 }}>
               {t('logout')}
