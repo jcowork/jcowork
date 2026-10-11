@@ -133,6 +133,14 @@ function injectWorkspaceFetch(html: string, filePath: string, token: string): st
   return script + html;
 }
 
+/** Workspace tree panel width bounds. The max also shrinks on narrow windows
+ *  so the preview always keeps at least 40% of the viewport. */
+const TREE_MIN_WIDTH = 180;
+const TREE_MAX_WIDTH = 560;
+const TREE_DEFAULT_WIDTH = 280;
+const treeMaxWidth = () => Math.max(TREE_MIN_WIDTH, Math.min(TREE_MAX_WIDTH, Math.floor(window.innerWidth * 0.6)));
+const clampTreeWidth = (w: number) => Math.min(treeMaxWidth(), Math.max(TREE_MIN_WIDTH, w));
+
 export default function Documents({ token }: DocumentsProps) {
   const t = useT();
   const [tree, setTree] = useState<TreeNode[]>([]);
@@ -168,6 +176,44 @@ export default function Documents({ token }: DocumentsProps) {
   const [editContent, setEditContent] = useState('');
   const [editDirty, setEditDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Workspace tree panel: user-dragged width, remembered across sessions.
+  const [treeWidth, setTreeWidth] = useState(() => {
+    const saved = parseInt(localStorage.getItem('jcowork_docs_width') || '', 10);
+    return Number.isFinite(saved) ? clampTreeWidth(saved) : TREE_DEFAULT_WIDTH;
+  });
+  const [treeResizing, setTreeResizing] = useState(false);
+  const treeDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+
+  useEffect(() => {
+    localStorage.setItem('jcowork_docs_width', String(treeWidth));
+  }, [treeWidth]);
+
+  // Re-clamp when the window shrinks so the preview keeps its share.
+  useEffect(() => {
+    const onResize = () => setTreeWidth(w => clampTreeWidth(w));
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  useEffect(() => {
+    if (!treeResizing) return;
+    const onMove = (e: MouseEvent) => {
+      const drag = treeDragRef.current;
+      if (drag) setTreeWidth(clampTreeWidth(drag.startWidth + e.clientX - drag.startX));
+    };
+    const onUp = () => setTreeResizing(false);
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    // The divider sits over the file tree, so keep the text from being selected.
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    return () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+  }, [treeResizing]);
 
   // Render document content as styled Markdown. Shared by PDF (extracted
   // text) and .md file preview. Images are resolved per document type:
@@ -1086,10 +1132,11 @@ export default function Documents({ token }: DocumentsProps) {
         .tree-row:hover .delete-btn:hover { opacity: 1 !important; }
         .tree-row:hover .tree-icon-btn { opacity: 0.6 !important; }
         .tree-row:hover .tree-icon-btn:hover { opacity: 1 !important; }
+        .docs-resizer:hover, .docs-resizer[data-resizing] { background: rgba(88, 166, 255, 0.35) !important; }
       `}</style>
       {/* File tree sidebar */}
       <div style={{
-        width: 280,
+        width: treeWidth,
         borderRight: '1px solid #333',
         display: 'flex',
         flexDirection: 'column',
@@ -1315,6 +1362,25 @@ export default function Documents({ token }: DocumentsProps) {
           </div>
         )}
       </div>
+      {/* Drag the divider left/right to resize the workspace panel */}
+      <div
+        className="docs-resizer"
+        data-resizing={treeResizing || undefined}
+        onMouseDown={(e) => {
+          e.preventDefault();
+          treeDragRef.current = { startX: e.clientX, startWidth: treeWidth };
+          setTreeResizing(true);
+        }}
+        onDoubleClick={() => setTreeWidth(TREE_DEFAULT_WIDTH)}
+        title={t('resizeWorkspace')}
+        aria-label={t('resizeWorkspace')}
+        style={{
+          width: 5,
+          flexShrink: 0,
+          cursor: 'col-resize',
+          background: 'transparent',
+        }}
+      />
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
         {previewPath ? (
           <>
