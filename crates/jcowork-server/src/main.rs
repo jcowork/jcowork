@@ -178,6 +178,8 @@ async fn main() -> Result<()> {
     // Fail fast on an explicitly-configured-but-incomplete SMS channel: starting
     // up anyway would leave every user unable to log in.
     let sms = router::SmsRuntime::from_env()?;
+    // Same contract for the email channel.
+    let mail = router::MailRuntime::from_env()?;
 
     let state = AppState {
         session_manager,
@@ -194,6 +196,7 @@ async fn main() -> Result<()> {
         feishu_config_store: Arc::new(FeishuConfigStore::new(pool)),
         feishu_client_cache: Arc::new(dashmap::DashMap::new()),
         sms,
+        mail,
         data_dir: data_dir.clone(),
     };
 

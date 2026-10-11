@@ -371,6 +371,14 @@ async fn main() {
         }
     };
 
+    let mail = match router::MailRuntime::from_env() {
+        Ok(mail) => mail,
+        Err(e) => {
+            show_error_and_exit(&format!("邮件通道配置错误:\n\n{}", e));
+            return;
+        }
+    };
+
     let state = AppState {
         session_manager,
         auth_config,
@@ -386,6 +394,7 @@ async fn main() {
         feishu_config_store: Arc::new(FeishuConfigStore::new(pool)),
         feishu_client_cache: Arc::new(dashmap::DashMap::new()),
         sms,
+        mail,
         data_dir: data_dir.clone(),
     };
 

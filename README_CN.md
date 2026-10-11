@@ -704,6 +704,14 @@ server {
 | `JCWORK_SMS_TEMPLATE_CODE` | （空） | 阿里云短信模板 CODE（模板需接受一个 `code` 变量） |
 | `JCWORK_SMS_DAILY_GLOBAL_CAP` | `500` | 全进程每个 UTC 日的发送上限，防短信盗刷的主要防线 |
 | `JCWORK_SMS_ALLOW_REGISTER` | `true` | 设为 `false` 即邀请制：未注册号码直接拒绝，不再自动开户 |
+| `JCWORK_MAIL_PROVIDER` | `auto` | 邮件通道：`auto`、`smtp` 或 `dev`（dev 只把验证码写进服务端日志，不真正发送） |
+| `JCWORK_SMTP_HOST` | （空） | SMTP 服务器地址，任意邮件服务商均可（阿里云邮件推送、Gmail、SendGrid 等） |
+| `JCWORK_SMTP_PORT` | `587` | `465` 为隐式 TLS；`587`/`25` 为 STARTTLS |
+| `JCWORK_SMTP_USERNAME` | （空） | SMTP 用户名 |
+| `JCWORK_SMTP_PASSWORD` | （空） | SMTP 密码 |
+| `JCWORK_SMTP_FROM` | （空） | 验证码邮件的发件地址 |
+| `JCWORK_MAIL_DAILY_GLOBAL_CAP` | `500` | 全进程每个 UTC 日的邮件发送上限，与短信上限相互独立 |
+| `JCWORK_MAIL_ALLOW_REGISTER` | `true` | 设为 `false` 关闭邮箱注册；已有邮箱账号仍可正常登录 |
 | `JCWORK_ADMIN_PHONE` | （空） | 启动时绑定 admin 手机号，在首次登录前就关闭默认密码入口；填 `clear` 表示解绑 |
 | `JCWORK_ADMIN_BOOTSTRAP_PASSWORD` | （空） | 初始 admin 密码，仅在首次创建该账号时生效 |
 | `JCWORK_DEFAULT_MODEL` | `moonshot:kimi-k2.6` | 默认 LLM 模型（`provider:model` 格式） |
@@ -892,13 +900,23 @@ python app.py
 
 ## 认证与登录方式
 
-短信验证码是唯一的登录凭据。用户名密码注册与密码找回均已下线，
-`/api/auth/register`、`/api/auth/forgot-password`、`/api/auth/reset-password` 三个接口不再存在。
+两种凭据并存：手机号 + 短信验证码（原有流程），或邮箱 + 密码（为没有
+大陆手机号的用户准备的替代方案）。旧的用户名密码接口
+（`/api/auth/register`、`/api/auth/forgot-password`、`/api/auth/reset-password`）
+已不再存在。
 
 **普通账号。** `POST /api/auth/sms/send` 下发验证码，`POST /api/auth/sms/login`
 用验证码换取 JWT。验证通过但尚未注册的手机号会当场自动建号，显示名称取号码后四位
 （如 `用户1111`），可在「设置 → 账号资料」中自行修改。验证码一次性有效、5 分钟过期，
 且永远不会出现在任何 HTTP 响应里 —— 使用 `dev` 短信通道时，唯一能读到它的地方是服务端日志。
+
+**邮箱账号。** `POST /api/auth/email/send` 向邮箱发送验证码；
+`POST /api/auth/email/register` 用验证码加自选密码（8–128 位）完成注册并直接登录，
+显示名称取邮箱 `@` 前的部分。之后用 `POST /api/auth/email/login` 登录，
+忘记密码时用 `POST /api/auth/password/reset` 凭邮件验证码重置。验证码规则与短信
+完全一致 —— 一次性有效、5 分钟过期、绝不进 HTTP 响应；发送接口对任何语法合法的
+邮箱返回完全相同的响应，无法用来探测账号是否存在。将
+`JCWORK_MAIL_ALLOW_REGISTER` 设为 `false` 可关闭邮箱注册（不影响短信注册）。
 
 **管理员引导登录。** `admin` 账号带有公开的初始密码（`admin123`，首次创建时可用
 `JCWORK_ADMIN_BOOTSTRAP_PASSWORD` 覆盖），否则全新实例无从进入。`POST /api/auth/login`
@@ -932,10 +950,14 @@ python app.py
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/auth/sms/send` | 发送验证码（响应中永远不含验证码） |
+| POST | `/api/auth/sms/send` | 发送短信验证码（响应中永远不含验证码） |
 | POST | `/api/auth/sms/login` | 验证码登录；未注册的号码自动建号 |
+| POST | `/api/auth/email/send` | 发送邮件验证码（注册与找回密码共用） |
+| POST | `/api/auth/email/register` | 邮箱 + 密码注册 |
+| POST | `/api/auth/email/login` | 邮箱 + 密码登录 |
+| POST | `/api/auth/password/reset` | 凭邮件验证码重置密码 |
 | POST | `/api/auth/login` | 仅管理员引导登录，绑定手机号后永久失效 |
-| GET | `/api/profile` | 自己的用户名、掩码手机号、`phone_bound`、`is_admin` |
+| GET | `/api/profile` | 自己的用户名、掩码手机号/邮箱、`phone_bound`、`email_bound`、`is_admin` |
 | POST | `/api/profile/phone` | 用验证码绑定或更换自己的手机号 |
 | PUT | `/api/profile/username` | 修改自己的显示名称 |
 | POST | `/api/admin/users/{id}/phone` | 管理员为用户分配手机号 |

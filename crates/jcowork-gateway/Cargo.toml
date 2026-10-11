@@ -15,6 +15,7 @@ jcowork-cron = { workspace = true }
 jcowork-logs = { workspace = true }
 jcowork-feishu = { workspace = true }
 jcowork-sms = { workspace = true }
+jcowork-mail = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }
 tower = { workspace = true }

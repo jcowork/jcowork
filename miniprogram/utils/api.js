@@ -93,6 +93,15 @@ function localizeAuthError(body) {
   if (raw.includes('Daily limit reached for this phone number')) return '该手机号今日获取次数已达上限';
   if (raw.includes('SMS quota exhausted')) return '短信额度已用尽，请明天再试';
   if (raw.includes('Failed to send verification code')) return '验证码发送失败，请稍后重试';
+  if (raw.includes('Invalid email address')) return '邮箱格式不正确';
+  if (raw.includes('Invalid email or password')) return '邮箱或密码错误';
+  if (raw.includes('Email address is already registered')) return '该邮箱已注册，请直接登录';
+  if (raw.includes('Daily limit reached for this email address')) return '该邮箱今日获取验证码次数已达上限';
+  if (raw.includes('Email quota exhausted')) return '邮件额度已用尽，请明天再试';
+  if (raw.includes('Email registration is disabled')) return '邮箱注册已关闭';
+  if (raw.includes('Password must be at least')) return '密码至少 8 位';
+  if (raw.includes('Password must be at most')) return '密码不能超过 128 位';
+  if (raw.includes('Password cannot be only whitespace')) return '密码不能为纯空白字符';
   if (raw.includes('Verification code is required')) return '请输入验证码';
   if (raw.includes('Verification code has expired')) return '验证码已过期，请重新获取';
   if (raw.includes('Invalid verification code')) {
@@ -213,9 +222,56 @@ function adminLogin(serverUrl, username, password) {
   });
 }
 
+/** 发送邮件验证码：POST /api/auth/email/send → { expires_in, resend_after }（注册与找回密码共用） */
+function sendEmailCode(serverUrl, email) {
+  return request('/api/auth/email/send', {
+    method: 'POST',
+    data: { email },
+    auth: false,
+    baseUrl: serverUrl,
+    timeout: 20000,
+  });
+}
+
+/**
+ * 邮箱注册：POST /api/auth/email/register → 同 smsLogin 的响应结构。
+ * 邮件验证码确权 + 自选密码，成功即登录。
+ */
+function emailRegister(serverUrl, email, password, code) {
+  return request('/api/auth/email/register', {
+    method: 'POST',
+    data: { email, password, code },
+    auth: false,
+    baseUrl: serverUrl,
+    timeout: 20000,
+  });
+}
+
+/** 邮箱密码登录：POST /api/auth/email/login → 同 smsLogin 的响应结构 */
+function emailLogin(serverUrl, email, password) {
+  return request('/api/auth/email/login', {
+    method: 'POST',
+    data: { email, password },
+    auth: false,
+    baseUrl: serverUrl,
+    timeout: 20000,
+  });
+}
+
+/** 找回密码：POST /api/auth/password/reset（邮件验证码 + 新密码，不返回令牌） */
+function resetPassword(serverUrl, email, code, newPassword) {
+  return request('/api/auth/password/reset', {
+    method: 'POST',
+    data: { email, code, new_password: newPassword },
+    auth: false,
+    baseUrl: serverUrl,
+    timeout: 20000,
+  });
+}
+
 // ─── 账号资料 ────────────────────────────────────────────
 
-/** 当前账号资料：GET /api/profile → { username, phone_masked, phone_bound, is_admin } */
+/** 当前账号资料：GET /api/profile → { username, phone_masked, phone_bound, email_masked, email_bound, is_admin } */
 function fetchProfile() {
   return request('/api/profile');
 }
@@ -237,6 +293,10 @@ module.exports = {
   sendSmsCode,
   smsLogin,
   adminLogin,
+  sendEmailCode,
+  emailRegister,
+  emailLogin,
+  resetPassword,
   fetchProfile,
   bindPhone,
   fetchProviders,

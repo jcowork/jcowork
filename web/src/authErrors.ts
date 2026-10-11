@@ -20,6 +20,17 @@ export interface AuthErrorDetail {
 export function mapAuthError(t: Translate, raw: string, extra?: AuthErrorDetail): string {
   const wait = extra?.retry_after;
   if (raw.includes('Invalid phone number')) return t('invalidPhone');
+  // Email-specific strings first: none of them contain the phone strings, but
+  // keeping the channel order explicit avoids surprises when they drift.
+  if (raw.includes('Invalid email address')) return t('invalidEmail');
+  if (raw.includes('Invalid email or password')) return t('invalidEmailOrPassword');
+  if (raw.includes('Email address is already registered')) return t('emailAlreadyRegistered');
+  if (raw.includes('Daily limit reached for this email address')) return t('emailDailyLimit');
+  if (raw.includes('Email quota exhausted')) return t('emailQuotaExhausted');
+  if (raw.includes('Email registration is disabled')) return t('emailRegisterDisabled');
+  if (raw.includes('Password must be at least')) return t('passwordMinLength');
+  if (raw.includes('Password must be at most')) return t('passwordMaxLength');
+  if (raw.includes('Password cannot be only whitespace')) return t('passwordMinLength');
   if (raw.includes('Please wait before requesting another code')) {
     return wait ? t('resendWait').replace('{n}', String(wait)) : t('resendTooSoon');
   }

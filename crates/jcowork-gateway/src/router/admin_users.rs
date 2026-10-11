@@ -24,7 +24,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use super::{AppState, AuthUser, mask_phone};
+use super::{AppState, AuthUser, mask_email, mask_phone};
 use crate::auth::normalize_phone;
 use jcowork_storage::sms_only_password_hash;
 use jcowork_storage::user_store::TRASH_RETENTION_DAYS;
@@ -53,13 +53,15 @@ fn ensure_admin(auth_user: &AuthUser) -> Result<(), Response> {
 }
 
 /// Map a user row to a safe DTO (never exposes `password_hash`, and only ever
-/// the masked phone number).
+/// the masked phone number / email address).
 fn user_dto(u: &User) -> serde_json::Value {
     serde_json::json!({
         "user_id": u.id,
         "username": u.username,
         "phone_masked": u.phone.as_deref().map(mask_phone).unwrap_or_default(),
         "phone_bound": u.phone.is_some(),
+        "email_masked": u.email.as_deref().map(mask_email).unwrap_or_default(),
+        "email_bound": u.email.is_some(),
         "is_public": u.is_public,
         "is_admin": u.is_admin,
         "created_at": u.created_at,

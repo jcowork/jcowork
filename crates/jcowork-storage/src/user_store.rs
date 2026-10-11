@@ -24,6 +24,10 @@ pub struct User {
     /// account has not bound one yet and therefore cannot log in by SMS.
     /// Unique across accounts; stored normalized to digits only.
     pub phone: Option<String>,
+    /// Email address used for password login. `None` means the account has
+    /// not registered one. Unique across accounts; stored normalized to
+    /// lowercase.
+    pub email: Option<String>,
     pub created_at: String,
     /// Public account flag (chosen at registration). Public accounts are
     /// visible in every user's contacts list and their public documents /
@@ -73,6 +77,7 @@ impl UserStore {
                 password_hash TEXT NOT NULL,
                 feishu_open_id TEXT UNIQUE,
                 phone TEXT,
+                email TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 is_public INTEGER NOT NULL DEFAULT 0,
                 is_admin INTEGER NOT NULL DEFAULT 0,
@@ -139,6 +144,22 @@ impl UserStore {
         .execute(&pool)
         .await; // Ignore error if index already exists
 
+        // Add email column if it doesn't exist (migration for existing DBs).
+        // Pre-existing accounts have no email; email+password login is a
+        // registration-time choice, never back-filled.
+        let _ = sqlx::query(
+            "ALTER TABLE users ADD COLUMN email TEXT",
+        )
+        .execute(&pool)
+        .await; // Ignore error if column already exists
+
+        // Same NULLs-are-distinct contract as the phone index above.
+        let _ = sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)",
+        )
+        .execute(&pool)
+        .await; // Ignore error if index already exists
+
         Ok(Self { pool })
     }
 
@@ -169,6 +190,7 @@ impl UserStore {
             password_hash: password_hash.to_string(),
             feishu_open_id: None,
             phone: None,
+            email: None,
             created_at: chrono::Utc::now().naive_utc().to_string(),
             is_public,
             is_admin: false,
@@ -179,7 +201,7 @@ impl UserStore {
     /// Look up a user by username.
     pub async fn get_user_by_username(&self, username: &str) -> Result<Option<User>> {
         let user = sqlx::query_as::<_, User>(
-            "SELECT id, username, password_hash, feishu_open_id, phone, created_at, is_public, is_admin, deleted_at FROM users WHERE username = ?",
+            "SELECT id, username, password_hash, feishu_open_id, phone, email, created_at, is_public, is_admin, deleted_at FROM users WHERE username = ?",
         )
         .bind(username)
         .fetch_optional(&self.pool)
@@ -191,7 +213,7 @@ impl UserStore {
     /// Look up a user by ID.
     pub async fn get_user_by_id(&self, user_id: &str) -> Result<Option<User>> {
         let user = sqlx::query_as::<_, User>(
-            "SELECT id, username, password_hash, feishu_open_id, phone, created_at, is_public, is_admin, deleted_at FROM users WHERE id = ?",
+            "SELECT id, username, password_hash, feishu_open_id, phone, email, created_at, is_public, is_admin, deleted_at FROM users WHERE id = ?",
         )
         .bind(user_id)
         .fetch_optional(&self.pool)
@@ -206,7 +228,7 @@ impl UserStore {
     /// Callers must only expose safe fields (never `password_hash`).
     pub async fn list_public_users(&self) -> Result<Vec<User>> {
         let users = sqlx::query_as::<_, User>(
-            "SELECT id, username, password_hash, feishu_open_id, phone, created_at, is_public, is_admin, deleted_at FROM users WHERE is_public = 1 AND deleted_at IS NULL ORDER BY username",
+            "SELECT id, username, password_hash, feishu_open_id, phone, email, created_at, is_public, is_admin, deleted_at FROM users WHERE is_public = 1 AND deleted_at IS NULL ORDER BY username",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -249,7 +271,7 @@ impl UserStore {
     /// Look up a user by Feishu open_id.
     pub async fn get_user_by_feishu_open_id(&self, open_id: &str) -> Result<Option<User>> {
         let user = sqlx::query_as::<_, User>(
-            "SELECT id, username, password_hash, feishu_open_id, phone, created_at, is_public, is_admin, deleted_at FROM users WHERE feishu_open_id = ?",
+            "SELECT id, username, password_hash, feishu_open_id, phone, email, created_at, is_public, is_admin, deleted_at FROM users WHERE feishu_open_id = ?",
         )
         .bind(open_id)
         .fetch_optional(&self.pool)
@@ -289,6 +311,7 @@ impl UserStore {
             password_hash,
             feishu_open_id: Some(open_id.to_string()),
             phone: None,
+            email: None,
             created_at: chrono::Utc::now().naive_utc().to_string(),
             is_public: false,
             is_admin: false,
@@ -307,7 +330,7 @@ impl UserStore {
     /// deleted.
     pub async fn get_user_by_phone(&self, phone: &str) -> Result<Option<User>> {
         let user = sqlx::query_as::<_, User>(
-            "SELECT id, username, password_hash, feishu_open_id, phone, created_at, is_public, is_admin, deleted_at FROM users WHERE phone = ?",
+            "SELECT id, username, password_hash, feishu_open_id, phone, email, created_at, is_public, is_admin, deleted_at FROM users WHERE phone = ?",
         )
         .bind(phone)
         .fetch_optional(&self.pool)
@@ -356,6 +379,7 @@ impl UserStore {
                         password_hash,
                         feishu_open_id: None,
                         phone: Some(phone.to_string()),
+                        email: None,
                         created_at,
                         is_public: false,
                         is_admin: false,
@@ -409,6 +433,84 @@ impl UserStore {
         Ok(())
     }
 
+    // ── Email addresses (email + password login) ──
+
+    /// Look up a user by email address.
+    ///
+    /// Deliberately does **not** filter on `deleted_at`, mirroring
+    /// [`UserStore::get_user_by_phone`]: a trashed account still occupies its
+    /// address in the unique index, so callers must inspect `deleted_at`
+    /// themselves and report the account as deleted.
+    pub async fn get_user_by_email(&self, email: &str) -> Result<Option<User>> {
+        let user = sqlx::query_as::<_, User>(
+            "SELECT id, username, password_hash, feishu_open_id, phone, email, created_at, is_public, is_admin, deleted_at FROM users WHERE email = ?",
+        )
+        .bind(email)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(user)
+    }
+
+    /// Create an account from an email + password registration.
+    ///
+    /// The caller must have verified the address (consumed a code) and passes
+    /// an Argon2 hash. A display name is derived from the local part of the
+    /// address; taken names get a random suffix.
+    pub async fn create_email_user(&self, email: &str, password_hash: &str) -> Result<User> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let created_at = chrono::Utc::now().naive_utc().to_string();
+        let base = email_username(email);
+
+        for attempt in 0..5 {
+            let username = if attempt == 0 {
+                base.clone()
+            } else {
+                format!("{}{}", base, random_suffix())
+            };
+
+            let result = sqlx::query(
+                "INSERT INTO users (id, username, password_hash, email) VALUES (?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(&username)
+            .bind(password_hash)
+            .bind(email)
+            .execute(&self.pool)
+            .await;
+
+            match result {
+                Ok(_) => {
+                    return Ok(User {
+                        id,
+                        username,
+                        password_hash: password_hash.to_string(),
+                        feishu_open_id: None,
+                        phone: None,
+                        email: Some(email.to_string()),
+                        created_at,
+                        is_public: false,
+                        is_admin: false,
+                        deleted_at: None,
+                    });
+                }
+                // A concurrent registration or trashed account holding the
+                // address is a hard stop — unlike the phone path, the caller's
+                // password must not be silently attached to someone else's
+                // account.
+                Err(e) if e.to_string().contains("users.email") => {
+                    anyhow::bail!("Email address is already registered");
+                }
+                Err(e) if e.to_string().contains("UNIQUE constraint") => {
+                    // Display name taken; loop for a new suffix.
+                }
+                Err(e) => return Err(anyhow::anyhow!("Failed to create user: {}", e)),
+            }
+        }
+
+        anyhow::bail!("Failed to allocate a username for email address")
+    }
+
     // ── Admin user management (super user) ──
 
     /// Ensure an admin account exists for `username`.
@@ -453,11 +555,11 @@ impl UserStore {
         };
         let search = query.map(|q| format!("%{}%", q.trim().to_lowercase()));
         let sql = format!(
-            "SELECT id, username, password_hash, feishu_open_id, phone, created_at, is_public, is_admin, deleted_at \
+            "SELECT id, username, password_hash, feishu_open_id, phone, email, created_at, is_public, is_admin, deleted_at \
              FROM users WHERE 1=1{}{} ORDER BY created_at DESC",
             status_clause,
             if search.is_some() {
-                " AND (LOWER(username) LIKE ? OR phone LIKE ?)"
+                " AND (LOWER(username) LIKE ? OR phone LIKE ? OR LOWER(email) LIKE ?)"
             } else {
                 ""
             },
@@ -465,7 +567,7 @@ impl UserStore {
 
         let mut q = sqlx::query_as::<_, User>(&sql);
         if let Some(s) = &search {
-            q = q.bind(s).bind(s);
+            q = q.bind(s).bind(s).bind(s);
         }
         let users = q.fetch_all(&self.pool).await?;
         Ok(users)
@@ -567,6 +669,25 @@ pub fn sms_only_password_hash() -> String {
 fn default_username(phone: &str) -> String {
     let tail = &phone[phone.len().saturating_sub(4)..];
     format!("用户{}", tail)
+}
+
+/// Display name for an email-registered account, derived from the local part.
+///
+/// Lowercased first, then only `a-z`, digits, `.`, `_` and `-` survive,
+/// truncated to 16 characters; anything else falls back to "user".
+fn email_username(email: &str) -> String {
+    let lowered = email.to_lowercase();
+    let local = lowered.split('@').next().unwrap_or("");
+    let cleaned: String = local
+        .chars()
+        .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+        .take(16)
+        .collect();
+    if cleaned.is_empty() {
+        "user".to_string()
+    } else {
+        cleaned
+    }
 }
 
 /// Short suffix used when the derived display name is already taken.
@@ -692,5 +813,93 @@ mod tests {
         let (_dir, store) = setup().await;
         assert!(store.set_user_phone("nope", "13800005555").await.is_err());
         assert!(store.clear_user_phone("nope").await.is_err());
+    }
+
+    #[test]
+    fn email_username_sanitizes_and_truncates_the_local_part() {
+        assert_eq!(email_username("alice@example.com"), "alice");
+        assert_eq!(email_username("John.Doe_99@corp.io"), "john.doe_99");
+        assert_eq!(email_username("a-very-long-local-part@example.com"), "a-very-long-loca");
+        assert_eq!(email_username("+++@example.com"), "user");
+    }
+
+    #[tokio::test]
+    async fn create_email_user_derives_username_and_is_findable() {
+        let (_dir, store) = setup().await;
+        let user = store
+            .create_email_user("alice@example.com", "argon2hash")
+            .await
+            .unwrap();
+
+        assert_eq!(user.username, "alice");
+        assert_eq!(user.email.as_deref(), Some("alice@example.com"));
+        assert!(user.phone.is_none());
+        assert!(!user.is_public);
+        assert!(!user.is_admin);
+
+        let found = store.get_user_by_email("alice@example.com").await.unwrap();
+        assert_eq!(found.unwrap().id, user.id);
+    }
+
+    #[tokio::test]
+    async fn create_email_user_rejects_a_registered_address() {
+        let (_dir, store) = setup().await;
+        store
+            .create_email_user("alice@example.com", "argon2hash")
+            .await
+            .unwrap();
+
+        let err = store
+            .create_email_user("alice@example.com", "otherhash")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("already registered"), "got: {}", err);
+    }
+
+    #[tokio::test]
+    async fn colliding_email_usernames_get_distinct_suffixes() {
+        let (_dir, store) = setup().await;
+        let a = store
+            .create_email_user("alice@example.com", "hash1")
+            .await
+            .unwrap();
+        let b = store
+            .create_email_user("alice@other.org", "hash2")
+            .await
+            .unwrap();
+
+        assert_eq!(a.username, "alice");
+        assert_ne!(a.username, b.username);
+        assert!(b.username.starts_with("alice"), "got {}", b.username);
+        assert_eq!(b.email.as_deref(), Some("alice@other.org"));
+    }
+
+    #[tokio::test]
+    async fn get_user_by_email_still_finds_trashed_accounts() {
+        let (_dir, store) = setup().await;
+        let user = store
+            .create_email_user("bob@example.com", "hash")
+            .await
+            .unwrap();
+
+        store.soft_delete_user(&user.id).await.unwrap();
+
+        let found = store.get_user_by_email("bob@example.com").await.unwrap();
+        assert!(found.is_some(), "trashed account must still be findable");
+        assert!(found.unwrap().deleted_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn list_users_search_matches_email() {
+        let (_dir, store) = setup().await;
+        store
+            .create_email_user("carol@example.com", "hash")
+            .await
+            .unwrap();
+
+        let hits = store.list_users(Some("carol@"), "all").await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].email.as_deref(), Some("carol@example.com"));
     }
 }

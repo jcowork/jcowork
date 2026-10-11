@@ -2,6 +2,7 @@
 //!
 //! Handlers are split into domain-specific submodules:
 //! - [`auth_api`] — SMS code send/login, admin bootstrap login, health
+//! - [`email_api`] — email code send/register/login, password reset
 //! - [`admin_users`] — super-user user management (search / phone / trash / restore)
 //! - [`profile`] — self-service account profile (phone binding, display name)
 //! - [`skills`] — skill listing / toggling
@@ -21,6 +22,7 @@ pub(crate) mod code_store;
 pub(crate) mod connectors;
 pub(crate) mod cron;
 pub(crate) mod doc_index;
+pub(crate) mod email_api;
 pub(crate) mod feishu;
 pub(crate) mod fetch_url;
 pub(crate) mod memory;
@@ -45,9 +47,7 @@ use axum::extract::ws::WebSocketUpgrade;
 use axum::http::header;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::RwLock;
-use std::sync::atomic::AtomicU32;
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::auth;
@@ -59,6 +59,7 @@ use jcowork_connectors::ConnectorManager;
 use jcowork_feishu::client::FeishuClient;
 use jcowork_llm::LlmRouter;
 use jcowork_logs::LogWriter;
+use jcowork_mail::MailSender;
 use jcowork_memory::MemoryManager;
 use jcowork_skills::SkillManager;
 use jcowork_sms::SmsSender;
@@ -76,7 +77,7 @@ pub struct SmsRuntime {
     /// Pluggable SMS channel (Aliyun in production, log-only in dev).
     pub sender: Arc<dyn SmsSender>,
     /// Throttled verification-code storage, keyed by normalized phone number.
-    pub store: code_store::CodeStore,
+    pub(crate) store: code_store::CodeStore,
     /// When false, `/api/auth/sms/login` refuses numbers with no account
     /// instead of auto-provisioning one.
     pub allow_register: bool,
@@ -118,6 +119,56 @@ impl SmsRuntime {
     }
 }
 
+/// The email half of [`AppState`], assembled once at startup; see
+/// [`SmsRuntime`] for the rationale. Holds its own `CodeStore` so the email
+/// daily budget stays independent of the SMS budget.
+#[derive(Clone)]
+pub struct MailRuntime {
+    /// Pluggable mail channel (SMTP in production, log-only in dev).
+    pub sender: Arc<dyn MailSender>,
+    /// Throttled verification-code storage, keyed by normalized address.
+    pub(crate) store: code_store::CodeStore,
+    /// When false, `/api/auth/email/register` refuses to create accounts,
+    /// leaving SMS (or admin phone assignment) as the only sign-up path.
+    pub allow_register: bool,
+}
+
+impl MailRuntime {
+    pub fn new(sender: Arc<dyn MailSender>, daily_global_cap: u32, allow_register: bool) -> Self {
+        Self {
+            sender,
+            store: code_store::CodeStore::new(daily_global_cap),
+            allow_register,
+        }
+    }
+
+    /// Build from the `JCWORK_MAIL_*` / `JCWORK_SMTP_*` environment variables.
+    ///
+    /// Fails rather than silently degrading when the operator asked for SMTP
+    /// explicitly but left credentials out — a quiet fallback to dev would look
+    /// exactly like a mail outage to anyone waiting for a code.
+    pub fn from_env() -> anyhow::Result<Self> {
+        let config = jcowork_mail::config::MailConfig::from_env();
+        let kind = config.resolve()?;
+        let sender = config.build()?;
+        if kind == jcowork_mail::config::MailProviderKind::Dev {
+            tracing::warn!(
+                "Mail channel is 'dev': verification codes are written to the server log and no \
+                 real messages are sent. Set JCWORK_SMTP_HOST, JCWORK_SMTP_USERNAME, \
+                 JCWORK_SMTP_PASSWORD and JCWORK_SMTP_FROM to switch to SMTP."
+            );
+        } else {
+            tracing::info!(
+                channel = %sender.name(),
+                daily_cap = config.daily_global_cap,
+                allow_register = config.allow_register,
+                "Mail channel ready"
+            );
+        }
+        Ok(Self::new(sender, config.daily_global_cap, config.allow_register))
+    }
+}
+
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
@@ -138,6 +189,8 @@ pub struct AppState {
     pub feishu_client_cache: Arc<DashMap<String, Arc<FeishuClient>>>,
     /// SMS verification-code login.
     pub sms: SmsRuntime,
+    /// Email + password login.
+    pub mail: MailRuntime,
     /// Data directory for per-user workspaces.
     pub data_dir: String,
 }
@@ -179,6 +232,33 @@ pub struct SmsLoginRequest {
 pub struct BindPhoneRequest {
     pub phone: String,
     pub code: String,
+}
+
+// --- Email + password login ---
+
+#[derive(Debug, Deserialize)]
+pub struct EmailSendRequest {
+    pub email: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EmailRegisterRequest {
+    pub email: String,
+    pub password: String,
+    pub code: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EmailLoginRequest {
+    pub email: String,
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PasswordResetRequest {
+    pub email: String,
+    pub code: String,
+    pub new_password: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -252,6 +332,18 @@ pub(crate) fn mask_phone(phone: &str) -> String {
     format!("{}{}", "*".repeat(chars.len() - 4), tail)
 }
 
+/// Mask an email address for display, keeping only the domain.
+///
+/// The domain names a mail provider or employer rather than a person; the
+/// local part is what identifies the account, so it is hidden entirely — the
+/// same convention the dev mail channel uses in the server log.
+pub(crate) fn mask_email(email: &str) -> String {
+    match email.split_once('@') {
+        Some((_, domain)) => format!("****@{domain}"),
+        None => "****".to_string(),
+    }
+}
+
 // --- Route assembly ---
 
 pub fn build_router(state: AppState) -> Router {
@@ -262,6 +354,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/auth/login", post(auth_api::login))
         .route("/api/auth/sms/send", post(auth_api::sms_send))
         .route("/api/auth/sms/login", post(auth_api::sms_login))
+        .route("/api/auth/email/send", post(email_api::email_send))
+        .route("/api/auth/email/register", post(email_api::email_register))
+        .route("/api/auth/email/login", post(email_api::email_login))
+        .route("/api/auth/password/reset", post(email_api::password_reset))
         .route("/api/health", get(auth_api::health))
         .route("/api/feishu/event", post(crate::feishu::feishu_event_handler));
 
@@ -473,11 +569,17 @@ async fn auth_middleware(
             // rejected immediately, even with a still-valid JWT.
             match state.user_store.get_user_by_id(&claims.sub).await {
                 Ok(Some(user)) if user.deleted_at.is_none() => {
-                    // Forced binding: an account without a phone number may only
-                    // read its profile and submit the binding. Everything else is
-                    // refused, so a bootstrap token cannot be used to keep working
-                    // instead of binding — which is the whole point of forcing it.
-                    if user.phone.is_none() && !PHONE_BIND_ALLOWLIST.contains(&req.uri().path()) {
+                    // Forced binding: an account with neither a phone number
+                    // nor an email address may only read its profile and submit
+                    // the binding. Everything else is refused, so a bootstrap
+                    // token cannot be used to keep working instead of binding
+                    // — which is the whole point of forcing it. (Email-registered
+                    // accounts carry their address from birth, so in practice
+                    // only the admin bootstrap account can land here.)
+                    if user.phone.is_none()
+                        && user.email.is_none()
+                        && !PHONE_BIND_ALLOWLIST.contains(&req.uri().path())
+                    {
                         return (
                             StatusCode::FORBIDDEN,
                             Json(serde_json::json!({
@@ -595,5 +697,13 @@ mod tests {
     fn test_mask_phone_short_values_are_fully_masked() {
         assert_eq!(mask_phone(""), "");
         assert_eq!(mask_phone("1234"), "****");
+    }
+
+    #[test]
+    fn test_mask_email_keeps_only_the_domain() {
+        assert_eq!(mask_email("alice@example.com"), "****@example.com");
+        assert_eq!(mask_email("a@b.cn"), "****@b.cn");
+        assert_eq!(mask_email("not-an-email"), "****");
+        assert_eq!(mask_email(""), "****");
     }
 }

@@ -21,6 +21,8 @@ interface ProfileDto {
   username: string;
   phone_masked: string;
   phone_bound: boolean;
+  email_masked?: string;
+  email_bound?: boolean;
   is_admin: boolean;
 }
 
@@ -54,10 +56,12 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
   const [feishuSaving, setFeishuSaving] = useState(false);
   const [feishuStatus, setFeishuStatus] = useState<'idle' | 'saved' | 'deleted' | 'error'>('idle');
 
-  // Account profile (display name + bound phone number)
+  // Account profile (display name + bound phone number / email)
   const [profileName, setProfileName] = useState('');
   const [phoneMasked, setPhoneMasked] = useState('');
   const [phoneBound, setPhoneBound] = useState(false);
+  const [emailMasked, setEmailMasked] = useState('');
+  const [emailBound, setEmailBound] = useState(false);
   const [profileLoading, setProfileLoading] = useState(true);
   const [profileError, setProfileError] = useState('');
   const [profileNotice, setProfileNotice] = useState('');
@@ -191,6 +195,8 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
     setProfileName(data.username || '');
     setPhoneMasked(data.phone_masked || '');
     setPhoneBound(!!data.phone_bound);
+    setEmailMasked(data.email_masked || '');
+    setEmailBound(!!data.email_bound);
   };
 
   useEffect(() => {
@@ -492,6 +498,13 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
               </div>
               <div style={{ color: '#666', fontSize: 12, marginTop: 6 }}>{t('displayNameHint')}</div>
             </div>
+
+            {emailBound && (
+              <div style={{ marginBottom: 16 }}>
+                <label style={labelStyle}>{t('boundEmail')}</label>
+                <span style={{ fontSize: 14, color: '#e6edf3' }}>{emailMasked}</span>
+              </div>
+            )}
 
             <div>
               <label style={labelStyle}>{t('boundPhone')}</label>

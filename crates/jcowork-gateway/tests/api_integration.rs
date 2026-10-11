@@ -1,7 +1,8 @@
 //! API Integration Tests for jcowork-gateway
 //!
 //! These tests verify the core HTTP API endpoints:
-//! - Authentication (SMS verification-code login, admin bootstrap)
+//! - Authentication (SMS verification-code login, email verification login,
+//!   admin bootstrap)
 //! - Provider management (list)
 //! - Health endpoint
 
@@ -53,6 +54,29 @@ impl jcowork_sms::SmsSender for CaptureSms {
     }
 }
 
+/// Records every verification code the gateway hands to the mail channel, so
+/// tests can complete an email flow without SMTP. Same rule as `CaptureSms`:
+/// capture lives in the test binary, never in production code.
+#[derive(Default)]
+struct CaptureMail {
+    sent: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+}
+
+#[async_trait::async_trait]
+impl jcowork_mail::MailSender for CaptureMail {
+    async fn send_code(&self, email: &str, code: &str) -> anyhow::Result<()> {
+        self.sent
+            .lock()
+            .expect("capture lock poisoned")
+            .push((email.to_string(), code.to_string()));
+        Ok(())
+    }
+
+    fn name(&self) -> &'static str {
+        "capture"
+    }
+}
+
 /// Test fixture that sets up a minimal gateway with in-memory SQLite
 struct TestApp {
     _temp_dir: TempDir,
@@ -62,8 +86,12 @@ struct TestApp {
     user_store: Arc<UserStore>,
     /// Codes captured from the fake SMS channel, as (phone, code) pairs.
     sms_sent: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    /// Codes captured from the fake mail channel, as (email, code) pairs.
+    mail_sent: Arc<std::sync::Mutex<Vec<(String, String)>>>,
     /// Counter behind `next_phone`.
     phone_seq: AtomicU32,
+    /// Counter behind `next_email`.
+    email_seq: AtomicU32,
 }
 
 impl TestApp {
@@ -75,6 +103,19 @@ impl TestApp {
     /// exercise the daily cap and the invite-only (`allow_register = false`)
     /// mode without touching the process environment.
     async fn with_sms(config: jcowork_sms::config::SmsConfig) -> Self {
+        Self::build(config, true).await
+    }
+
+    /// Build the test app with email registration turned off
+    /// (`JCWORK_MAIL_ALLOW_REGISTER=false`).
+    async fn with_email_registration(allow: bool) -> Self {
+        Self::build(jcowork_sms::config::SmsConfig::default(), allow).await
+    }
+
+    async fn build(
+        config: jcowork_sms::config::SmsConfig,
+        mail_allow_register: bool,
+    ) -> Self {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let data_dir = temp_dir.path().to_str().unwrap().to_string();
 
@@ -122,6 +163,10 @@ impl TestApp {
             config.allow_register,
         );
 
+        let mail_capture = CaptureMail::default();
+        let mail_sent = mail_capture.sent.clone();
+        let mail = router::MailRuntime::new(Arc::new(mail_capture), 500, mail_allow_register);
+
         let state = AppState {
             session_manager,
             auth_config: AuthConfig {
@@ -140,6 +185,7 @@ impl TestApp {
             feishu_config_store,
             feishu_client_cache: Arc::new(dashmap::DashMap::new()),
             sms,
+            mail,
             data_dir: data_dir.clone(),
         };
 
@@ -151,7 +197,9 @@ impl TestApp {
             token: None,
             user_store: user_store_handle,
             sms_sent,
+            mail_sent,
             phone_seq: AtomicU32::new(0),
+            email_seq: AtomicU32::new(0),
         }
     }
 
@@ -161,6 +209,31 @@ impl TestApp {
     /// 60-second resend cooldown means a given number yields exactly one code.
     fn next_phone(&self) -> String {
         format!("137{:08}", self.phone_seq.fetch_add(1, Ordering::SeqCst))
+    }
+
+    /// Next unused email address (fresh per test for the same cooldown reason
+    /// as `next_phone`).
+    fn next_email(&self) -> String {
+        format!("user{}@example.com", self.email_seq.fetch_add(1, Ordering::SeqCst))
+    }
+
+    /// The single code captured for `email`, failing the test if none or
+    /// several were sent (several would mean the fixture reused an address
+    /// across a cooldown boundary).
+    fn mail_code(&self, email: &str) -> String {
+        let sent = self.mail_sent.lock().expect("capture lock poisoned");
+        let matches: Vec<&String> = sent
+            .iter()
+            .filter(|(e, _)| e == email)
+            .map(|(_, c)| c)
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "expected exactly one code for {email}, got {}",
+            matches.len()
+        );
+        matches[0].clone()
     }
 
     /// Provision a fresh account through the SMS flow, returning
@@ -1696,4 +1769,276 @@ async fn test_admin_assigns_and_removes_a_phone_number() {
         )
         .await;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+// ── Email verification login ──
+
+/// The send response tells the client when the code expires and when a resend
+/// is allowed — and nothing else. The code itself travels only through the
+/// mail channel, so it must not appear anywhere in the HTTP body.
+#[tokio::test]
+async fn test_email_send_response_never_leaks_the_code() {
+    let app = TestApp::new().await;
+    let email = app.next_email();
+
+    let (status, body) = app.post_public("/api/auth/email/send", json!({ "email": email })).await;
+    assert_eq!(status, StatusCode::OK, "{:?}", body);
+    assert_eq!(body["expires_in"], json!(300));
+    assert!(body["resend_after"].as_i64().unwrap() > 0);
+
+    let code = app.mail_code(&email);
+    let raw = body.to_string();
+    assert!(
+        !raw.contains(&code),
+        "the mailed code must not appear in the send response"
+    );
+
+    // Malformed addresses are refused before anything is staged or sent.
+    for bad in ["", "no-at-sign", "a@b", "user@@example.com", "user@.example.com"] {
+        let (status, body) = app.post_public("/api/auth/email/send", json!({ "email": bad })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad:?} should be rejected: {:?}", body);
+        assert_eq!(body["error"], json!("Invalid email address"));
+        assert_eq!(app.mail_sent.lock().unwrap().len(), 1, "nothing more may be sent");
+    }
+}
+
+/// Register → token works despite having no phone (the gate keys on
+/// phone-or-email) → password login in both directions → duplicate
+/// registration is a conflict, case-insensitively.
+#[tokio::test]
+async fn test_email_register_login_and_gate_passes_without_phone() {
+    let app = TestApp::new().await;
+    let email = app.next_email();
+    let password = "initial-pass-1";
+
+    let (status, _) = app.post_public("/api/auth/email/send", json!({ "email": email })).await;
+    assert_eq!(status, StatusCode::OK);
+    let code = app.mail_code(&email);
+
+    // Cheap rejections happen before the code is spent.
+    let (status, body) = app
+        .post_public(
+            "/api/auth/email/register",
+            json!({ "email": email, "password": "short", "code": code }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{:?}", body);
+    assert_eq!(body["error"], json!("Password must be at least 8 characters"));
+
+    let (status, body) = app
+        .post_public(
+            "/api/auth/email/register",
+            json!({ "email": email, "password": password, "code": code }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{:?}", body);
+    assert_eq!(body["is_admin"], json!(false));
+    assert_eq!(
+        body["must_bind_phone"],
+        json!(false),
+        "an account born with a bound email must never see the binding screen"
+    );
+    let user_id = body["user_id"].as_str().unwrap().to_string();
+    let username = body["username"].as_str().unwrap().to_string();
+    assert!(
+        username.starts_with("user"),
+        "username is derived from the local part: got {username}"
+    );
+
+    // The token reaches normal endpoints even though the account has no phone.
+    let token = body["token"].as_str().unwrap().to_string();
+    let res = app.make_request_with_token(Some(&token), "GET", "/api/skills", None).await;
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "an email-only account must not be stopped by the phone-binding gate"
+    );
+    let res = app.make_request_with_token(Some(&token), "GET", "/api/profile", None).await;
+    let profile = json_body(res).await;
+    assert_eq!(profile["email_bound"], json!(true));
+    assert_eq!(profile["phone_bound"], json!(false));
+    assert_eq!(profile["email_masked"], json!("****@example.com"));
+
+    // Password login works, and upper-casing the address still finds the
+    // account because the server normalizes before lookup.
+    let (status, body) = app
+        .post_public(
+            "/api/auth/email/login",
+            json!({ "email": email.to_uppercase(), "password": password }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{:?}", body);
+    assert_eq!(body["user_id"], json!(user_id));
+    assert_eq!(body["must_bind_phone"], json!(false));
+
+    let (status, body) = app
+        .post_public(
+            "/api/auth/email/login",
+            json!({ "email": email, "password": "wrong-password" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], json!("Invalid email or password"));
+
+    // Unknown addresses fail exactly like wrong passwords.
+    let (status, body) = app
+        .post_public(
+            "/api/auth/email/login",
+            json!({ "email": app.next_email(), "password": password }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], json!("Invalid email or password"));
+
+    // Re-registering the address is a conflict — whatever code is offered, the
+    // duplicate check runs before the code is consumed.
+    let (status, body) = app
+        .post_public(
+            "/api/auth/email/register",
+            json!({ "email": email, "password": "another-pass-2", "code": "000000" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{:?}", body);
+    assert_eq!(body["error"], json!("Email address is already registered"));
+    // ...and the case-insensitive spelling is the same address.
+    let (status, _) = app
+        .post_public(
+            "/api/auth/email/register",
+            json!({ "email": email.to_uppercase(), "password": "another-pass-2", "code": "000000" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+/// Wrong codes count attempts before the right one succeeds, and a consumed
+/// code never verifies a second time.
+#[tokio::test]
+async fn test_email_code_wrong_then_correct_and_single_use() {
+    let app = TestApp::new().await;
+    let email = app.next_email();
+
+    let (status, _) = app.post_public("/api/auth/email/send", json!({ "email": email })).await;
+    assert_eq!(status, StatusCode::OK);
+    let code = app.mail_code(&email);
+
+    let (status, body) = app
+        .post_public(
+            "/api/auth/email/register",
+            json!({ "email": email, "password": "some-pass-123", "code": "000000" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{:?}", body);
+    assert_eq!(body["error"], json!("Invalid verification code"));
+    assert_eq!(body["attempts_left"], json!(4));
+
+    let (status, body) = app
+        .post_public(
+            "/api/auth/email/register",
+            json!({ "email": email, "password": "some-pass-123", "code": code }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{:?}", body);
+
+    // The code is spent: password reset may not reuse it.
+    let (status, body) = app
+        .post_public(
+            "/api/auth/password/reset",
+            json!({ "email": email, "code": code, "new_password": "fresh-pass-45" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{:?}", body);
+    assert_eq!(body["error"], json!("Verification code has expired, please request a new one"));
+}
+
+/// Forgot password: a mailed code unlocks setting a new one, after which only
+/// the new password authenticates.
+#[tokio::test]
+async fn test_email_reset_password_flow() {
+    let app = TestApp::new().await;
+    let email = app.next_email();
+
+    // Seeded directly so the address has never been mailed to: the 60-second
+    // resend cooldown would otherwise block the test's own send.
+    let old_hash = jcowork_gateway::auth::hash_password("old-pass-123").unwrap();
+    app.user_store.create_email_user(&email, &old_hash).await.unwrap();
+
+    let (status, body) = app.post_public("/api/auth/email/send", json!({ "email": email })).await;
+    assert_eq!(status, StatusCode::OK, "{:?}", body);
+    let code = app.mail_code(&email);
+
+    // A too-short new password is refused without spending the code.
+    let (status, body) = app
+        .post_public(
+            "/api/auth/password/reset",
+            json!({ "email": email, "code": code, "new_password": "short" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{:?}", body);
+
+    let (status, body) = app
+        .post_public(
+            "/api/auth/password/reset",
+            json!({ "email": email, "code": code, "new_password": "fresh-pass-45" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{:?}", body);
+
+    let (status, body) = app
+        .post_public(
+            "/api/auth/email/login",
+            json!({ "email": email, "password": "fresh-pass-45" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "the new password must authenticate: {:?}", body);
+
+    let (status, body) = app
+        .post_public(
+            "/api/auth/email/login",
+            json!({ "email": email, "password": "old-pass-123" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "the old password must be dead: {:?}", body);
+}
+
+/// The send endpoint answers registered and unregistered addresses alike
+/// (anti-enumeration); only consuming a code — proof of mailbox control —
+/// earns a 404 from reset.
+#[tokio::test]
+async fn test_email_reset_unknown_address_is_not_found() {
+    let app = TestApp::new().await;
+    let email = app.next_email();
+
+    let (status, body) = app.post_public("/api/auth/email/send", json!({ "email": email })).await;
+    assert_eq!(status, StatusCode::OK, "send must not reveal whether the address holds an account: {:?}", body);
+    let code = app.mail_code(&email);
+
+    let (status, body) = app
+        .post_public(
+            "/api/auth/password/reset",
+            json!({ "email": email, "code": code, "new_password": "some-pass-67" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{:?}", body);
+    assert_eq!(body["error"], json!("Account not found"));
+}
+
+/// `JCWORK_MAIL_ALLOW_REGISTER=false` turns the mailbox into a recovery-only
+/// channel: codes still go out, but registration is refused outright.
+#[tokio::test]
+async fn test_email_registration_can_be_disabled() {
+    let app = TestApp::with_email_registration(false).await;
+    let email = app.next_email();
+
+    let (status, _) = app.post_public("/api/auth/email/send", json!({ "email": email })).await;
+    assert_eq!(status, StatusCode::OK, "reset still needs codes to flow");
+    let code = app.mail_code(&email);
+
+    let (status, body) = app
+        .post_public(
+            "/api/auth/email/register",
+            json!({ "email": email, "password": "some-pass-89", "code": code }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{:?}", body);
+    assert_eq!(body["error"], json!("Email registration is disabled"));
 }

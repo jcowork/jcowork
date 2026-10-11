@@ -709,6 +709,14 @@ All config via environment variables:
 | `JCWORK_SMS_TEMPLATE_CODE` | (empty) | Aliyun SMS template code (must accept a `code` variable) |
 | `JCWORK_SMS_DAILY_GLOBAL_CAP` | `500` | Messages sent process-wide per UTC day — the toll-fraud guard |
 | `JCWORK_SMS_ALLOW_REGISTER` | `true` | `false` makes login invite-only: unknown numbers are rejected, not provisioned |
+| `JCWORK_MAIL_PROVIDER` | `auto` | Mail channel: `auto`, `smtp`, or `dev` (codes go to the server log, never sent) |
+| `JCWORK_SMTP_HOST` | (empty) | SMTP host of any mail provider (Aliyun DirectMail, Gmail, SendGrid, …) |
+| `JCWORK_SMTP_PORT` | `587` | `465` = implicit TLS; `587`/`25` = STARTTLS |
+| `JCWORK_SMTP_USERNAME` | (empty) | SMTP username |
+| `JCWORK_SMTP_PASSWORD` | (empty) | SMTP password |
+| `JCWORK_SMTP_FROM` | (empty) | Envelope sender address for verification emails |
+| `JCWORK_MAIL_DAILY_GLOBAL_CAP` | `500` | Emails sent process-wide per UTC day, independent of the SMS cap |
+| `JCWORK_MAIL_ALLOW_REGISTER` | `true` | `false` disables new email registrations; existing email logins keep working |
 | `JCWORK_ADMIN_PHONE` | (empty) | Bind the admin's phone at startup, closing the default-password door before first login. `clear` unbinds |
 | `JCWORK_ADMIN_BOOTSTRAP_PASSWORD` | (empty) | Password for the seeded admin; only used when the account is first created |
 | `JCWORK_DEFAULT_MODEL` | `moonshot:kimi-k2.6` | Default LLM model (`provider:model` format) |
@@ -897,9 +905,11 @@ For larger documents or more precise retrieval, the LLM can also use the `doc_re
 
 ## Authentication
 
-An SMS verification code is the only credential. There is no username/password
-signup and no password reset — `/api/auth/register`, `/api/auth/forgot-password`
-and `/api/auth/reset-password` no longer exist.
+Two credentials exist side by side: a phone number plus an SMS code (the
+original flow), or an email address plus a password (the alternative for users
+without a mainland mobile number). The old username/password endpoints
+(`/api/auth/register`, `/api/auth/forgot-password`, `/api/auth/reset-password`)
+no longer exist.
 
 **Normal accounts.** `POST /api/auth/sms/send` issues a code and
 `POST /api/auth/sms/login` exchanges it for a JWT. A number that verifies
@@ -908,6 +918,17 @@ name derived from its last four digits (`用户1111`) that the user can change
 under Settings → Account profile. Codes are single-use, expire after 5 minutes,
 and are never included in any HTTP response — with the `dev` SMS channel the
 only place to read one is the server log.
+
+**Email accounts.** `POST /api/auth/email/send` mails a code to an address;
+`POST /api/auth/email/register` exchanges it (plus a chosen password of 8–128
+characters) for a logged-in session, with the display name derived from the
+address's local part. `POST /api/auth/email/login` signs in afterwards, and a
+forgotten password is reset through `POST /api/auth/password/reset` with an
+emailed code. The same code hygiene as SMS applies — single-use, 5-minute
+expiry, never in an HTTP response — and the send endpoint answers every
+syntactically-valid address identically, so it cannot be used to enumerate
+accounts. Close new registrations with `JCWORK_MAIL_ALLOW_REGISTER=false`
+(SMS signup is unaffected).
 
 **The admin bootstrap.** `admin` is seeded with a published default password
 (`admin123`, overridable at first creation with `JCWORK_ADMIN_BOOTSTRAP_PASSWORD`)
@@ -951,8 +972,12 @@ how to mint one against the dev SMS channel.
 |--------|------|-------------|
 | POST | `/api/auth/sms/send` | Send a verification code (never returned in the response) |
 | POST | `/api/auth/sms/login` | Log in with a code; unknown numbers are provisioned |
+| POST | `/api/auth/email/send` | Email a verification code (registration and reset share it) |
+| POST | `/api/auth/email/register` | Register an email + password account |
+| POST | `/api/auth/email/login` | Log in with email + password |
+| POST | `/api/auth/password/reset` | Reset the password with an emailed code |
 | POST | `/api/auth/login` | Admin bootstrap only — rejected once a phone is bound |
-| GET | `/api/profile` | Own username, masked phone, `phone_bound`, `is_admin` |
+| GET | `/api/profile` | Own username, masked phone/email, `phone_bound`, `email_bound`, `is_admin` |
 | POST | `/api/profile/phone` | Bind or rebind own phone with a code |
 | PUT | `/api/profile/username` | Change own display name |
 | POST | `/api/admin/users/{id}/phone` | Admin assigns a phone number |

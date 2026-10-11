@@ -99,6 +99,35 @@ pub fn normalize_phone(raw: &str) -> Option<String> {
     valid.then_some(local)
 }
 
+/// Reduce user-typed input to a normalized email address: trimmed, lowercased,
+/// ASCII, ≤254 characters, exactly one `@`, non-empty local part, and a domain
+/// with at least one dot and no empty labels.
+///
+/// Returns `None` for anything else so callers can reject early instead of
+/// paying the mail provider for a guaranteed delivery failure.
+pub fn normalize_email(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > 254 || !trimmed.is_ascii() {
+        return None;
+    }
+    let lowered = trimmed.to_lowercase();
+    let (local, domain) = lowered.split_once('@')?;
+    // A second `@` lands in the domain half; a missing half is not an address.
+    if local.is_empty() || domain.is_empty() || domain.contains('@') {
+        return None;
+    }
+    // ".com", "example." and "example..com" are all unroutable shapes people
+    // type by accident — reject them rather than mailing them.
+    if !domain.contains('.')
+        || domain.starts_with('.')
+        || domain.ends_with('.')
+        || domain.contains("..")
+    {
+        return None;
+    }
+    Some(lowered)
+}
+
 /// Default super-user username (created/promoted on startup).
 pub const DEFAULT_ADMIN_USERNAME: &str = "admin";
 /// Password the seeded admin account is created with.
@@ -273,5 +302,40 @@ mod tests {
         assert_eq!(normalize_phone("138001380001"), None);
         assert_eq!(normalize_phone("1380013800a"), None);
         assert_eq!(normalize_phone("not-a-phone"), None);
+    }
+
+    #[test]
+    fn normalize_email_lowercases_and_trims() {
+        assert_eq!(
+            normalize_email("  Alice@Example.COM ").as_deref(),
+            Some("alice@example.com")
+        );
+    }
+
+    #[test]
+    fn normalize_email_accepts_ordinary_addresses() {
+        assert_eq!(
+            normalize_email("john.doe_99+tag@corp.io").as_deref(),
+            Some("john.doe_99+tag@corp.io")
+        );
+        assert_eq!(normalize_email("a@b.cn").as_deref(), Some("a@b.cn"));
+    }
+
+    #[test]
+    fn normalize_email_rejects_malformed_addresses() {
+        assert_eq!(normalize_email(""), None);
+        assert_eq!(normalize_email("no-at-sign"), None);
+        assert_eq!(normalize_email("@example.com"), None);
+        assert_eq!(normalize_email("alice@"), None);
+        // A second `@` hides in the domain half.
+        assert_eq!(normalize_email("a@b@example.com"), None);
+        // Dotless, empty-label and trailing-dot domains are unroutable.
+        assert_eq!(normalize_email("a@localhost"), None);
+        assert_eq!(normalize_email("a@.com"), None);
+        assert_eq!(normalize_email("a@example..com"), None);
+        assert_eq!(normalize_email("a@example.com."), None);
+        // Non-ASCII and oversized input.
+        assert_eq!(normalize_email("小美@example.com"), None);
+        assert_eq!(normalize_email(&format!("{}@example.com", "a".repeat(250))), None);
     }
 }

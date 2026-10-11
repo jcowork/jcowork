@@ -14,6 +14,7 @@ members = [
     "crates/jcowork-logs",
     "crates/jcowork-feishu",
     "crates/jcowork-sms",
+    "crates/jcowork-mail",
     "crates/jcowork-desktop",
 ]
 
@@ -36,7 +37,17 @@ jcowork-storage = { path = "crates/jcowork-storage" }
 jcowork-cron = { path = "crates/jcowork-cron" }
 jcowork-feishu = { path = "crates/jcowork-feishu" }
 jcowork-sms = { path = "crates/jcowork-sms" }
+jcowork-mail = { path = "crates/jcowork-mail" }
 jcowork-logs = { path = "crates/jcowork-logs" }
+
+# Email (SMTP) delivery for verification codes
+lettre = { version = "0.11", default-features = false, features = [
+    "builder",
+    "hostname",
+    "smtp-transport",
+    "tokio1",
+    "tokio1-rustls-tls",
+] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

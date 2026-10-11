@@ -1,4 +1,4 @@
-/* 登录页样式（短信验证码 / 管理员引导 / 强制绑定手机号） */
+/* 登录页样式（短信验证码 / 邮箱密码 / 管理员引导 / 强制绑定手机号） */
 .page {
   min-height: 100vh;
   box-sizing: border-box;
@@ -68,6 +68,30 @@
 .tab-active {
   background: #1f6feb;
   color: #ffffff;
+  font-weight: 600;
+}
+
+/* 邮箱模式子页签（登录 / 注册账号 / 找回密码） */
+.subtabs {
+  display: flex;
+  gap: 12rpx;
+  margin-bottom: 32rpx;
+}
+
+.subtab {
+  flex: 1;
+  text-align: center;
+  padding: 12rpx 0;
+  border-radius: 10rpx;
+  border: 1rpx solid #30363d;
+  color: #8b949e;
+  font-size: 26rpx;
+}
+
+.subtab-active {
+  border-color: #1f6feb;
+  background: rgba(31, 111, 235, 0.12);
+  color: #58a6ff;
   font-weight: 600;
 }
 

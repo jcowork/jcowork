@@ -8,6 +8,7 @@ import Settings from './components/Settings';
 import SkillsSquare from './components/SkillsSquare';
 import PublicProfile from './components/PublicProfile';
 import AdminUsers from './components/AdminUsers';
+import EmailCodeFields from './components/EmailCode';
 import PhoneCodeFields from './components/PhoneCode';
 import { I18nProvider, useT } from './i18n';
 import { API_BASE } from './config';
@@ -130,15 +131,25 @@ function AppInner() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConvId, setActiveConvIdState] = useState<string>('');
   const [, setTick] = useState(0); // periodic re-render for 1h history threshold
-  // SMS code is the only way in; the password form exists solely so a
-  // freshly seeded admin can reach the forced phone-binding screen.
-  const [authMode, setAuthMode] = useState<'sms' | 'admin'>('sms');
+  // SMS is the default way in; email covers register / login / forgot-password
+  // with a password, and the admin form exists solely so a freshly seeded
+  // admin can reach the forced phone-binding screen.
+  const [authMode, setAuthMode] = useState<'sms' | 'email' | 'admin'>('sms');
+  // Which of the three email screens is showing.
+  const [emailMode, setEmailMode] = useState<'login' | 'register' | 'forgot'>('login');
   const [smsForm, setSmsForm] = useState({ phone: '', code: '' });
+  const [emailForm, setEmailForm] = useState({ email: '', code: '', password: '', confirmPassword: '' });
   const [adminForm, setAdminForm] = useState({ username: '', password: '' });
   const [authBusy, setAuthBusy] = useState(false);
   const [sendingCode, setSendingCode] = useState(false);
   const [codeCountdown, setCodeCountdown] = useState(0);
+  // Separate cooldown/busy from the SMS form so a countdown started on one
+  // does not carry over to the other.
+  const [sendingEmailCode, setSendingEmailCode] = useState(false);
+  const [emailCountdown, setEmailCountdown] = useState(0);
   const [authError, setAuthError] = useState('');
+  // Success notice for the email card (password reset redirects to login).
+  const [authSuccess, setAuthSuccess] = useState('');
   // Forced phone binding (admin bootstrap). The two forms are never on screen
   // together, but a cooldown started on one must not carry over to the other.
   const [bindForm, setBindForm] = useState({ phone: '', code: '' });
@@ -356,7 +367,10 @@ function AppInner() {
     setActiveAccount(authState.userId);
     setAddingAccount(false);
     setSmsForm({ phone: '', code: '' });
+    setEmailForm({ email: '', code: '', password: '', confirmPassword: '' });
+    setEmailMode('login');
     setAdminForm({ username: '', password: '' });
+    setAuthSuccess('');
   };
 
   /// Report a failed auth response, or sign in if it carried a token.
@@ -416,6 +430,104 @@ function AppInner() {
     }
   };
 
+  /// Ask the server to mail a code to the address in the form. Shared by the
+  /// register and forgot-password screens, which hit the same endpoint.
+  const handleSendEmailCode = async () => {
+    setAuthError('');
+    setAuthSuccess('');
+    const email = emailForm.email.trim();
+    if (!email) {
+      setAuthError(t('invalidEmail'));
+      return;
+    }
+    setSendingEmailCode(true);
+    try {
+      const { ok, data } = await postJson('/api/auth/email/send', { email });
+      if (!ok) {
+        setAuthError(mapAuthError(data.error ?? '', data));
+        return;
+      }
+      // The server picks the cooldown so the button stays in step with the
+      // throttle that will actually reject the next request.
+      setEmailCountdown(Number(data.resend_after) || 60);
+    } catch {
+      setAuthError(t('networkError'));
+    } finally {
+      setSendingEmailCode(false);
+    }
+  };
+
+  const handleEmailLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    setAuthBusy(true);
+    try {
+      const { ok, data } = await postJson('/api/auth/email/login', {
+        email: emailForm.email.trim(),
+        password: emailForm.password,
+      });
+      finishAuth(ok, data, setAuthError);
+    } catch {
+      setAuthError(t('networkError'));
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  /// New account: the mailed code proves the mailbox, the password is chosen
+  /// here. A successful response carries a session, like login.
+  const handleEmailRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    if (emailForm.password !== emailForm.confirmPassword) {
+      setAuthError(t('passwordMismatch'));
+      return;
+    }
+    setAuthBusy(true);
+    try {
+      const { ok, data } = await postJson('/api/auth/email/register', {
+        email: emailForm.email.trim(),
+        password: emailForm.password,
+        code: emailForm.code.trim(),
+      });
+      finishAuth(ok, data, setAuthError);
+    } catch {
+      setAuthError(t('networkError'));
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  /// Forgot password: the mailed code unlocks setting a new one. No session is
+  /// returned — the user signs in with the new password to see it work.
+  const handlePasswordReset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    if (emailForm.password !== emailForm.confirmPassword) {
+      setAuthError(t('passwordMismatch'));
+      return;
+    }
+    setAuthBusy(true);
+    try {
+      const { ok, data } = await postJson('/api/auth/password/reset', {
+        email: emailForm.email.trim(),
+        code: emailForm.code.trim(),
+        new_password: emailForm.password,
+      });
+      if (ok) {
+        setEmailMode('login');
+        setEmailForm({ ...emailForm, code: '', password: '', confirmPassword: '' });
+        setAuthSuccess(t('passwordResetDone'));
+      } else {
+        setAuthError(mapAuthError(data.error ?? '', data));
+      }
+    } catch {
+      setAuthError(t('networkError'));
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
   const handleSendBindCode = () =>
     requestSmsCode(bindForm.phone, {
       setError: setBindError,
@@ -451,9 +563,16 @@ function AppInner() {
     }
   };
 
-  const switchAuthMode = (mode: 'sms' | 'admin') => {
+  const switchAuthMode = (mode: 'sms' | 'email' | 'admin') => {
     setAuthMode(mode);
     setAuthError('');
+    setAuthSuccess('');
+  };
+
+  const switchEmailMode = (mode: 'login' | 'register' | 'forgot') => {
+    setEmailMode(mode);
+    setAuthError('');
+    setAuthSuccess('');
   };
 
   const logout = () => {
@@ -500,8 +619,11 @@ function AppInner() {
   const handleAddAccount = useCallback(() => {
     setAddingAccount(true);
     setAuthMode('sms');
+    setEmailMode('login');
     setAuthError('');
+    setAuthSuccess('');
     setSmsForm({ phone: '', code: '' });
+    setEmailForm({ email: '', code: '', password: '', confirmPassword: '' });
     setAdminForm({ username: '', password: '' });
   }, []);
 
@@ -519,9 +641,18 @@ function AppInner() {
     return () => window.clearTimeout(h);
   }, [bindCountdown]);
 
+  useEffect(() => {
+    if (emailCountdown <= 0) return;
+    const h = window.setTimeout(() => setEmailCountdown((c) => c - 1), 1000);
+    return () => window.clearTimeout(h);
+  }, [emailCountdown]);
+
   // Probe every stored account once on load. `/api/profile` is one of the two
   // endpoints an account with no phone number may still call, so it doubles as
   // the check — and accounts saved before phone binding existed all need it.
+  // An email-registered account has a bound email and no phone, so both fields
+  // must be unbound before the gate applies. `email_bound` is undefined on
+  // servers predating email auth; the strict check below then skips them.
   useEffect(() => {
     loadAccounts().forEach((acct) => {
       if (acct.mustBindPhone) return;
@@ -530,7 +661,7 @@ function AppInner() {
       })
         .then((res) => (res.ok ? res.json() : null))
         .then((data) => {
-          if (!data || data.phone_bound !== false) return;
+          if (!data || data.phone_bound !== false || data.email_bound !== false) return;
           setAccounts((prev) => {
             const next = prev.map((a) => (a.userId === acct.userId ? { ...a, mustBindPhone: true } : a));
             saveAccounts(next);
@@ -626,6 +757,139 @@ function AppInner() {
                 {authBusy ? t('loggingIn') : t('login')}
               </button>
             </form>
+          ) : authMode === 'email' ? (
+            <div>
+              <div style={{ display: 'flex', gap: 4, marginBottom: 16 }}>
+                {([
+                  ['login', t('emailLoginTab')],
+                  ['register', t('emailRegisterTab')],
+                  ['forgot', t('emailForgotTab')],
+                ] as const).map(([mode, label]) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => switchEmailMode(mode)}
+                    style={{
+                      flex: 1, padding: '6px 0', borderRadius: 8, fontSize: 13,
+                      border: `1px solid ${emailMode === mode ? '#1a73e8' : '#444'}`,
+                      background: emailMode === mode ? '#1a73e822' : 'transparent',
+                      color: emailMode === mode ? '#58a6ff' : '#888',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {emailMode === 'login' ? (
+                <form onSubmit={handleEmailLogin}>
+                  <AuthBanner msg={authError} type="error" />
+                  <AuthBanner msg={authSuccess} type="success" />
+                  <input
+                    type="email"
+                    autoComplete="email"
+                    placeholder={t('emailAddress')}
+                    value={emailForm.email}
+                    onChange={(e) => { setEmailForm({ ...emailForm, email: e.target.value }); setAuthError(''); setAuthSuccess(''); }}
+                    style={authInputStyle}
+                    autoFocus
+                  />
+                  <input
+                    type="password"
+                    autoComplete="current-password"
+                    placeholder={t('password')}
+                    value={emailForm.password}
+                    onChange={(e) => { setEmailForm({ ...emailForm, password: e.target.value }); setAuthError(''); }}
+                    style={authInputStyle}
+                  />
+                  <button
+                    type="submit"
+                    disabled={authBusy}
+                    style={{ ...authBtnStyle, marginBottom: 0, background: authBusy ? '#333' : '#1a73e8', cursor: authBusy ? 'not-allowed' : 'pointer' }}
+                  >
+                    {authBusy ? t('loggingIn') : t('login')}
+                  </button>
+                  <p style={{ color: '#888', fontSize: 12, lineHeight: 1.5, margin: '12px 0 0', textAlign: 'center' }}>
+                    {t('emailLoginHint')}
+                  </p>
+                </form>
+              ) : emailMode === 'register' ? (
+                <form onSubmit={handleEmailRegister}>
+                  <AuthBanner msg={authError} type="error" />
+                  <EmailCodeFields
+                    email={emailForm.email}
+                    code={emailForm.code}
+                    onEmailChange={(v) => { setEmailForm({ ...emailForm, email: v }); setAuthError(''); }}
+                    onCodeChange={(v) => { setEmailForm({ ...emailForm, code: v }); setAuthError(''); }}
+                    onSendCode={handleSendEmailCode}
+                    countdown={emailCountdown}
+                    sending={sendingEmailCode}
+                  />
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    placeholder={t('newPassword')}
+                    value={emailForm.password}
+                    onChange={(e) => { setEmailForm({ ...emailForm, password: e.target.value }); setAuthError(''); }}
+                    style={authInputStyle}
+                  />
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    placeholder={t('confirmPassword')}
+                    value={emailForm.confirmPassword}
+                    onChange={(e) => { setEmailForm({ ...emailForm, confirmPassword: e.target.value }); setAuthError(''); }}
+                    style={authInputStyle}
+                  />
+                  <button
+                    type="submit"
+                    disabled={authBusy}
+                    style={{ ...authBtnStyle, marginBottom: 0, background: authBusy ? '#333' : '#1a73e8', cursor: authBusy ? 'not-allowed' : 'pointer' }}
+                  >
+                    {authBusy ? t('registering') : t('register')}
+                  </button>
+                  <p style={{ color: '#888', fontSize: 12, lineHeight: 1.5, margin: '12px 0 0', textAlign: 'center' }}>
+                    {t('emailRegisterHint')}
+                  </p>
+                </form>
+              ) : (
+                <form onSubmit={handlePasswordReset}>
+                  <AuthBanner msg={authError} type="error" />
+                  <EmailCodeFields
+                    email={emailForm.email}
+                    code={emailForm.code}
+                    onEmailChange={(v) => { setEmailForm({ ...emailForm, email: v }); setAuthError(''); }}
+                    onCodeChange={(v) => { setEmailForm({ ...emailForm, code: v }); setAuthError(''); }}
+                    onSendCode={handleSendEmailCode}
+                    countdown={emailCountdown}
+                    sending={sendingEmailCode}
+                  />
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    placeholder={t('newPassword')}
+                    value={emailForm.password}
+                    onChange={(e) => { setEmailForm({ ...emailForm, password: e.target.value }); setAuthError(''); }}
+                    style={authInputStyle}
+                  />
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    placeholder={t('confirmPassword')}
+                    value={emailForm.confirmPassword}
+                    onChange={(e) => { setEmailForm({ ...emailForm, confirmPassword: e.target.value }); setAuthError(''); }}
+                    style={authInputStyle}
+                  />
+                  <button
+                    type="submit"
+                    disabled={authBusy}
+                    style={{ ...authBtnStyle, marginBottom: 0, background: authBusy ? '#333' : '#1a73e8', cursor: authBusy ? 'not-allowed' : 'pointer' }}
+                  >
+                    {authBusy ? t('resetting') : t('resetPassword')}
+                  </button>
+                </form>
+              )}
+            </div>
           ) : (
             <form onSubmit={handleAdminLogin}>
               <p style={{ color: '#888', marginBottom: 16, fontSize: 13, lineHeight: 1.5 }}>{t('adminLoginHint')}</p>
@@ -661,10 +925,22 @@ function AppInner() {
               </a>
             </p>
           )}
-          <p style={{ marginTop: 16, textAlign: 'center' }}>
-            <a href="#" onClick={() => switchAuthMode(authMode === 'sms' ? 'admin' : 'sms')} style={{ color: '#888', fontSize: 13 }}>
-              {authMode === 'sms' ? t('adminLoginEntry') : t('smsLoginEntry')}
-            </a>
+          <p style={{ marginTop: 16, textAlign: 'center', fontSize: 13 }}>
+            {authMode === 'sms' ? (
+              <>
+                <a href="#" onClick={() => switchAuthMode('email')} style={{ color: '#888' }}>
+                  {t('emailLoginEntry')}
+                </a>
+                <span style={{ color: '#555', margin: '0 10px' }}>·</span>
+                <a href="#" onClick={() => switchAuthMode('admin')} style={{ color: '#888' }}>
+                  {t('adminLoginEntry')}
+                </a>
+              </>
+            ) : (
+              <a href="#" onClick={() => switchAuthMode('sms')} style={{ color: '#888', fontSize: 13 }}>
+                {t('smsLoginEntry')}
+              </a>
+            )}
           </p>
         </div>
       </div>

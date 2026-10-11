@@ -9,7 +9,7 @@ use jcowork_storage::sms_only_password_hash;
 use jcowork_storage::user_store::User;
 
 use super::auth_api::consume_sms_code;
-use super::{AppState, AuthUser, BindPhoneRequest, ChangeUsernameRequest, mask_phone};
+use super::{AppState, AuthUser, BindPhoneRequest, ChangeUsernameRequest, mask_email, mask_phone};
 use crate::auth::normalize_phone;
 
 /// Shortest and longest accepted display name, in characters.
@@ -160,6 +160,8 @@ fn profile_json(user: &User) -> serde_json::Value {
         "username": user.username,
         "phone_masked": user.phone.as_deref().map(mask_phone).unwrap_or_default(),
         "phone_bound": user.phone.is_some(),
+        "email_masked": user.email.as_deref().map(mask_email).unwrap_or_default(),
+        "email_bound": user.email.is_some(),
         "is_admin": user.is_admin,
     })
 }
