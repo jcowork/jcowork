@@ -1,11 +1,15 @@
-// 登录页：短信验证码登录（默认）/ 邮箱密码登录（登录·注册·找回密码）/ 管理员密码登录 / 强制修改管理员密码。
+// 登录页：邮箱密码登录（默认）/ 管理员密码登录 / 强制修改管理员密码。
+// 短信注册暂时从前端隐藏（2026-10-11）：邮箱注册是唯一公开入口，后端接口未动，
+// 改回 true 即可恢复短信登录页签。
+const SMS_LOGIN_VISIBLE = false;
 const { DEFAULT_SERVER_URL, normalizeServerUrl, STORAGE_KEYS } = require('../../config');
 const api = require('../../utils/api');
 const { getNavMetrics } = require('../../utils/ui');
 
 Page({
   data: {
-    mode: 'sms', // sms | email | admin | changePwd
+    mode: SMS_LOGIN_VISIBLE ? 'sms' : 'email', // sms | email | admin | changePwd
+    smsEnabled: SMS_LOGIN_VISIBLE,
     emailMode: 'login', // 邮箱模式子页：login | register | forgot
     serverUrl: '',
     defaultServer: DEFAULT_SERVER_URL,
@@ -43,7 +47,7 @@ Page({
       serverUrl: savedServer || DEFAULT_SERVER_URL,
       username: savedUser,
       // 上次退出时改密尚未完成：令牌还在本地，直接回到改密界面
-      mode: mustChange ? 'changePwd' : 'sms',
+      mode: mustChange ? 'changePwd' : SMS_LOGIN_VISIBLE ? 'sms' : 'email',
     });
   },
 
@@ -328,7 +332,8 @@ Page({
     this.stopCountdown();
     getApp().clearSession();
     this.setData({
-      mode: 'sms', emailMode: 'login', phone: '', code: '', email: '',
+      mode: SMS_LOGIN_VISIBLE ? 'sms' : 'email',
+      emailMode: 'login', phone: '', code: '', email: '',
       password: '', confirmPassword: '', countdown: 0, error: '',
       captchaId: '', captchaImage: '', captchaCode: '',
     });

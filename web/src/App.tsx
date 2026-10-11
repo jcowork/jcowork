@@ -101,6 +101,11 @@ function AuthBanner({ msg, type }: { msg: string; type: 'error' | 'success' }) {
   );
 }
 
+// SMS signup is temporarily hidden from the UI (decided 2026-10-11): the
+// email register form is the only public entry for now, and the backend
+// endpoints stay untouched — flip this to true to bring the SMS card back.
+const SMS_LOGIN_VISIBLE = false;
+
 export default function App() {
   return (
     <I18nProvider>
@@ -131,10 +136,11 @@ function AppInner() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConvId, setActiveConvIdState] = useState<string>('');
   const [, setTick] = useState(0); // periodic re-render for 1h history threshold
-  // SMS is the default way in; email covers register / login / forgot-password
-  // with a password, and the admin form exists solely so a freshly seeded
-  // admin can reach the forced phone-binding screen.
-  const [authMode, setAuthMode] = useState<'sms' | 'email' | 'admin'>('sms');
+  // Email is the default way in while SMS signup is hidden; email covers
+  // register / login / forgot-password with a password, and the admin form
+  // exists solely so a freshly seeded admin can reach the forced
+  // password-change screen.
+  const [authMode, setAuthMode] = useState<'sms' | 'email' | 'admin'>(SMS_LOGIN_VISIBLE ? 'sms' : 'email');
   // Which of the three email screens is showing.
   const [emailMode, setEmailMode] = useState<'login' | 'register' | 'forgot'>('login');
   const [smsForm, setSmsForm] = useState({ phone: '', code: '' });
@@ -751,7 +757,7 @@ function AppInner() {
 
   const handleAddAccount = useCallback(() => {
     setAddingAccount(true);
-    setAuthMode('sms');
+    setAuthMode(SMS_LOGIN_VISIBLE ? 'sms' : 'email');
     setEmailMode('login');
     setAuthError('');
     setAuthSuccess('');
@@ -1097,9 +1103,26 @@ function AppInner() {
                   {t('adminLoginEntry')}
                 </a>
               </>
+            ) : authMode === 'email' ? (
+              // With SMS hidden the email card is the hub: it carries the
+              // admin entry; otherwise it only links back to the SMS card.
+              SMS_LOGIN_VISIBLE ? (
+                <a href="#" onClick={() => switchAuthMode('sms')} style={{ color: '#888', fontSize: 13 }}>
+                  {t('smsLoginEntry')}
+                </a>
+              ) : (
+                <a href="#" onClick={() => switchAuthMode('admin')} style={{ color: '#888', fontSize: 13 }}>
+                  {t('adminLoginEntry')}
+                </a>
+              )
             ) : (
-              <a href="#" onClick={() => switchAuthMode('sms')} style={{ color: '#888', fontSize: 13 }}>
-                {t('smsLoginEntry')}
+              // The admin card's exit goes back to whatever the hub is.
+              <a
+                href="#"
+                onClick={() => switchAuthMode(SMS_LOGIN_VISIBLE ? 'sms' : 'email')}
+                style={{ color: '#888', fontSize: 13 }}
+              >
+                {SMS_LOGIN_VISIBLE ? t('smsLoginEntry') : t('emailLoginEntry')}
               </a>
             )}
           </p>

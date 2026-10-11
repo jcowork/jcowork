@@ -1,4 +1,4 @@
-<!-- 登录：短信验证码 / 邮箱密码（登录·注册·找回密码）/ 管理员密码登录 / 强制修改管理员密码 -->
+<!-- 登录：邮箱密码（登录·注册·找回密码）/ 管理员密码登录 / 强制修改管理员密码。短信登录页签暂时隐藏（smsEnabled） -->
 <view class="page" style="padding-top: {{navTotalHeight}}px;">
   <view class="brand">
     <image class="logo" src="/images/logo.png" mode="aspectFit" />
@@ -8,7 +8,7 @@
 
   <view class="card">
     <view class="tabs" wx:if="{{mode !== 'changePwd'}}">
-      <view class="tab {{mode === 'sms' ? 'tab-active' : ''}}" data-mode="sms" bindtap="switchMode">短信登录</view>
+      <view wx:if="{{smsEnabled}}" class="tab {{mode === 'sms' ? 'tab-active' : ''}}" data-mode="sms" bindtap="switchMode">短信登录</view>
       <view class="tab {{mode === 'email' ? 'tab-active' : ''}}" data-mode="email" bindtap="switchMode">邮箱</view>
       <view class="tab {{mode === 'admin' ? 'tab-active' : ''}}" data-mode="admin" bindtap="switchMode">管理员</view>
     </view>
