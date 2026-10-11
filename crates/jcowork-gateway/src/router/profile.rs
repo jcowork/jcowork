@@ -1,16 +1,17 @@
-//! Self-service account profile: phone binding and display name.
+//! Self-service account profile: phone binding, admin password change, and
+//! display name.
 //!
 //! Every handler re-reads the account from the database rather than trusting the
 //! JWT claims, so a page reload cannot present a stale "phone already bound"
-//! state to the forced-binding screen.
+//! state to the binding screen.
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use jcowork_storage::sms_only_password_hash;
 use jcowork_storage::user_store::User;
 
+use super::admin_users::ensure_admin;
 use super::auth_api::consume_sms_code;
-use super::{AppState, AuthUser, BindPhoneRequest, ChangeUsernameRequest, mask_email, mask_phone};
-use crate::auth::normalize_phone;
+use super::{AppState, AuthUser, BindPhoneRequest, ChangePasswordRequest, ChangeUsernameRequest, mask_email, mask_phone};
+use crate::auth::{self, normalize_phone, password_error};
 
 /// Shortest and longest accepted display name, in characters.
 const USERNAME_MIN_CHARS: usize = 2;
@@ -35,10 +36,9 @@ pub(crate) async fn get_profile(
 
 /// Bind (or rebind) the caller's phone number after verifying an SMS code.
 ///
-/// On success the account's password hash is replaced with the SMS-only
-/// sentinel. That is what closes the bootstrap password door for `admin`: the
-/// default password is a published constant, so leaving it verifiable after a
-/// phone exists would let anyone who reaches the port take the instance over.
+/// Binding is optional contact info — it adds SMS login but never disables
+/// the caller's own credential (the admin's password, an email account's
+/// password), so the password hash is left untouched.
 pub(crate) async fn bind_phone(
     State(state): State<AppState>,
     axum::Extension(auth_user): axum::Extension<AuthUser>,
@@ -68,22 +68,10 @@ pub(crate) async fn bind_phone(
         return (status, Json(serde_json::json!({"error": msg})));
     }
 
-    if let Err(e) = state
-        .user_store
-        .update_password_hash(&auth_user.user_id, &sms_only_password_hash())
-        .await
-    {
-        tracing::error!(error = %e, "Failed to close password login after phone binding");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        );
-    }
-
     tracing::info!(
         user_id = %auth_user.user_id,
         phone = %mask_phone(&phone),
-        "Phone number bound; password login disabled for this account"
+        "Phone number bound"
     );
 
     match state.user_store.get_user_by_id(&auth_user.user_id).await {
@@ -96,6 +84,67 @@ pub(crate) async fn bind_phone(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
         ),
+    }
+}
+
+/// Replace the admin's password, lifting the bootstrap gate.
+///
+/// The caller is token-authenticated (a bootstrap login, or SMS for a
+/// `JCWORK_ADMIN_PHONE` admin who may not even know the bootstrap password),
+/// so only the new password is submitted. Non-admins are refused: email
+/// accounts already have a code-verified reset path.
+pub(crate) async fn change_password(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Json(req): Json<ChangePasswordRequest>,
+) -> axum::response::Response {
+    if let Err(resp) = ensure_admin(&auth_user) {
+        return resp;
+    }
+
+    if let Some(msg) = password_error(&req.new_password) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg})),
+        )
+            .into_response();
+    }
+
+    let hash = match auth::hash_password(&req.new_password) {
+        Ok(h) => h,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
+    };
+
+    // Also stamps password_changed_at, which is what lifts the middleware
+    // bootstrap gate on the next request.
+    if let Err(e) = state.user_store.update_password_hash(&auth_user.user_id, &hash).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response();
+    }
+
+    tracing::info!(user_id = %auth_user.user_id, "Admin password changed");
+
+    match state.user_store.get_user_by_id(&auth_user.user_id).await {
+        Ok(Some(user)) => (StatusCode::OK, Json(profile_json(&user))).into_response(),
+        Ok(None) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "Account not found"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -163,5 +212,7 @@ fn profile_json(user: &User) -> serde_json::Value {
         "email_masked": user.email.as_deref().map(mask_email).unwrap_or_default(),
         "email_bound": user.email.is_some(),
         "is_admin": user.is_admin,
+        // Drives the client's forced change-password screen after a reload.
+        "must_change_password": user.is_admin && user.password_changed_at.is_none(),
     })
 }

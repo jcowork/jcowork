@@ -717,8 +717,8 @@ All config via environment variables:
 | `JCWORK_SMTP_FROM` | (empty) | Envelope sender address for verification emails |
 | `JCWORK_MAIL_DAILY_GLOBAL_CAP` | `500` | Emails sent process-wide per UTC day, independent of the SMS cap |
 | `JCWORK_MAIL_ALLOW_REGISTER` | `true` | `false` disables new email registrations; existing email logins keep working |
-| `JCWORK_ADMIN_PHONE` | (empty) | Bind the admin's phone at startup, closing the default-password door before first login. `clear` unbinds |
-| `JCWORK_ADMIN_BOOTSTRAP_PASSWORD` | (empty) | Password for the seeded admin; only used when the account is first created |
+| `JCWORK_ADMIN_PHONE` | (empty) | Bind the admin's phone at startup so SMS login works alongside the password. `clear` unbinds |
+| `JCWORK_ADMIN_BOOTSTRAP_PASSWORD` | (empty) | Bootstrap password for the seeded admin, replaced on first login; only used when the account is first created |
 | `JCWORK_DEFAULT_MODEL` | `moonshot:kimi-k2.6` | Default LLM model (`provider:model` format) |
 | `DEEPSEEK_API_KEY` | (empty) | DeepSeek API key |
 | `QWEN_API_KEY` | (empty) | Qwen / Tongyi Qianwen API key |
@@ -932,28 +932,31 @@ accounts. Close new registrations with `JCWORK_MAIL_ALLOW_REGISTER=false`
 
 **The admin bootstrap.** `admin` is seeded with a published default password
 (`admin123`, overridable at first creation with `JCWORK_ADMIN_BOOTSTRAP_PASSWORD`)
-so a fresh instance is reachable at all. `POST /api/auth/login` accepts it only
-while the account has no bound phone number; a successful bootstrap login returns
-`must_bind_phone: true`, the UI shows a binding screen that cannot be dismissed,
-and binding replaces the password hash with an unparseable sentinel. From then on
-that account can only sign in with a code, and `/api/auth/login` returns a plain
-401 for it. Set `JCWORK_ADMIN_PHONE` instead and the number is bound at startup,
-so the default password is never accepted at all — prefer it over relying on the
-first-login binding screen. Bootstrap tokens issued before the bind stay valid
-until they expire (24h by default) — there is no token-version column to revoke
-them with.
+so a fresh instance is reachable at all. `POST /api/auth/login` is admin-only —
+any other account is refused even with a valid password, and the response is
+byte-identical to a wrong-password failure. A successful login returns
+`must_change_password: true` until the bootstrap password has been replaced: the
+UI shows a change-password screen that cannot be dismissed, and the new password
+becomes the account's permanent login. `JCWORK_ADMIN_PHONE` optionally binds a
+phone number at startup so SMS login works alongside the password — it disables
+nothing. Bootstrap tokens issued before the change stay valid until they expire
+(24h by default) — there is no token-version column to revoke them with.
 
-**Locked accounts.** While `must_bind_phone` applies, every endpoint except
-`/api/profile` and `/api/profile/phone` answers
-`403 {"code":"phone_bind_required"}`.
+**Locked accounts.** While `must_change_password` applies, every endpoint except
+`/api/profile` and `/api/profile/password` answers
+`403 {"code":"password_change_required"}`.
 
-**Legacy accounts.** Accounts created before this change have no phone number and
-therefore cannot sign in; no data was migrated. An admin either assigns them a
-number under User management (`POST /api/admin/users/{id}/phone`) or deletes them.
-A web client that still holds such an account's token detects this on load — the
-`/api/profile` probe reports `phone_bound: false`, which routes the user to the
-binding screen instead of a wall of 403s, so binding a number is also the
-migration path.
+**Pre-upgrade admins.** Deployments from the forced-phone-binding era have an
+admin whose password hash was replaced by an unparseable sentinel. No data
+migration is needed: password login simply fails for it, the next SMS login
+returns `must_change_password: true`, and one forced change restores password
+login permanently.
+
+**Legacy accounts.** Accounts created before the SMS era have neither a phone
+number nor an email, so they cannot sign in (password login is admin-only); no
+data was migrated. An admin either assigns them a number under User management
+(`POST /api/admin/users/{id}/phone`) or deletes them. Tokens they still hold
+from before the upgrade keep working — the contact gate is gone.
 
 **Public accounts.** Making your own account public used to be a checkbox on the
 registration form. That form is gone, so `is_public` can now only be changed by an
@@ -976,9 +979,10 @@ how to mint one against the dev SMS channel.
 | POST | `/api/auth/email/register` | Register an email + password account |
 | POST | `/api/auth/email/login` | Log in with email + password |
 | POST | `/api/auth/password/reset` | Reset the password with an emailed code |
-| POST | `/api/auth/login` | Admin bootstrap only — rejected once a phone is bound |
-| GET | `/api/profile` | Own username, masked phone/email, `phone_bound`, `email_bound`, `is_admin` |
+| POST | `/api/auth/login` | Admin-only password login; flags `must_change_password` until the bootstrap password is replaced |
+| GET | `/api/profile` | Own username, masked phone/email, `phone_bound`, `email_bound`, `is_admin`, `must_change_password` |
 | POST | `/api/profile/phone` | Bind or rebind own phone with a code |
+| POST | `/api/profile/password` | Replace own password (admin bootstrap gate) |
 | PUT | `/api/profile/username` | Change own display name |
 | POST | `/api/admin/users/{id}/phone` | Admin assigns a phone number |
 | DELETE | `/api/admin/users/{id}/phone` | Admin removes a phone number |

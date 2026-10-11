@@ -15,7 +15,7 @@ const STORAGE_KEYS = {
   token: 'jcowork_token',
   userId: 'jcowork_user_id',
   username: 'jcowork_username',
-  mustBindPhone: 'jcowork_must_bind_phone',
+  mustChangePassword: 'jcowork_must_change_password',
   model: (userId) => `jcowork_model_${userId}`,
 };
 

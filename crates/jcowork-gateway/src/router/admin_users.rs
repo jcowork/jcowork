@@ -26,7 +26,6 @@ use serde::Deserialize;
 
 use super::{AppState, AuthUser, mask_email, mask_phone};
 use crate::auth::normalize_phone;
-use jcowork_storage::sms_only_password_hash;
 use jcowork_storage::user_store::TRASH_RETENTION_DAYS;
 use jcowork_storage::user_store::User;
 
@@ -41,7 +40,7 @@ pub(crate) struct AdminUserQuery {
 
 /// Ensure the caller is a super user. The middleware already resolves
 /// `is_admin` from the DB on every request, so a simple flag check suffices.
-fn ensure_admin(auth_user: &AuthUser) -> Result<(), Response> {
+pub(crate) fn ensure_admin(auth_user: &AuthUser) -> Result<(), Response> {
     if auth_user.is_admin {
         return Ok(());
     }
@@ -390,19 +389,6 @@ pub(crate) async fn set_user_phone(
         return (status, Json(serde_json::json!({ "error": msg }))).into_response();
     }
 
-    if let Err(e) = state
-        .user_store
-        .update_password_hash(&user_id, &sms_only_password_hash())
-        .await
-    {
-        tracing::error!(error = %e, "Failed to close password login after admin assigned a phone");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response();
-    }
-
     tracing::info!(
         actor = %auth_user.user_id,
         user_id = %user_id,
@@ -425,9 +411,9 @@ pub(crate) async fn set_user_phone(
 /// DELETE /api/admin/users/{id}/phone — unbind a phone number.
 ///
 /// Frees the number so it can be bound to a different account, typically after
-/// someone leaves. The account keeps its SMS-only password sentinel, so it
-/// cannot log in again until a number is assigned: unbinding is deliberately
-/// not a way to fall back to password access.
+/// someone leaves. An account whose only credential was the number (provisioned
+/// by SMS) cannot log in again until a new one is assigned; accounts with a
+/// password or email keep their own login path.
 pub(crate) async fn clear_user_phone(
     State(state): State<AppState>,
     axum::Extension(auth_user): axum::Extension<AuthUser>,
@@ -437,9 +423,9 @@ pub(crate) async fn clear_user_phone(
         return resp;
     }
 
-    // Refuse on the caller's own account: an admin who unbinds themselves ends
-    // up with no phone and an unparseable password hash, which no endpoint can
-    // recover from — only a restart with JCWORK_ADMIN_PHONE set.
+    // Refuse on the caller's own account: the number is the admin's SMS-login
+    // channel, and the guard keeps it from being cut off by a stray click
+    // (the admin password does not depend on the phone either way).
     if user_id == auth_user.user_id {
         return (
             StatusCode::BAD_REQUEST,
@@ -486,7 +472,7 @@ pub(crate) async fn clear_user_phone(
         actor = %auth_user.user_id,
         user_id = %user_id,
         username = %target.username,
-        "Admin removed phone number; account cannot log in until a new one is assigned"
+        "Admin removed phone number; a phone-only account cannot log in until a new one is assigned"
     );
 
     (

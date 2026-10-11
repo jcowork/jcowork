@@ -150,13 +150,10 @@ function AppInner() {
   const [authError, setAuthError] = useState('');
   // Success notice for the email card (password reset redirects to login).
   const [authSuccess, setAuthSuccess] = useState('');
-  // Forced phone binding (admin bootstrap). The two forms are never on screen
-  // together, but a cooldown started on one must not carry over to the other.
-  const [bindForm, setBindForm] = useState({ phone: '', code: '' });
-  const [bindBusy, setBindBusy] = useState(false);
-  const [bindSendingCode, setBindSendingCode] = useState(false);
-  const [bindCountdown, setBindCountdown] = useState(0);
-  const [bindError, setBindError] = useState('');
+  // Forced password change (admin bootstrap).
+  const [changePwdForm, setChangePwdForm] = useState({ password: '', confirmPassword: '' });
+  const [changePwdBusy, setChangePwdBusy] = useState(false);
+  const [changePwdError, setChangePwdError] = useState('');
   const hiddenTimeRef = useRef(0);
 
   // Per-account conversation storage (background accounts keep their convs here)
@@ -351,14 +348,14 @@ function AppInner() {
     user_id: string;
     username: string;
     is_admin?: boolean;
-    must_bind_phone?: boolean;
+    must_change_password?: boolean;
   }) => {
     const authState: AuthState = {
       token: data.token,
       userId: data.user_id,
       username: data.username,
       isAdmin: !!data.is_admin,
-      mustBindPhone: !!data.must_bind_phone,
+      mustChangePassword: !!data.must_change_password,
     };
     // Upsert into multi-account store
     const updated = upsertAccount(authState);
@@ -411,8 +408,9 @@ function AppInner() {
     }
   };
 
-  /// Only reaches a session for the seeded admin with no phone bound; the
-  /// server refuses everyone else, so a successful call means "go bind".
+  /// Only reaches a session for the seeded admin; the server refuses everyone
+  /// else. A successful call with the change flag set means "change the
+  /// bootstrap password before anything else".
   const handleAdminLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError('');
@@ -528,38 +526,35 @@ function AppInner() {
     }
   };
 
-  const handleSendBindCode = () =>
-    requestSmsCode(bindForm.phone, {
-      setError: setBindError,
-      setBusy: setBindSendingCode,
-      startCountdown: setBindCountdown,
-    });
-
-  /// Submit the forced binding. The bootstrap token keeps working afterwards —
-  /// the server re-reads the account on every request — so there is no need to
-  /// sign in again.
-  const handleBindPhone = async (e: React.FormEvent) => {
+  /// Submit the forced password change. The bootstrap token keeps working
+  /// afterwards — the server re-reads the account on every request — so there
+  /// is no need to sign in again.
+  const handleChangePassword = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeAccount) return;
-    setBindError('');
-    setBindBusy(true);
+    setChangePwdError('');
+    if (changePwdForm.password !== changePwdForm.confirmPassword) {
+      setChangePwdError(t('passwordMismatch'));
+      return;
+    }
+    setChangePwdBusy(true);
     try {
       const { ok, data } = await postJson(
-        '/api/profile/phone',
-        { phone: bindForm.phone.trim(), code: bindForm.code.trim() },
+        '/api/profile/password',
+        { new_password: changePwdForm.password },
         activeAccount.token,
       );
-      if (ok && data.phone_bound) {
-        const updated = upsertAccount({ ...activeAccount, mustBindPhone: false });
+      if (ok) {
+        const updated = upsertAccount({ ...activeAccount, mustChangePassword: false });
         setAccounts(updated);
-        setBindForm({ phone: '', code: '' });
+        setChangePwdForm({ password: '', confirmPassword: '' });
       } else {
-        setBindError(mapAuthError(data.error ?? '', data));
+        setChangePwdError(mapAuthError(data.error ?? '', data));
       }
     } catch {
-      setBindError(t('networkError'));
+      setChangePwdError(t('networkError'));
     } finally {
-      setBindBusy(false);
+      setChangePwdBusy(false);
     }
   };
 
@@ -636,34 +631,27 @@ function AppInner() {
   }, [codeCountdown]);
 
   useEffect(() => {
-    if (bindCountdown <= 0) return;
-    const h = window.setTimeout(() => setBindCountdown((c) => c - 1), 1000);
-    return () => window.clearTimeout(h);
-  }, [bindCountdown]);
-
-  useEffect(() => {
     if (emailCountdown <= 0) return;
     const h = window.setTimeout(() => setEmailCountdown((c) => c - 1), 1000);
     return () => window.clearTimeout(h);
   }, [emailCountdown]);
 
   // Probe every stored account once on load. `/api/profile` is one of the two
-  // endpoints an account with no phone number may still call, so it doubles as
-  // the check — and accounts saved before phone binding existed all need it.
-  // An email-registered account has a bound email and no phone, so both fields
-  // must be unbound before the gate applies. `email_bound` is undefined on
-  // servers predating email auth; the strict check below then skips them.
+  // endpoints an admin on the bootstrap password may still call, so it doubles
+  // as the check — the lock flag must be re-derived after a reload.
+  // `must_change_password` is undefined on servers predating the
+  // change-password flow; the strict check below then skips them.
   useEffect(() => {
     loadAccounts().forEach((acct) => {
-      if (acct.mustBindPhone) return;
+      if (acct.mustChangePassword) return;
       fetch('/api/profile', {
         headers: { Authorization: `Bearer ${acct.token}` },
       })
         .then((res) => (res.ok ? res.json() : null))
         .then((data) => {
-          if (!data || data.phone_bound !== false || data.email_bound !== false) return;
+          if (!data || data.must_change_password !== true) return;
           setAccounts((prev) => {
-            const next = prev.map((a) => (a.userId === acct.userId ? { ...a, mustBindPhone: true } : a));
+            const next = prev.map((a) => (a.userId === acct.userId ? { ...a, mustChangePassword: true } : a));
             saveAccounts(next);
             return next;
           });
@@ -947,35 +935,44 @@ function AppInner() {
     );
   }
 
-  // Forced binding. This account holds a valid token but no phone number, and
-  // the server answers every other endpoint with 403 until one exists — so
-  // there is deliberately no way past this screen except binding or signing out.
-  if (activeAccount?.mustBindPhone) {
+  // Forced password change. This admin account holds a valid token but still
+  // runs on the bootstrap password, and the server answers every other
+  // endpoint with 403 until it is replaced — so there is deliberately no way
+  // past this screen except changing the password or signing out.
+  if (activeAccount?.mustChangePassword) {
     return (
       <div className="login-container">
         <div className="login-card">
           <img src="/logo.png" className="login-logo" alt="Jcowork" />
-          <h1 style={{ fontSize: 24, marginBottom: 8 }}>{t('bindPhoneTitle')}</h1>
+          <h1 style={{ fontSize: 24, marginBottom: 8 }}>{t('changePasswordTitle')}</h1>
           <p style={{ color: '#888', fontSize: 13, lineHeight: 1.6, marginBottom: 20 }}>
-            {t('bindPhoneHint')}
+            {t('changePasswordHint')}
           </p>
-          <form onSubmit={handleBindPhone}>
-            <AuthBanner msg={bindError} type="error" />
-            <PhoneCodeFields
-              phone={bindForm.phone}
-              code={bindForm.code}
-              onPhoneChange={(v) => { setBindForm({ ...bindForm, phone: v }); setBindError(''); }}
-              onCodeChange={(v) => { setBindForm({ ...bindForm, code: v }); setBindError(''); }}
-              onSendCode={handleSendBindCode}
-              countdown={bindCountdown}
-              sending={bindSendingCode}
+          <form onSubmit={handleChangePassword}>
+            <AuthBanner msg={changePwdError} type="error" />
+            <input
+              type="password"
+              autoComplete="new-password"
+              autoFocus
+              placeholder={t('newPassword')}
+              value={changePwdForm.password}
+              onChange={(e) => { setChangePwdForm({ ...changePwdForm, password: e.target.value }); setChangePwdError(''); }}
+              style={authInputStyle}
+            />
+            <input
+              type="password"
+              autoComplete="new-password"
+              placeholder={t('confirmPassword')}
+              value={changePwdForm.confirmPassword}
+              onChange={(e) => { setChangePwdForm({ ...changePwdForm, confirmPassword: e.target.value }); setChangePwdError(''); }}
+              style={authInputStyle}
             />
             <button
               type="submit"
-              disabled={bindBusy}
-              style={{ ...authBtnStyle, marginBottom: 0, background: bindBusy ? '#333' : '#1a73e8', cursor: bindBusy ? 'not-allowed' : 'pointer' }}
+              disabled={changePwdBusy}
+              style={{ ...authBtnStyle, marginBottom: 0, background: changePwdBusy ? '#333' : '#1a73e8', cursor: changePwdBusy ? 'not-allowed' : 'pointer' }}
             >
-              {bindBusy ? t('saving') : t('bindPhone')}
+              {changePwdBusy ? t('saving') : t('saveAndContinue')}
             </button>
           </form>
           <p style={{ marginTop: 16, textAlign: 'center' }}>

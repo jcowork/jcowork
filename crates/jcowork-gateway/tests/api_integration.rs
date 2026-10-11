@@ -313,9 +313,10 @@ impl TestApp {
 
     /// Seed the default admin account and log in through the bootstrap password.
     ///
-    /// The returned token has no phone bound yet, so the forced-binding gate
-    /// only lets it reach `/api/profile*`. Call `bind_phone_number` to unlock
-    /// the rest of the API.
+    /// The returned token has not replaced the bootstrap password yet, so the
+    /// bootstrap gate only lets it reach `/api/profile` and
+    /// `/api/profile/password`. Call `change_admin_password` to unlock the
+    /// rest of the API.
     async fn bootstrap_admin(&self) -> String {
         jcowork_gateway::auth::ensure_default_admin(&self.user_store)
             .await
@@ -329,43 +330,38 @@ impl TestApp {
         assert_eq!(status, StatusCode::OK, "admin bootstrap login should succeed");
         assert_eq!(resp["is_admin"], json!(true), "admin login should report is_admin");
         assert_eq!(
-            resp["must_bind_phone"],
+            resp["must_change_password"],
             json!(true),
-            "bootstrap login must flag the account as needing a phone"
+            "bootstrap login must flag the account as needing a new password"
         );
         resp["token"].as_str().unwrap().to_string()
     }
 
-    /// Bind a freshly generated number to the account holding `token`.
-    /// Returns the number that was bound.
-    async fn bind_phone_number(&self, token: &str) -> String {
-        let phone = self.next_phone();
-        let (status, body) = self
-            .post_public("/api/auth/sms/send", json!({ "phone": phone }))
-            .await;
-        assert_eq!(status, StatusCode::OK, "sending a code to {} failed: {:?}", phone, body);
-        let code = self.captured_code(&phone);
-
+    /// Replace the bootstrap password on the account holding `token`.
+    /// Returns the new password.
+    async fn change_admin_password(&self, token: &str) -> String {
+        const NEW_PASSWORD: &str = "replaced-admin-pass";
         let res = self
             .make_request_with_token(
                 Some(token),
                 "POST",
-                "/api/profile/phone",
-                Some(json!({ "phone": phone, "code": code })),
+                "/api/profile/password",
+                Some(json!({ "new_password": NEW_PASSWORD })),
             )
             .await;
-        assert_eq!(res.status(), StatusCode::OK, "binding {} should succeed", phone);
-        phone
+        assert_eq!(res.status(), StatusCode::OK, "changing the admin password should succeed");
+        NEW_PASSWORD.to_string()
     }
 
     /// Seed the default admin, walk it through the bootstrap password door, and
-    /// satisfy the forced phone binding — returning a token that can reach the
+    /// replace the bootstrap password — returning a token that can reach the
     /// whole API.
     async fn seed_and_login_admin(&self) -> String {
         let token = self.bootstrap_admin().await;
-        self.bind_phone_number(&token).await;
-        // The same JWT keeps working after binding: the middleware re-reads the
-        // account on every request, so the gate opens as soon as a phone exists.
+        self.change_admin_password(&token).await;
+        // The same JWT keeps working after the change: the middleware re-reads
+        // the account on every request, so the gate opens as soon as the
+        // password is no longer the bootstrap one.
         token
     }
 
@@ -479,7 +475,8 @@ async fn test_password_login_is_admin_bootstrap_only() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["error"], json!("Invalid username or password"));
 
-    // The bootstrap door does admit the admin while it has no phone.
+    // The bootstrap door admits the admin while the bootstrap password is in
+    // place, and flags the forced change.
     let (status, body) = app
         .login_raw(
             jcowork_gateway::auth::DEFAULT_ADMIN_USERNAME,
@@ -487,7 +484,124 @@ async fn test_password_login_is_admin_bootstrap_only() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{:?}", body);
-    assert_eq!(body["must_bind_phone"], json!(true));
+    assert_eq!(body["must_change_password"], json!(true));
+
+    // After the change the self-chosen password is the permanent login.
+    let token = body["token"].as_str().unwrap();
+    let new_password = app.change_admin_password(token).await;
+    let (status, body) = app
+        .login_raw(jcowork_gateway::auth::DEFAULT_ADMIN_USERNAME, &new_password)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{:?}", body);
+    assert_eq!(body["must_change_password"], json!(false));
+
+    // A bound phone no longer closes the password door.
+    let admin = app
+        .user_store
+        .get_user_by_username(jcowork_gateway::auth::DEFAULT_ADMIN_USERNAME)
+        .await
+        .unwrap()
+        .unwrap();
+    let phone = app.next_phone();
+    app.user_store.set_user_phone(&admin.id, &phone).await.unwrap();
+    let (status, body) = app
+        .login_raw(jcowork_gateway::auth::DEFAULT_ADMIN_USERNAME, &new_password)
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a phone-bound admin must still be able to use password login: {:?}",
+        body
+    );
+}
+
+/// A pre-upgrade admin whose password was sentinel-stamped (phone-bound,
+/// SMS-only) fails closed at password login, is flagged at SMS login, and is
+/// fully restored once the forced change sets a real password.
+#[tokio::test]
+async fn test_sentinel_admin_is_migrated_through_forced_password_change() {
+    let app = TestApp::new().await;
+
+    // Recreate the pre-upgrade state by seeding the admin directly: sentinel
+    // hash (unparseable by Argon2), a bound phone, and no self-set password.
+    // `ensure_admin_user` leaves `password_changed_at` NULL, unlike
+    // `update_password_hash`, which is exactly what the era looked like.
+    app.user_store
+        .ensure_admin_user(
+            jcowork_gateway::auth::DEFAULT_ADMIN_USERNAME,
+            &jcowork_storage::sms_only_password_hash(),
+        )
+        .await
+        .unwrap();
+    let admin = app
+        .user_store
+        .get_user_by_username(jcowork_gateway::auth::DEFAULT_ADMIN_USERNAME)
+        .await
+        .unwrap()
+        .unwrap();
+    let phone = app.next_phone();
+    app.user_store.set_user_phone(&admin.id, &phone).await.unwrap();
+
+    // Password login fails closed on the unparseable hash — same body as any
+    // other wrong password, so nothing about the account leaks.
+    let (status, body) = app
+        .login_raw(jcowork_gateway::auth::DEFAULT_ADMIN_USERNAME, "whatever-they-type")
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], json!("Invalid username or password"));
+
+    // SMS login works and flags the forced change.
+    let (status, body) = app.sms_send_and_login(&phone).await;
+    assert_eq!(status, StatusCode::OK, "{:?}", body);
+    assert_eq!(body["is_admin"], json!(true));
+    assert_eq!(body["must_change_password"], json!(true));
+
+    // Until the change happens the token is locked to the profile endpoints…
+    let token = body["token"].as_str().unwrap();
+    let res = app
+        .make_request_with_token(Some(token), "GET", "/api/providers", None)
+        .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    // …and one change restores password login permanently.
+    let new_password = app.change_admin_password(token).await;
+    let (status, body) = app
+        .login_raw(jcowork_gateway::auth::DEFAULT_ADMIN_USERNAME, &new_password)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{:?}", body);
+    assert_eq!(body["must_change_password"], json!(false));
+}
+
+/// The change-password endpoint validates its input and is admin-only.
+#[tokio::test]
+async fn test_change_password_validates_input() {
+    let app = TestApp::new().await;
+    let token = app.bootstrap_admin().await;
+
+    for bad in ["short", "        "] {
+        let res = app
+            .make_request_with_token(
+                Some(&token),
+                "POST",
+                "/api/profile/password",
+                Some(json!({ "new_password": bad })),
+            )
+            .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{:?} should be rejected", bad);
+    }
+
+    // A non-admin caller is refused outright: only the admin bootstrap gate
+    // uses this endpoint, everyone else resets passwords by email code.
+    let (_, other_token) = app.provision_user().await;
+    let res = app
+        .make_request_with_token(
+            Some(&other_token),
+            "POST",
+            "/api/profile/password",
+            Some(json!({ "new_password": "a-valid-password" })),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -1173,6 +1287,11 @@ async fn test_ensure_default_admin_idempotent() {
     let promoted = app.user_store.get_user_by_username("admin").await.unwrap().unwrap();
     assert!(promoted.is_admin, "existing admin account must be promoted");
     assert_eq!(promoted.id, existing.id, "no duplicate admin account may be created");
+    assert!(
+        jcowork_gateway::auth::verify_password("someOtherPass", &promoted.password_hash)
+            .unwrap_or(false),
+        "promotion must not overwrite the account's existing password"
+    );
 
     // Second call is a no-op
     jcowork_gateway::auth::ensure_default_admin(&app.user_store).await.unwrap();
@@ -1288,8 +1407,8 @@ async fn test_sms_login_provisions_account_and_returns_working_token() {
     assert_eq!(status, StatusCode::OK, "sms login should succeed: {:?}", body);
     assert!(!body["token"].as_str().unwrap().is_empty());
     assert_eq!(body["is_admin"], json!(false));
-    // The account was created from this number, so it is already bound.
-    assert_eq!(body["must_bind_phone"], json!(false));
+    // A phone-provisioned account never sees the change-password screen.
+    assert_eq!(body["must_change_password"], json!(false));
     // The display name is derived from the last four digits only.
     assert_eq!(body["username"], json!("用户8001"));
 
@@ -1517,14 +1636,13 @@ async fn test_sms_login_rejects_trashed_account() {
 }
 
 #[tokio::test]
-async fn test_bind_phone_closes_the_password_door() {
+async fn test_change_password_closes_the_bootstrap_door() {
     let app = TestApp::new().await;
-    let phone = "13800138010";
 
-    // Deliberately stop short of binding: this test performs the bind itself.
+    // Deliberately stop short of changing the password: this test does it.
     let admin_token = app.bootstrap_admin().await;
 
-    // The bootstrap password works while no phone is bound.
+    // The bootstrap password works until it is replaced.
     let (status, _) = app
         .login_raw(
             jcowork_gateway::auth::DEFAULT_ADMIN_USERNAME,
@@ -1533,37 +1651,23 @@ async fn test_bind_phone_closes_the_password_door() {
         .await;
     assert_eq!(status, StatusCode::OK);
 
-    let (status, _) = app
-        .post_public("/api/auth/sms/send", json!({ "phone": phone }))
-        .await;
-    assert_eq!(status, StatusCode::OK);
-    let code = app.captured_code(phone);
+    let new_password = app.change_admin_password(&admin_token).await;
 
-    let res = app
-        .make_request_with_token(
-            Some(&admin_token),
-            "POST",
-            "/api/profile/phone",
-            Some(json!({ "phone": phone, "code": code })),
-        )
-        .await;
-    assert_eq!(res.status(), StatusCode::OK);
-    let profile: serde_json::Value =
-        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
-            .unwrap();
-    assert_eq!(profile["phone_bound"], json!(true));
-    assert_eq!(profile["is_admin"], json!(true));
-    assert_eq!(profile["phone_masked"], json!("*******8010"));
-
-    // The default admin password is a published constant, so binding has to
-    // retire it — otherwise anyone who can reach the port keeps a way in.
+    // The default admin password is a published constant, so replacing it has
+    // to retire it — otherwise anyone who can reach the port keeps a way in.
     let (status, _) = app
         .login_raw(
             jcowork_gateway::auth::DEFAULT_ADMIN_USERNAME,
             jcowork_gateway::auth::DEFAULT_ADMIN_PASSWORD,
         )
         .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "password login must fail once a phone is bound");
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "the bootstrap password must fail once replaced");
+
+    let (status, body) = app
+        .login_raw(jcowork_gateway::auth::DEFAULT_ADMIN_USERNAME, &new_password)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{:?}", body);
+    assert_eq!(body["must_change_password"], json!(false));
 
     // A token minted during bootstrap stays valid until it expires; there is no
     // token-version column to revoke it with. This is a known, documented limit.
@@ -1618,12 +1722,13 @@ async fn json_body(res: axum::http::Response<Body>) -> serde_json::Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 
-// ── Forced phone binding ──
+// ── Forced password change ──
 
-/// An account with no phone bound may only reach the endpoints the binding
-/// screen needs; everything else is refused until the number exists.
+/// An admin still on the bootstrap password may only reach the endpoints the
+/// change-password screen needs; everything else is refused until the
+/// password is replaced.
 #[tokio::test]
-async fn test_unbound_account_is_locked_to_the_binding_endpoints() {
+async fn test_bootstrap_admin_is_locked_to_password_endpoints() {
     let app = TestApp::new().await;
     let token = app.bootstrap_admin().await;
 
@@ -1633,7 +1738,7 @@ async fn test_unbound_account_is_locked_to_the_binding_endpoints() {
     assert_eq!(
         res.status(),
         StatusCode::OK,
-        "the binding screen must be able to read the profile"
+        "the change-password screen must be able to read the profile"
     );
 
     for path in ["/api/providers", "/api/sessions", "/api/admin/users"] {
@@ -1642,25 +1747,26 @@ async fn test_unbound_account_is_locked_to_the_binding_endpoints() {
             .await;
         assert_eq!(res.status(), StatusCode::FORBIDDEN, "{} must be gated", path);
         // The frontend branches on this code to redirect, so it has to be there.
-        assert_eq!(json_body(res).await["code"], json!("phone_bind_required"));
+        assert_eq!(json_body(res).await["code"], json!("password_change_required"));
     }
 
-    // Binding lifts the gate for the very same token.
-    app.bind_phone_number(&token).await;
+    // Changing the password lifts the gate for the very same token.
+    app.change_admin_password(&token).await;
     let res = app
         .make_request_with_token(Some(&token), "GET", "/api/providers", None)
         .await;
     assert_eq!(
         res.status(),
         StatusCode::OK,
-        "binding a phone must unlock the rest of the API"
+        "replacing the bootstrap password must unlock the rest of the API"
     );
 }
 
 // ── Admin phone assignment ──
 
 /// Assigning a number is the only way back into an account that predates SMS
-/// login, so it has to work end to end and retire the account's password.
+/// login, so it has to work end to end. The stored password is kept — only
+/// the password door's admin-only rule stops it from logging in.
 #[tokio::test]
 async fn test_admin_assigns_and_removes_a_phone_number() {
     let app = TestApp::new().await;
@@ -1705,15 +1811,20 @@ async fn test_admin_assigns_and_removes_a_phone_number() {
     assert_eq!(status, StatusCode::OK, "{:?}", body);
     assert_eq!(body["user_id"], json!(legacy.id));
 
-    // Assigning stamps the SMS-only sentinel over the stored hash.
+    // Assigning keeps the stored hash: binding a phone adds SMS login but
+    // never destroys the account's own credential.
     let stored = app.user_store.get_user_by_id(&legacy.id).await.unwrap().unwrap();
     assert!(
-        !jcowork_gateway::auth::verify_password("legacypass1", &stored.password_hash)
+        jcowork_gateway::auth::verify_password("legacypass1", &stored.password_hash)
             .unwrap_or(false),
-        "assigning a phone must retire the account's password"
+        "assigning a phone must keep the account's password hash"
     );
     let (status, _) = app.login_raw("legacy", "legacypass1").await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "non-admin password login stays closed regardless of the stored hash"
+    );
 
     // The admin list masks the number and can search by it.
     let res = app
@@ -1745,8 +1856,9 @@ async fn test_admin_assigns_and_removes_a_phone_number() {
         .await;
     assert_eq!(res.status(), StatusCode::CONFLICT);
 
-    // The admin cannot unbind itself: with no number and an unparseable hash
-    // there would be no way back in short of a restart with JCWORK_ADMIN_PHONE.
+    // The admin cannot unbind itself: the number is the admin's SMS-login
+    // channel, and the guard keeps it from being cut off by a stray click
+    // (the admin password no longer depends on the phone either way).
     let res = app
         .make_request_with_token(Some(&admin_token), "GET", "/api/admin/users?status=active", None)
         .await;
@@ -1834,9 +1946,9 @@ async fn test_email_register_login_and_gate_passes_without_phone() {
     assert_eq!(status, StatusCode::OK, "{:?}", body);
     assert_eq!(body["is_admin"], json!(false));
     assert_eq!(
-        body["must_bind_phone"],
+        body["must_change_password"],
         json!(false),
-        "an account born with a bound email must never see the binding screen"
+        "an email-born account never sees the change-password screen"
     );
     let user_id = body["user_id"].as_str().unwrap().to_string();
     let username = body["username"].as_str().unwrap().to_string();
@@ -1869,7 +1981,7 @@ async fn test_email_register_login_and_gate_passes_without_phone() {
         .await;
     assert_eq!(status, StatusCode::OK, "{:?}", body);
     assert_eq!(body["user_id"], json!(user_id));
-    assert_eq!(body["must_bind_phone"], json!(false));
+    assert_eq!(body["must_change_password"], json!(false));
 
     let (status, body) = app
         .post_public(

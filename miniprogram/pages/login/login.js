@@ -1,11 +1,11 @@
-// 登录页：短信验证码登录（默认）/ 邮箱密码登录（登录·注册·找回密码）/ 管理员密码引导 / 强制绑定手机号。
+// 登录页：短信验证码登录（默认）/ 邮箱密码登录（登录·注册·找回密码）/ 管理员密码登录 / 强制修改管理员密码。
 const { DEFAULT_SERVER_URL, normalizeServerUrl, STORAGE_KEYS } = require('../../config');
 const api = require('../../utils/api');
 const { getNavMetrics } = require('../../utils/ui');
 
 Page({
   data: {
-    mode: 'sms', // sms | email | admin | bind
+    mode: 'sms', // sms | email | admin | changePwd
     emailMode: 'login', // 邮箱模式子页：login | register | forgot
     serverUrl: '',
     defaultServer: DEFAULT_SERVER_URL,
@@ -27,18 +27,18 @@ Page({
     const metrics = getNavMetrics();
     let savedServer = '';
     let savedUser = '';
-    let mustBind = false;
+    let mustChange = false;
     try {
       savedServer = wx.getStorageSync(STORAGE_KEYS.serverUrl) || '';
       savedUser = wx.getStorageSync(STORAGE_KEYS.username) || '';
-      mustBind = !!wx.getStorageSync(STORAGE_KEYS.mustBindPhone);
+      mustChange = !!wx.getStorageSync(STORAGE_KEYS.mustChangePassword);
     } catch (e) {}
     this.setData({
       ...metrics,
       serverUrl: savedServer || DEFAULT_SERVER_URL,
       username: savedUser,
-      // 上次退出时绑定尚未完成：令牌还在本地，直接回到绑定界面
-      mode: mustBind ? 'bind' : 'sms',
+      // 上次退出时改密尚未完成：令牌还在本地，直接回到改密界面
+      mode: mustChange ? 'changePwd' : 'sms',
     });
   },
 
@@ -98,13 +98,13 @@ Page({
     }, 1000);
   },
 
-  /** 获取验证码：短信（登录与绑定）与邮件（注册与找回密码）共用入口 */
+  /** 获取验证码：短信（登录）与邮件（注册与找回密码）共用入口 */
   async sendCode() {
     if (this.data.sendingCode || this.data.countdown > 0) return;
     if (this.data.mode === 'email') return this.sendEmailCode();
     const serverUrl = normalizeServerUrl(this.data.serverUrl);
     const phone = String(this.data.phone || '').trim();
-    if (this.data.mode !== 'bind' && !serverUrl) {
+    if (!serverUrl) {
       this.setError('请输入有效的服务器地址，如 https://your-server.com');
       return;
     }
@@ -159,7 +159,7 @@ Page({
     const phone = String(this.data.phone || '').trim();
     const code = String(this.data.code || '').trim();
 
-    if (mode === 'bind') return this.submitBind(phone, code);
+    if (mode === 'changePwd') return this.submitChangePassword();
 
     if (!serverUrl) {
       this.setError('请输入有效的服务器地址，如 https://your-server.com');
@@ -188,13 +188,13 @@ Page({
         token: data.token,
         userId: data.user_id,
         username: data.username || (mode === 'sms' ? phone : String(this.data.username).trim()),
-        mustBindPhone: !!data.must_bind_phone,
+        mustChangePassword: !!data.must_change_password,
       });
       this.setData({ password: '' });
-      // 引导登录后服务端只放行资料接口，必须先绑定手机号
-      if (data.must_bind_phone) {
+      // 管理员首次登录：服务端只放行资料接口，必须先改掉初始密码
+      if (data.must_change_password) {
         this.stopCountdown();
-        this.setData({ loading: false, mode: 'bind', code: '', countdown: 0, error: '' });
+        this.setData({ loading: false, mode: 'changePwd', code: '', countdown: 0, error: '' });
         return;
       }
       this.enterApp();
@@ -244,7 +244,7 @@ Page({
         token: data.token,
         userId: data.user_id,
         username: data.username || email,
-        mustBindPhone: !!data.must_bind_phone,
+        mustChangePassword: !!data.must_change_password,
       });
       this.setData({ password: '', confirmPassword: '', code: '' });
       this.enterApp();
@@ -253,32 +253,25 @@ Page({
     }
   },
 
-  async submitBind(phone, code) {
-    if (!phone) return this.setError('请输入手机号');
-    if (!code) return this.setError('请输入验证码');
+  /** 管理员强制改密：令牌已通过密码或短信验证，只填新密码 */
+  async submitChangePassword() {
+    const password = String(this.data.password || '');
+    const confirmPassword = String(this.data.confirmPassword || '');
+    if (!password) return this.setError('请输入新密码');
+    if (password.length < 8) return this.setError('密码至少 8 位');
+    if (password !== confirmPassword) return this.setError('两次输入的密码不一致');
     this.setData({ loading: true, error: '' });
     try {
-      const data = await api.bindPhone(phone, code);
-      if (!data || !data.phone_bound) {
-        throw new Error('绑定失败，请重试');
-      }
-      const app = getApp();
-      app.markPhoneBound();
-      if (data.username) {
-        app.globalData.username = data.username;
-        try {
-          wx.setStorageSync(STORAGE_KEYS.username, data.username);
-        } catch (e) {}
-      }
-      this.setData({ loading: false, phone: '', code: '' });
-      this.stopCountdown();
+      await api.changePassword(password);
+      getApp().markPasswordChanged();
+      this.setData({ loading: false, password: '', confirmPassword: '' });
       this.enterApp();
     } catch (err) {
-      this.setError((err && err.message) || '绑定失败，请重试');
+      this.setError((err && err.message) || '修改失败，请重试');
     }
   },
 
-  /** 绑定界面上唯一的出口：放弃这个令牌 */
+  /** 改密界面上唯一的出口：放弃这个令牌 */
   logout() {
     this.stopCountdown();
     getApp().clearSession();

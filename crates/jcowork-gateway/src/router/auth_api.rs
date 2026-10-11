@@ -42,11 +42,11 @@ pub(crate) async fn login(
         );
     }
 
-    // Password login exists solely to let a freshly seeded admin reach the
-    // phone-binding screen. Check this before verifying the password: the
-    // response has to be identical to a wrong password, or it would disclose
-    // which usernames hold admin accounts.
-    if !user.is_admin || user.phone.is_some() {
+    // Password login is the admin's permanent authentication method. Check
+    // this before verifying the password: the response has to be identical
+    // to a wrong password, or it would disclose which usernames hold admin
+    // accounts.
+    if !user.is_admin {
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "Invalid username or password"})),
@@ -86,9 +86,9 @@ pub(crate) async fn login(
             "user_id": user.id,
             "username": user.username,
             "is_admin": user.is_admin,
-            // Always true here — the gate above only admits accounts without a
-            // phone — but the frontend branches on it, so state it explicitly.
-            "must_bind_phone": true,
+            // True while the bootstrap password is still in force — the
+            // frontend locks the token to the change-password screen on it.
+            "must_change_password": user.password_changed_at.is_none(),
         })),
     )
 }
@@ -225,7 +225,9 @@ pub(crate) async fn sms_login(
             "user_id": user.id,
             "username": user.username,
             "is_admin": user.is_admin,
-            "must_bind_phone": user.phone.is_none(),
+            // Only the admin has a bootstrap-password gate; an SMS-provisioned
+            // account is born with its number and never sees a true here.
+            "must_change_password": user.is_admin && user.password_changed_at.is_none(),
         })),
     )
 }

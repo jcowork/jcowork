@@ -1,4 +1,4 @@
-<!-- 登录：短信验证码 / 邮箱密码（登录·注册·找回密码）/ 管理员密码引导 / 强制绑定手机号 -->
+<!-- 登录：短信验证码 / 邮箱密码（登录·注册·找回密码）/ 管理员密码登录 / 强制修改管理员密码 -->
 <view class="page" style="padding-top: {{navTotalHeight}}px;">
   <view class="brand">
     <image class="logo" src="/images/logo.png" mode="aspectFit" />
@@ -7,18 +7,18 @@
   </view>
 
   <view class="card">
-    <view class="tabs" wx:if="{{mode !== 'bind'}}">
+    <view class="tabs" wx:if="{{mode !== 'changePwd'}}">
       <view class="tab {{mode === 'sms' ? 'tab-active' : ''}}" data-mode="sms" bindtap="switchMode">短信登录</view>
       <view class="tab {{mode === 'email' ? 'tab-active' : ''}}" data-mode="email" bindtap="switchMode">邮箱</view>
       <view class="tab {{mode === 'admin' ? 'tab-active' : ''}}" data-mode="admin" bindtap="switchMode">管理员</view>
     </view>
 
-    <block wx:if="{{mode === 'bind'}}">
-      <view class="bind-title">绑定手机号</view>
-      <view class="bind-desc">当前账号尚未绑定手机号，绑定后才能继续使用。绑定后该账号只能通过短信验证码登录。</view>
+    <block wx:if="{{mode === 'changePwd'}}">
+      <view class="bind-title">设置管理员密码</view>
+      <view class="bind-desc">当前登录使用的是初始密码，请设置新的管理员密码后继续。</view>
     </block>
 
-    <view class="field" wx:if="{{mode !== 'bind'}}">
+    <view class="field" wx:if="{{mode !== 'changePwd'}}">
       <view class="label">服务器地址</view>
       <input
         class="jc-input"
@@ -64,7 +64,7 @@
         />
       </view>
 
-      <view class="mode-desc">仅供管理员首次登录绑定手机号使用；绑定成功后密码登录将永久关闭</view>
+      <view class="mode-desc">管理员使用用户名和密码登录；首次登录需设置新密码</view>
     </block>
 
     <block wx:if="{{mode === 'email'}}">
@@ -144,7 +144,39 @@
       <view class="mode-desc" wx:if="{{emailMode === 'forgot'}}">通过邮箱验证码设置新密码，重置后请使用新密码登录</view>
     </block>
 
-    <block wx:if="{{mode === 'sms' || mode === 'bind'}}">
+    <block wx:if="{{mode === 'changePwd'}}">
+      <view class="field">
+        <view class="label">新密码</view>
+        <input
+          class="jc-input"
+          value="{{password}}"
+          data-field="password"
+          bindinput="onInput"
+          placeholder="至少 8 位"
+          placeholder-class="jc-input-placeholder"
+          password="{{true}}"
+          confirm-type="done"
+          bindconfirm="submit"
+        />
+      </view>
+
+      <view class="field">
+        <view class="label">确认密码</view>
+        <input
+          class="jc-input"
+          value="{{confirmPassword}}"
+          data-field="confirmPassword"
+          bindinput="onInput"
+          placeholder="再次输入新密码"
+          placeholder-class="jc-input-placeholder"
+          password="{{true}}"
+          confirm-type="done"
+          bindconfirm="submit"
+        />
+      </view>
+    </block>
+
+    <block wx:if="{{mode === 'sms'}}">
       <view class="field">
         <view class="label">手机号</view>
         <input
@@ -188,10 +220,10 @@
     <view class="jc-error error-box" wx:if="{{error}}">{{error}}</view>
 
     <button class="jc-btn submit-btn" bindtap="submit" loading="{{loading}}" disabled="{{loading}}">
-      {{mode === 'bind' ? '绑定并继续' : (mode === 'email' && emailMode === 'register') ? '注 册' : (mode === 'email' && emailMode === 'forgot') ? '重置密码' : '登 录'}}
+      {{mode === 'changePwd' ? '保存并继续' : (mode === 'email' && emailMode === 'register') ? '注 册' : (mode === 'email' && emailMode === 'forgot') ? '重置密码' : '登 录'}}
     </button>
 
-    <view class="logout-row" wx:if="{{mode === 'bind'}}">
+    <view class="logout-row" wx:if="{{mode === 'changePwd'}}">
       <text class="hint-link" bindtap="logout">退出登录</text>
     </view>
   </view>

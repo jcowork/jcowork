@@ -53,20 +53,20 @@ function handleUnauthorized() {
 }
 
 /**
- * 账号未绑定手机号：令牌仍然有效，但服务端只放行 /api/profile*。
- * 保留会话（绑定接口需要它），只打上标记并把用户送回登录页。
+ * 管理员仍在使用初始密码：令牌仍然有效，但服务端只放行 /api/profile*。
+ * 保留会话（改密接口需要它），只打上标记并把用户送回登录页。
  */
-function handlePhoneBindRequired() {
+function handlePasswordChangeRequired() {
   if (redirectingToLogin) return;
   redirectingToLogin = true;
   const app = getAppSafe();
   if (app) {
-    app.globalData.mustBindPhone = true;
+    app.globalData.mustChangePassword = true;
     try {
-      wx.setStorageSync(STORAGE_KEYS.mustBindPhone, true);
+      wx.setStorageSync(STORAGE_KEYS.mustChangePassword, true);
     } catch (e) {}
   }
-  wx.showToast({ title: '请先绑定手机号', icon: 'none' });
+  wx.showToast({ title: '请先修改管理员密码', icon: 'none' });
   setTimeout(() => {
     wx.reLaunch({
       url: '/pages/login/login',
@@ -113,7 +113,7 @@ function localizeAuthError(body) {
   if (raw.includes('Phone number is not registered')) return '该手机号未注册';
   if (raw.includes('Account has been deleted')) return '该账号已被删除，无法登录';
   if (raw.includes('Invalid username or password')) return '用户名或密码错误';
-  if (raw.includes('Bind a phone number to continue')) return '请先绑定手机号';
+  if (raw.includes('Change the admin password to continue')) return '请先修改管理员密码';
   if (raw.includes('already bound')) return '该手机号已被其他账号绑定';
   if (raw.includes('Username must be between') || raw.includes('Username cannot contain')) {
     return '显示名称需为 2-24 个字符，且不能包含空格与 @ / \\ 字符';
@@ -157,8 +157,8 @@ function request(path, opts = {}) {
           handleUnauthorized();
         }
         const body = res.data;
-        if (status === 403 && body && body.code === 'phone_bind_required') {
-          handlePhoneBindRequired();
+        if (status === 403 && body && body.code === 'password_change_required') {
+          handlePasswordChangeRequired();
           reject(new Error(localizeAuthError(body)));
           return;
         }
@@ -195,7 +195,7 @@ function sendSmsCode(serverUrl, phone) {
 
 /**
  * 短信验证码登录：POST /api/auth/sms/login
- * → { token, user_id, username, is_admin, must_bind_phone }
+ * → { token, user_id, username, is_admin, must_change_password }
  * 未注册的手机号验证通过后由服务端自动建号。
  */
 function smsLogin(serverUrl, phone, code) {
@@ -209,8 +209,9 @@ function smsLogin(serverUrl, phone, code) {
 }
 
 /**
- * 管理员引导登录：POST /api/auth/login → 同 smsLogin 的响应结构。
- * 仅供 admin 首次进入并绑定手机号；绑定后该账号的密码登录永久关闭。
+ * 管理员密码登录：POST /api/auth/login → 同 smsLogin 的响应结构。
+ * 管理员长期使用密码登录；首次登录会带上 must_change_password=true，
+ * 要求先设置新密码再进入应用。
  */
 function adminLogin(serverUrl, username, password) {
   return request('/api/auth/login', {
@@ -271,14 +272,14 @@ function resetPassword(serverUrl, email, code, newPassword) {
 
 // ─── 账号资料 ────────────────────────────────────────────
 
-/** 当前账号资料：GET /api/profile → { username, phone_masked, phone_bound, email_masked, email_bound, is_admin } */
+/** 当前账号资料：GET /api/profile → { username, phone_masked, phone_bound, email_masked, email_bound, is_admin, must_change_password } */
 function fetchProfile() {
   return request('/api/profile');
 }
 
-/** 绑定手机号：POST /api/profile/phone → 同 fetchProfile */
-function bindPhone(phone, code) {
-  return request('/api/profile/phone', { method: 'POST', data: { phone, code } });
+/** 管理员修改密码（解除初始密码门禁）：POST /api/profile/password → 同 fetchProfile */
+function changePassword(newPassword) {
+  return request('/api/profile/password', { method: 'POST', data: { new_password: newPassword } });
 }
 
 // ─── 其他 ────────────────────────────────────────────────
@@ -298,7 +299,7 @@ module.exports = {
   emailLogin,
   resetPassword,
   fetchProfile,
-  bindPhone,
+  changePassword,
   fetchProviders,
   currentServerUrl,
   currentToken,

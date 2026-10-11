@@ -40,6 +40,11 @@ pub struct User {
     /// moved to trash. Trashed accounts cannot log in and are invisible to
     /// other users; they are purged permanently 7 days after deletion.
     pub deleted_at: Option<String>,
+    /// When the password was last set through the self-service update path
+    /// (admin change-password or email reset). `None` = never — for the
+    /// admin that means the bootstrap password is still in force and the
+    /// account is locked to the change-password screen.
+    pub password_changed_at: Option<String>,
 }
 
 /// Manages the global user accounts database.
@@ -160,6 +165,15 @@ impl UserStore {
         .execute(&pool)
         .await; // Ignore error if index already exists
 
+        // Add password_changed_at column if it doesn't exist (migration for
+        // existing DBs). NULL = the account never set its own password; the
+        // admin bootstrap gate keys on this.
+        let _ = sqlx::query(
+            "ALTER TABLE users ADD COLUMN password_changed_at TEXT",
+        )
+        .execute(&pool)
+        .await; // Ignore error if column already exists
+
         Ok(Self { pool })
     }
 
@@ -195,13 +209,14 @@ impl UserStore {
             is_public,
             is_admin: false,
             deleted_at: None,
+            password_changed_at: None,
         })
     }
 
     /// Look up a user by username.
     pub async fn get_user_by_username(&self, username: &str) -> Result<Option<User>> {
         let user = sqlx::query_as::<_, User>(
-            "SELECT id, username, password_hash, feishu_open_id, phone, email, created_at, is_public, is_admin, deleted_at FROM users WHERE username = ?",
+            "SELECT id, username, password_hash, feishu_open_id, phone, email, created_at, is_public, is_admin, deleted_at, password_changed_at FROM users WHERE username = ?",
         )
         .bind(username)
         .fetch_optional(&self.pool)
@@ -213,7 +228,7 @@ impl UserStore {
     /// Look up a user by ID.
     pub async fn get_user_by_id(&self, user_id: &str) -> Result<Option<User>> {
         let user = sqlx::query_as::<_, User>(
-            "SELECT id, username, password_hash, feishu_open_id, phone, email, created_at, is_public, is_admin, deleted_at FROM users WHERE id = ?",
+            "SELECT id, username, password_hash, feishu_open_id, phone, email, created_at, is_public, is_admin, deleted_at, password_changed_at FROM users WHERE id = ?",
         )
         .bind(user_id)
         .fetch_optional(&self.pool)
@@ -228,7 +243,7 @@ impl UserStore {
     /// Callers must only expose safe fields (never `password_hash`).
     pub async fn list_public_users(&self) -> Result<Vec<User>> {
         let users = sqlx::query_as::<_, User>(
-            "SELECT id, username, password_hash, feishu_open_id, phone, email, created_at, is_public, is_admin, deleted_at FROM users WHERE is_public = 1 AND deleted_at IS NULL ORDER BY username",
+            "SELECT id, username, password_hash, feishu_open_id, phone, email, created_at, is_public, is_admin, deleted_at, password_changed_at FROM users WHERE is_public = 1 AND deleted_at IS NULL ORDER BY username",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -236,13 +251,17 @@ impl UserStore {
         Ok(users)
     }
 
-    /// Update a user's password hash.
+    /// Update a user's password hash. Also stamps `password_changed_at`,
+    /// which lifts the admin bootstrap gate ("must change the bootstrap
+    /// password") on the next request.
     pub async fn update_password_hash(&self, user_id: &str, new_hash: &str) -> Result<()> {
-        let result = sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
-            .bind(new_hash)
-            .bind(user_id)
-            .execute(&self.pool)
-            .await?;
+        let result = sqlx::query(
+            "UPDATE users SET password_hash = ?, password_changed_at = datetime('now') WHERE id = ?",
+        )
+        .bind(new_hash)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
 
         if result.rows_affected() == 0 {
             anyhow::bail!("User not found");
@@ -271,7 +290,7 @@ impl UserStore {
     /// Look up a user by Feishu open_id.
     pub async fn get_user_by_feishu_open_id(&self, open_id: &str) -> Result<Option<User>> {
         let user = sqlx::query_as::<_, User>(
-            "SELECT id, username, password_hash, feishu_open_id, phone, email, created_at, is_public, is_admin, deleted_at FROM users WHERE feishu_open_id = ?",
+            "SELECT id, username, password_hash, feishu_open_id, phone, email, created_at, is_public, is_admin, deleted_at, password_changed_at FROM users WHERE feishu_open_id = ?",
         )
         .bind(open_id)
         .fetch_optional(&self.pool)
@@ -316,6 +335,7 @@ impl UserStore {
             is_public: false,
             is_admin: false,
             deleted_at: None,
+            password_changed_at: None,
         })
     }
 
@@ -330,7 +350,7 @@ impl UserStore {
     /// deleted.
     pub async fn get_user_by_phone(&self, phone: &str) -> Result<Option<User>> {
         let user = sqlx::query_as::<_, User>(
-            "SELECT id, username, password_hash, feishu_open_id, phone, email, created_at, is_public, is_admin, deleted_at FROM users WHERE phone = ?",
+            "SELECT id, username, password_hash, feishu_open_id, phone, email, created_at, is_public, is_admin, deleted_at, password_changed_at FROM users WHERE phone = ?",
         )
         .bind(phone)
         .fetch_optional(&self.pool)
@@ -384,6 +404,7 @@ impl UserStore {
                         is_public: false,
                         is_admin: false,
                         deleted_at: None,
+                        password_changed_at: None,
                     });
                 }
                 Err(e) if e.to_string().contains("UNIQUE constraint") => {
@@ -443,7 +464,7 @@ impl UserStore {
     /// themselves and report the account as deleted.
     pub async fn get_user_by_email(&self, email: &str) -> Result<Option<User>> {
         let user = sqlx::query_as::<_, User>(
-            "SELECT id, username, password_hash, feishu_open_id, phone, email, created_at, is_public, is_admin, deleted_at FROM users WHERE email = ?",
+            "SELECT id, username, password_hash, feishu_open_id, phone, email, created_at, is_public, is_admin, deleted_at, password_changed_at FROM users WHERE email = ?",
         )
         .bind(email)
         .fetch_optional(&self.pool)
@@ -492,6 +513,7 @@ impl UserStore {
                         is_public: false,
                         is_admin: false,
                         deleted_at: None,
+                        password_changed_at: None,
                     });
                 }
                 // A concurrent registration or trashed account holding the
@@ -555,7 +577,7 @@ impl UserStore {
         };
         let search = query.map(|q| format!("%{}%", q.trim().to_lowercase()));
         let sql = format!(
-            "SELECT id, username, password_hash, feishu_open_id, phone, email, created_at, is_public, is_admin, deleted_at \
+            "SELECT id, username, password_hash, feishu_open_id, phone, email, created_at, is_public, is_admin, deleted_at, password_changed_at \
              FROM users WHERE 1=1{}{} ORDER BY created_at DESC",
             status_clause,
             if search.is_some() {

@@ -128,15 +128,37 @@ pub fn normalize_email(raw: &str) -> Option<String> {
     Some(lowered)
 }
 
+/// Shortest and longest accepted password, in characters.
+pub(crate) const PASSWORD_MIN_CHARS: usize = 8;
+pub(crate) const PASSWORD_MAX_CHARS: usize = 128;
+
+/// Password policy shared by email registration/reset and the admin
+/// change-password endpoint. Returns the response message when the password
+/// is unacceptable.
+pub(crate) fn password_error(password: &str) -> Option<&'static str> {
+    let chars = password.chars().count();
+    if chars < PASSWORD_MIN_CHARS {
+        return Some("Password must be at least 8 characters");
+    }
+    if chars > PASSWORD_MAX_CHARS {
+        return Some("Password must be at most 128 characters");
+    }
+    // A string of spaces satisfies the length check but is not a password.
+    if password.trim().is_empty() {
+        return Some("Password cannot be only whitespace");
+    }
+    None
+}
+
 /// Default super-user username (created/promoted on startup).
 pub const DEFAULT_ADMIN_USERNAME: &str = "admin";
 /// Password the seeded admin account is created with.
 ///
-/// This is a published constant, so it is only ever a one-time bootstrap door:
-/// password login is refused the moment the account has a phone number, and
-/// binding overwrites the hash with an unparseable sentinel. Set
-/// `JCWORK_ADMIN_BOOTSTRAP_PASSWORD` to close the window even before the first
-/// login, or `JCWORK_ADMIN_PHONE` to skip the password entirely.
+/// This is a published constant, so the account is locked to the
+/// change-password screen until the bootstrap password is replaced on first
+/// login. Set `JCWORK_ADMIN_BOOTSTRAP_PASSWORD` to avoid the published
+/// default; `JCWORK_ADMIN_PHONE` additionally binds a phone number at
+/// startup (SMS login alongside the password — it does not disable either).
 pub const DEFAULT_ADMIN_PASSWORD: &str = "admin123";
 
 /// `JCWORK_ADMIN_PHONE` value that unbinds the admin's number instead of
@@ -167,7 +189,7 @@ pub async fn ensure_default_admin(user_store: &jcowork_storage::UserStore) -> Re
         tracing::info!(
             username = DEFAULT_ADMIN_USERNAME,
             used_custom_password = bootstrap_password.is_some(),
-            "Seeded default admin account — bind a phone number on first login to close password access"
+            "Seeded default admin account — set a new admin password on first login"
         );
     } else {
         tracing::info!(
@@ -181,11 +203,12 @@ pub async fn ensure_default_admin(user_store: &jcowork_storage::UserStore) -> Re
     let Some(admin) = user_store.get_user_by_username(DEFAULT_ADMIN_USERNAME).await? else {
         return Ok(());
     };
-    if admin.phone.is_none() {
+    if admin.password_changed_at.is_none() {
         tracing::warn!(
             username = DEFAULT_ADMIN_USERNAME,
-            "Admin has no phone number bound, so password login is still open for it. \
-             Log in once and bind a phone, or set JCWORK_ADMIN_PHONE to bind it at startup."
+            "Admin still uses the bootstrap password; the first login will require \
+             setting a new one. Set JCWORK_ADMIN_BOOTSTRAP_PASSWORD to avoid the \
+             published default."
         );
     }
     Ok(())
@@ -194,8 +217,8 @@ pub async fn ensure_default_admin(user_store: &jcowork_storage::UserStore) -> Re
 /// Bind, rebind, or clear the admin's phone number from `JCWORK_ADMIN_PHONE`.
 ///
 /// A misconfigured number logs an error and lets startup continue rather than
-/// aborting: the password bootstrap door is still open, so refusing to boot
-/// would turn a typo into an unrecoverable lockout.
+/// aborting: the bootstrap password still forces a change on first login, so
+/// refusing to boot would turn a typo into an unrecoverable lockout.
 async fn apply_admin_phone(user_store: &jcowork_storage::UserStore) -> Result<()> {
     let raw = match std::env::var("JCWORK_ADMIN_PHONE") {
         Ok(v) => v.trim().to_string(),
@@ -214,7 +237,7 @@ async fn apply_admin_phone(user_store: &jcowork_storage::UserStore) -> Result<()
             user_store.clear_user_phone(&admin.id).await?;
             tracing::warn!(
                 username = DEFAULT_ADMIN_USERNAME,
-                "JCWORK_ADMIN_PHONE=clear: admin phone unbound, password bootstrap is open again"
+                "JCWORK_ADMIN_PHONE=clear: admin phone unbound"
             );
         }
         return Ok(());
@@ -242,17 +265,10 @@ async fn apply_admin_phone(user_store: &jcowork_storage::UserStore) -> Result<()
         }
     }
 
-    // Same sentinel the self-service bind stamps, so the database never holds a
-    // verifiable password for an account that has a phone number.
-    if let Err(e) = user_store
-        .update_password_hash(&admin.id, &jcowork_storage::sms_only_password_hash())
-        .await
-    {
-        tracing::error!(error = %e, "Failed to close admin password login after binding phone");
-    }
     tracing::info!(
         username = DEFAULT_ADMIN_USERNAME,
-        "Admin phone bound from JCWORK_ADMIN_PHONE; password login disabled for this account"
+        "Admin phone bound from JCWORK_ADMIN_PHONE; SMS login is available alongside \
+         the password (which still must be changed on first login)"
     );
     Ok(())
 }
@@ -305,6 +321,23 @@ mod tests {
     }
 
     #[test]
+    fn password_error_rejects_short_whitespace_and_huge() {
+        assert_eq!(
+            password_error("short"),
+            Some("Password must be at least 8 characters")
+        );
+        assert_eq!(
+            password_error("        "),
+            Some("Password cannot be only whitespace")
+        );
+        assert_eq!(
+            password_error(&"x".repeat(129)),
+            Some("Password must be at most 128 characters")
+        );
+        assert_eq!(password_error("a-reasonable-password"), None);
+    }
+
+    #[test]
     fn normalize_email_lowercases_and_trims() {
         assert_eq!(
             normalize_email("  Alice@Example.COM ").as_deref(),
@@ -337,5 +370,52 @@ mod tests {
         // Non-ASCII and oversized input.
         assert_eq!(normalize_email("小美@example.com"), None);
         assert_eq!(normalize_email(&format!("{}@example.com", "a".repeat(250))), None);
+    }
+
+    /// One test covers every `JCWORK_ADMIN_PHONE` permutation on purpose:
+    /// `std::env::set_var` is process-global, so parallel tests would observe
+    /// each other's values (same reasoning as the merged SMS/mail env cases).
+    #[tokio::test]
+    async fn admin_phone_env_binds_without_retiring_the_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            jcowork_storage::UserStore::new(dir.path().to_str().unwrap()).await.unwrap();
+
+        // Startup with the variable set binds the number and leaves the
+        // bootstrap password alone — binding adds SMS login, it no longer
+        // stamps the SMS-only sentinel over the hash.
+        unsafe { std::env::set_var("JCWORK_ADMIN_PHONE", "138 0013 8123"); }
+        ensure_default_admin(&store).await.unwrap();
+        unsafe { std::env::remove_var("JCWORK_ADMIN_PHONE"); }
+
+        let admin = store.get_user_by_username(DEFAULT_ADMIN_USERNAME).await.unwrap().unwrap();
+        assert_eq!(admin.phone.as_deref(), Some("13800138123"));
+        assert!(admin.password_changed_at.is_none());
+        assert!(
+            verify_password(DEFAULT_ADMIN_PASSWORD, &admin.password_hash).unwrap(),
+            "binding a phone must keep the bootstrap password verifiable"
+        );
+
+        // A second startup with the same number is a no-op, and `clear`
+        // unbinds it again.
+        unsafe { std::env::set_var("JCWORK_ADMIN_PHONE", "13800138123"); }
+        ensure_default_admin(&store).await.unwrap();
+        unsafe { std::env::set_var("JCWORK_ADMIN_PHONE", "clear"); }
+        ensure_default_admin(&store).await.unwrap();
+        unsafe { std::env::remove_var("JCWORK_ADMIN_PHONE"); }
+
+        let admin = store.get_user_by_username(DEFAULT_ADMIN_USERNAME).await.unwrap().unwrap();
+        assert!(admin.phone.is_none(), "JCWORK_ADMIN_PHONE=clear must unbind the number");
+        assert!(
+            verify_password(DEFAULT_ADMIN_PASSWORD, &admin.password_hash).unwrap(),
+            "unbinding must not disturb the password either"
+        );
+
+        // An invalid number is ignored rather than aborting startup.
+        unsafe { std::env::set_var("JCWORK_ADMIN_PHONE", "not-a-number"); }
+        ensure_default_admin(&store).await.unwrap();
+        unsafe { std::env::remove_var("JCWORK_ADMIN_PHONE"); }
+        let admin = store.get_user_by_username(DEFAULT_ADMIN_USERNAME).await.unwrap().unwrap();
+        assert!(admin.phone.is_none());
     }
 }

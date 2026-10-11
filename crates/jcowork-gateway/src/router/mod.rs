@@ -267,6 +267,11 @@ pub struct ChangeUsernameRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ChangePasswordRequest {
+    pub new_password: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ChatRequest {
     pub message: String,
     pub session_id: Option<String>,
@@ -400,6 +405,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/agent-identity", put(memory::set_agent_identity))
         .route("/api/profile", get(profile::get_profile))
         .route("/api/profile/phone", post(profile::bind_phone))
+        .route("/api/profile/password", post(profile::change_password))
         .route("/api/profile/username", put(profile::change_username))
         .route("/api/feishu/config", get(feishu::get_feishu_config))
         .route("/api/feishu/config", put(feishu::set_feishu_config))
@@ -523,11 +529,11 @@ async fn serve_index_no_cache(path: String) -> impl IntoResponse {
     )
 }
 
-/// Endpoints an account with no bound phone number may still call.
+/// Endpoints an admin still using the bootstrap password may call.
 ///
 /// Exact matches on purpose: a prefix rule would also open anything mounted
-/// underneath, and the binding screen needs precisely these two.
-const PHONE_BIND_ALLOWLIST: &[&str] = &["/api/profile", "/api/profile/phone"];
+/// underneath, and the change-password screen needs precisely these two.
+const BOOTSTRAP_ALLOWLIST: &[&str] = &["/api/profile", "/api/profile/password"];
 
 /// JWT authentication middleware.
 /// Extracts user_id from the Bearer token and inserts it into request extensions.
@@ -569,22 +575,23 @@ async fn auth_middleware(
             // rejected immediately, even with a still-valid JWT.
             match state.user_store.get_user_by_id(&claims.sub).await {
                 Ok(Some(user)) if user.deleted_at.is_none() => {
-                    // Forced binding: an account with neither a phone number
-                    // nor an email address may only read its profile and submit
-                    // the binding. Everything else is refused, so a bootstrap
-                    // token cannot be used to keep working instead of binding
-                    // — which is the whole point of forcing it. (Email-registered
-                    // accounts carry their address from birth, so in practice
-                    // only the admin bootstrap account can land here.)
-                    if user.phone.is_none()
-                        && user.email.is_none()
-                        && !PHONE_BIND_ALLOWLIST.contains(&req.uri().path())
+                    // Forced password change: while the admin account still
+                    // runs on the bootstrap password it may only read its
+                    // profile and set a new one. Everything else is refused,
+                    // so a bootstrap token cannot be used to keep working
+                    // instead of changing the password. Only the admin can
+                    // land here — every other account gets its credentials
+                    // from SMS or email registration, which have no bootstrap
+                    // default to rotate.
+                    if user.is_admin
+                        && user.password_changed_at.is_none()
+                        && !BOOTSTRAP_ALLOWLIST.contains(&req.uri().path())
                     {
                         return (
                             StatusCode::FORBIDDEN,
                             Json(serde_json::json!({
-                                "error": "Bind a phone number to continue",
-                                "code": "phone_bind_required",
+                                "error": "Change the admin password to continue",
+                                "code": "password_change_required",
                             })),
                         ).into_response();
                     }

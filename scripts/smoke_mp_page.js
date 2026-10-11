@@ -81,10 +81,10 @@ global.wx = {
 };
 
 const appMock = {
-  globalData: { serverUrl: BASE, token: '', userId: '', username: '', mustBindPhone: false },
-  isLoggedIn() { return !!(this.globalData.token && !this.globalData.mustBindPhone); },
-  clearSession() { this.globalData.token = ''; this.globalData.mustBindPhone = false; },
-  markPhoneBound() { this.globalData.mustBindPhone = false; },
+  globalData: { serverUrl: BASE, token: '', userId: '', username: '', mustChangePassword: false },
+  isLoggedIn() { return !!(this.globalData.token && !this.globalData.mustChangePassword); },
+  clearSession() { this.globalData.token = ''; this.globalData.mustChangePassword = false; },
+  markPasswordChanged() { this.globalData.mustChangePassword = false; },
 };
 global.getApp = () => appMock;
 
@@ -145,7 +145,7 @@ async function main() {
   const profile = await profileRes.json().catch(() => ({}));
   if (profileRes.status !== 200) {
     console.error('令牌不可用（HTTP ' + profileRes.status + '）:', profile);
-    console.error('若为 403 phone_bind_required，说明该账号还没绑定手机号，请先在登录页完成绑定');
+    console.error('若为 403 password_change_required，说明该管理员还在用初始密码，请先完成改密');
     process.exit(1);
   }
   appMock.globalData.token = TOKEN;

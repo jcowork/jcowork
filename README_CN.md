@@ -712,8 +712,8 @@ server {
 | `JCWORK_SMTP_FROM` | （空） | 验证码邮件的发件地址 |
 | `JCWORK_MAIL_DAILY_GLOBAL_CAP` | `500` | 全进程每个 UTC 日的邮件发送上限，与短信上限相互独立 |
 | `JCWORK_MAIL_ALLOW_REGISTER` | `true` | 设为 `false` 关闭邮箱注册；已有邮箱账号仍可正常登录 |
-| `JCWORK_ADMIN_PHONE` | （空） | 启动时绑定 admin 手机号，在首次登录前就关闭默认密码入口；填 `clear` 表示解绑 |
-| `JCWORK_ADMIN_BOOTSTRAP_PASSWORD` | （空） | 初始 admin 密码，仅在首次创建该账号时生效 |
+| `JCWORK_ADMIN_PHONE` | （空） | 启动时为 admin 绑定手机号，使其可同时用短信登录；填 `clear` 表示解绑 |
+| `JCWORK_ADMIN_BOOTSTRAP_PASSWORD` | （空） | admin 初始密码，首次登录会被要求更换；仅在首次创建该账号时生效 |
 | `JCWORK_DEFAULT_MODEL` | `moonshot:kimi-k2.6` | 默认 LLM 模型（`provider:model` 格式） |
 | `DEEPSEEK_API_KEY` | （空） | DeepSeek API Key |
 | `QWEN_API_KEY` | （空） | 通义千问 API Key |
@@ -920,22 +920,24 @@ python app.py
 
 **管理员引导登录。** `admin` 账号带有公开的初始密码（`admin123`，首次创建时可用
 `JCWORK_ADMIN_BOOTSTRAP_PASSWORD` 覆盖），否则全新实例无从进入。`POST /api/auth/login`
-只在该账号尚未绑定手机号时接受这个密码；引导登录成功会返回 `must_bind_phone: true`，
-前端随即展示一个无法跳过的绑定页面，绑定成功后密码哈希被替换为不可解析的哨兵值。
-此后该账号只能用验证码登录，`/api/auth/login` 对它一律返回 401。
-更推荐直接配置 `JCWORK_ADMIN_PHONE`：服务启动时就把手机号绑定好，
-默认密码从头到尾都不会被接受，也就不必依赖首次登录的绑定页面。
-注意：绑定之前签发的引导令牌在自然过期前（默认 24 小时）仍然有效，
+只对管理员开放 —— 其他账号即便持有正确密码也会被拒，且响应与密码错误完全一致。
+引导登录成功会返回 `must_change_password: true`，前端随即展示一个无法跳过的改密页面，
+新密码自此成为该账号的长期登录方式（绑定手机号不再使密码登录失效）。
+可选配置 `JCWORK_ADMIN_PHONE`：服务启动时就把手机号绑定好，短信登录与密码登录并行可用，
+它不会关闭任何登录方式。注意：改密之前签发的引导令牌在自然过期前（默认 24 小时）仍然有效，
 因为库里没有可用于吊销的令牌版本字段。
 
-**未绑定手机号时的锁定。** 处于 `must_bind_phone` 状态时，除 `/api/profile` 与
-`/api/profile/phone` 之外的所有接口都返回 `403 {"code":"phone_bind_required"}`。
+**初始密码未改时的锁定。** 处于 `must_change_password` 状态时，除 `/api/profile` 与
+`/api/profile/password` 之外的所有接口都返回 `403 {"code":"password_change_required"}`。
 
-**存量账号。** 本次改造之前创建的账号都没有手机号，因此无法登录，数据未做迁移。
-管理员需要在「用户管理」中为其分配手机号（`POST /api/admin/users/{id}/phone`），
-或将其删除。仍持有这类账号令牌的 Web 客户端会在加载时自动发现：`/api/profile` 探测
-返回 `phone_bound: false`，于是把用户送进绑定页面而不是撞一屏 403 ——
-换句话说，绑定手机号本身就是存量账号的迁移路径。
+**升级前的老管理员。** 强制绑定手机号时代的部署里，admin 的密码哈希已被替换为不可解析的
+哨兵值。无需数据迁移：密码登录对其直接失败，下次短信验证码登录会返回
+`must_change_password: true`，强制设置一次密码后，密码登录即永久恢复。
+
+**存量账号。** 短信时代之前创建的账号既没有手机号也没有邮箱，无法登录（密码登录仅对
+管理员开放），数据未做迁移。管理员需要在「用户管理」中为其分配手机号
+（`POST /api/admin/users/{id}/phone`），或将其删除。这类账号若还持有升级前的旧令牌，
+令牌仍然可用 —— 联系方式门禁已随本次改造移除。
 
 **公开账号。** 把自己的账号设为公开，原先是注册表单上的一个勾选项。注册表单已经移除，
 因此 `is_public` 现在只能由管理员修改（`POST /api/admin/users/{id}/public`）。
@@ -956,9 +958,10 @@ python app.py
 | POST | `/api/auth/email/register` | 邮箱 + 密码注册 |
 | POST | `/api/auth/email/login` | 邮箱 + 密码登录 |
 | POST | `/api/auth/password/reset` | 凭邮件验证码重置密码 |
-| POST | `/api/auth/login` | 仅管理员引导登录，绑定手机号后永久失效 |
-| GET | `/api/profile` | 自己的用户名、掩码手机号/邮箱、`phone_bound`、`email_bound`、`is_admin` |
+| POST | `/api/auth/login` | 仅管理员的密码登录；初始密码更换前会返回 `must_change_password` |
+| GET | `/api/profile` | 自己的用户名、掩码手机号/邮箱、`phone_bound`、`email_bound`、`is_admin`、`must_change_password` |
 | POST | `/api/profile/phone` | 用验证码绑定或更换自己的手机号 |
+| POST | `/api/profile/password` | 设置自己的新密码（管理员引导门禁） |
 | PUT | `/api/profile/username` | 修改自己的显示名称 |
 | POST | `/api/admin/users/{id}/phone` | 管理员为用户分配手机号 |
 | DELETE | `/api/admin/users/{id}/phone` | 管理员解除用户手机号 |

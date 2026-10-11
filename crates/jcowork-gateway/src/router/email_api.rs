@@ -21,27 +21,7 @@ use super::{
 };
 use crate::auth;
 use crate::auth::normalize_email;
-
-/// Shortest and longest accepted password, in characters.
-const PASSWORD_MIN_CHARS: usize = 8;
-const PASSWORD_MAX_CHARS: usize = 128;
-
-/// Password policy shared by registration and reset. Returns the response
-/// message when the password is unacceptable.
-fn password_error(password: &str) -> Option<&'static str> {
-    let chars = password.chars().count();
-    if chars < PASSWORD_MIN_CHARS {
-        return Some("Password must be at least 8 characters");
-    }
-    if chars > PASSWORD_MAX_CHARS {
-        return Some("Password must be at most 128 characters");
-    }
-    // A string of spaces satisfies the length check but is not a password.
-    if password.trim().is_empty() {
-        return Some("Password cannot be only whitespace");
-    }
-    None
-}
+use crate::auth::password_error;
 
 /// Send a verification code to an email address.
 ///
@@ -179,9 +159,9 @@ pub(crate) async fn email_register(
             "user_id": user.id,
             "username": user.username,
             "is_admin": user.is_admin,
-            // The account carries its email from birth, so the forced-binding
-            // gate in the middleware never applies to it.
-            "must_bind_phone": false,
+            // The account carries its email from birth, so the admin
+            // bootstrap gate in the middleware never applies to it.
+            "must_change_password": false,
         })),
     )
 }
@@ -249,9 +229,9 @@ pub(crate) async fn email_login(
             "user_id": user.id,
             "username": user.username,
             "is_admin": user.is_admin,
-            // Mirrors the middleware gate: an account with a bound email is
-            // never asked to bind a phone as well.
-            "must_bind_phone": user.phone.is_none() && user.email.is_none(),
+            // Only the admin has a bootstrap-password gate; email accounts
+            // set their own password at registration.
+            "must_change_password": user.is_admin && user.password_changed_at.is_none(),
         })),
     )
 }
