@@ -234,21 +234,25 @@ Page({
   /** 邮箱模式提交：登录 / 注册 / 找回密码 */
   async submitEmail(serverUrl) {
     const emailMode = this.data.emailMode;
+    const username = String(this.data.username || '').trim();
     const email = String(this.data.email || '').trim();
     const code = String(this.data.code || '').trim();
     const password = String(this.data.password || '');
     const confirmPassword = String(this.data.confirmPassword || '');
 
-    if (!email) return this.setError('请输入邮箱地址');
     if (emailMode === 'login') {
+      if (!username) return this.setError('请输入用户名');
       if (!password) return this.setError('请输入密码');
     } else if (emailMode === 'forgot') {
+      if (!email) return this.setError('请输入邮箱地址');
       if (!code) return this.setError('请输入验证码');
       if (!password) return this.setError('请输入新密码');
       if (password.length < 8) return this.setError('密码至少 8 位');
       if (password !== confirmPassword) return this.setError('两次输入的密码不一致');
     } else {
-      // 注册：图形验证码（不消耗邮件额度），不要求邮件验证码
+      // 注册：用户名 + 绑定邮箱 + 图形验证码（不消耗邮件额度）
+      if (!username) return this.setError('请输入用户名');
+      if (!email) return this.setError('请输入邮箱地址');
       if (!this.data.captchaId) {
         this.refreshCaptcha();
         return this.setError('图形验证码未就绪，请稍候或点击图片刷新');
@@ -272,9 +276,10 @@ Page({
       }
       const data =
         emailMode === 'login'
-          ? await api.emailLogin(serverUrl, email, password)
+          ? await api.emailLogin(serverUrl, username, password)
           : await api.emailRegister(
               serverUrl,
+              username,
               email,
               password,
               this.data.captchaId,
@@ -287,7 +292,7 @@ Page({
         serverUrl,
         token: data.token,
         userId: data.user_id,
-        username: data.username || email,
+        username: data.username || username,
         mustChangePassword: !!data.must_change_password,
       });
       this.setData({ password: '', confirmPassword: '', code: '', captchaCode: '' });

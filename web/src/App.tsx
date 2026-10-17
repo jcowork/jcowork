@@ -144,7 +144,7 @@ function AppInner() {
   // Which of the three email screens is showing.
   const [emailMode, setEmailMode] = useState<'login' | 'register' | 'forgot'>('login');
   const [smsForm, setSmsForm] = useState({ phone: '', code: '' });
-  const [emailForm, setEmailForm] = useState({ email: '', code: '', password: '', confirmPassword: '' });
+  const [emailForm, setEmailForm] = useState({ username: '', email: '', code: '', password: '', confirmPassword: '' });
   const [adminForm, setAdminForm] = useState({ username: '', password: '' });
   const [authBusy, setAuthBusy] = useState(false);
   const [sendingCode, setSendingCode] = useState(false);
@@ -381,7 +381,7 @@ function AppInner() {
     setActiveAccount(authState.userId);
     setAddingAccount(false);
     setSmsForm({ phone: '', code: '' });
-    setEmailForm({ email: '', code: '', password: '', confirmPassword: '' });
+    setEmailForm({ username: '', email: '', code: '', password: '', confirmPassword: '' });
     setEmailMode('login');
     setAdminForm({ username: '', password: '' });
     setAuthSuccess('');
@@ -478,7 +478,7 @@ function AppInner() {
     setAuthBusy(true);
     try {
       const { ok, data } = await postJson('/api/auth/email/login', {
-        email: emailForm.email.trim(),
+        username: emailForm.username.trim(),
         password: emailForm.password,
       });
       finishAuth(ok, data, setAuthError);
@@ -539,6 +539,7 @@ function AppInner() {
     setAuthBusy(true);
     try {
       const { ok, data } = await postJson('/api/auth/email/register', {
+        username: emailForm.username.trim(),
         email: emailForm.email.trim(),
         password: emailForm.password,
         captcha_id: captcha.id,
@@ -762,7 +763,7 @@ function AppInner() {
     setAuthError('');
     setAuthSuccess('');
     setSmsForm({ phone: '', code: '' });
-    setEmailForm({ email: '', code: '', password: '', confirmPassword: '' });
+    setEmailForm({ username: '', email: '', code: '', password: '', confirmPassword: '' });
     setAdminForm({ username: '', password: '' });
   }, []);
 
@@ -926,11 +927,11 @@ function AppInner() {
                   <AuthBanner msg={authError} type="error" />
                   <AuthBanner msg={authSuccess} type="success" />
                   <input
-                    type="email"
-                    autoComplete="email"
-                    placeholder={t('emailAddress')}
-                    value={emailForm.email}
-                    onChange={(e) => { setEmailForm({ ...emailForm, email: e.target.value }); setAuthError(''); setAuthSuccess(''); }}
+                    type="text"
+                    autoComplete="username"
+                    placeholder={t('username')}
+                    value={emailForm.username}
+                    onChange={(e) => { setEmailForm({ ...emailForm, username: e.target.value }); setAuthError(''); setAuthSuccess(''); }}
                     style={authInputStyle}
                     autoFocus
                   />
@@ -957,7 +958,16 @@ function AppInner() {
                 <form onSubmit={handleEmailRegister}>
                   <AuthBanner msg={authError} type="error" />
                   <input
+                    type="text"
+                    autoComplete="username"
+                    placeholder={t('username')}
+                    value={emailForm.username}
+                    onChange={(e) => { setEmailForm({ ...emailForm, username: e.target.value }); setAuthError(''); }}
+                    style={authInputStyle}
+                  />
+                  <input
                     type="email"
+                    autoComplete="email"
                     placeholder={t('emailAddress')}
                     value={emailForm.email}
                     onChange={(e) => { setEmailForm({ ...emailForm, email: e.target.value }); setAuthError(''); }}

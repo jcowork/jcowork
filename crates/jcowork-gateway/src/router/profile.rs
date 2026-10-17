@@ -17,6 +17,29 @@ use crate::auth::{self, normalize_phone, password_error};
 const USERNAME_MIN_CHARS: usize = 2;
 const USERNAME_MAX_CHARS: usize = 24;
 
+/// Shared username rules for registration and the self-service rename.
+///
+/// Returns the error message when `name` is unacceptable: the length window
+/// above, and no whitespace, control characters, `@`, `/` or `\` — the name is
+/// typed into `@`-mentions and rendered into markdown, so the characters that
+/// would break either are rejected outright.
+pub(crate) fn validate_username(name: &str) -> Option<String> {
+    let chars = name.chars().count();
+    if !(USERNAME_MIN_CHARS..=USERNAME_MAX_CHARS).contains(&chars) {
+        return Some(format!(
+            "Username must be between {} and {} characters",
+            USERNAME_MIN_CHARS, USERNAME_MAX_CHARS
+        ));
+    }
+    if name
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '@' | '/' | '\\'))
+    {
+        return Some("Username cannot contain spaces, @, / or control characters".to_string());
+    }
+    None
+}
+
 pub(crate) async fn get_profile(
     State(state): State<AppState>,
     axum::Extension(auth_user): axum::Extension<AuthUser>,
@@ -155,27 +178,10 @@ pub(crate) async fn change_username(
 ) -> impl IntoResponse {
     let name = req.username.trim();
 
-    let chars = name.chars().count();
-    if !(USERNAME_MIN_CHARS..=USERNAME_MAX_CHARS).contains(&chars) {
+    if let Some(msg) = validate_username(name) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": format!(
-                    "Username must be between {} and {} characters",
-                    USERNAME_MIN_CHARS, USERNAME_MAX_CHARS
-                ),
-            })),
-        );
-    }
-
-    // The name is typed into `@`-mentions and rendered into markdown, so the
-    // characters that would break either are rejected outright.
-    if name.chars().any(|c| c.is_whitespace() || c.is_control() || matches!(c, '@' | '/' | '\\')) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "Username cannot contain spaces, @, / or control characters",
-            })),
+            Json(serde_json::json!({"error": msg})),
         );
     }
 

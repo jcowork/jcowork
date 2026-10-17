@@ -250,23 +250,23 @@ function sendEmailCode(serverUrl, email) {
 /**
  * 邮箱注册：POST /api/auth/email/register → 同 smsLogin 的响应结构，外加
  * email_sent（账号密码邮件是否送达）。图形验证码门槛，不再要求邮件验证码；
- * 注册本身即登录。
+ * 注册本身即登录。username 为用户名，email 绑定邮箱用于找回密码。
  */
-function emailRegister(serverUrl, email, password, captchaId, captchaCode) {
+function emailRegister(serverUrl, username, email, password, captchaId, captchaCode) {
   return request('/api/auth/email/register', {
     method: 'POST',
-    data: { email, password, captcha_id: captchaId, captcha_code: captchaCode },
+    data: { username, email, password, captcha_id: captchaId, captcha_code: captchaCode },
     auth: false,
     baseUrl: serverUrl,
     timeout: 20000,
   });
 }
 
-/** 邮箱密码登录：POST /api/auth/email/login → 同 smsLogin 的响应结构 */
-function emailLogin(serverUrl, email, password) {
+/** 用户名密码登录：POST /api/auth/email/login → 同 smsLogin 的响应结构 */
+function emailLogin(serverUrl, username, password) {
   return request('/api/auth/email/login', {
     method: 'POST',
-    data: { email, password },
+    data: { username, password },
     auth: false,
     baseUrl: serverUrl,
     timeout: 20000,

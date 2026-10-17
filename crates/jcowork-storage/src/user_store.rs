@@ -475,62 +475,52 @@ impl UserStore {
 
     /// Create an account from an email + password registration.
     ///
-    /// The caller must have verified the address (consumed a code) and passes
-    /// an Argon2 hash. A display name is derived from the local part of the
-    /// address; taken names get a random suffix.
-    pub async fn create_email_user(&self, email: &str, password_hash: &str) -> Result<User> {
+    /// The caller supplies the login name (`username`, validated and checked
+    /// for uniqueness upstream) and an Argon2 hash. The unique indexes are the
+    /// authority when registrations race: a taken name or address is a hard
+    /// stop — the caller's password must never be silently attached to
+    /// someone else's account.
+    pub async fn create_email_user(
+        &self,
+        username: &str,
+        email: &str,
+        password_hash: &str,
+    ) -> Result<User> {
         let id = uuid::Uuid::new_v4().to_string();
         let created_at = chrono::Utc::now().naive_utc().to_string();
-        let base = email_username(email);
 
-        for attempt in 0..5 {
-            let username = if attempt == 0 {
-                base.clone()
-            } else {
-                format!("{}{}", base, random_suffix())
-            };
+        let result = sqlx::query(
+            "INSERT INTO users (id, username, password_hash, email) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(username)
+        .bind(password_hash)
+        .bind(email)
+        .execute(&self.pool)
+        .await;
 
-            let result = sqlx::query(
-                "INSERT INTO users (id, username, password_hash, email) VALUES (?, ?, ?, ?)",
-            )
-            .bind(&id)
-            .bind(&username)
-            .bind(password_hash)
-            .bind(email)
-            .execute(&self.pool)
-            .await;
-
-            match result {
-                Ok(_) => {
-                    return Ok(User {
-                        id,
-                        username,
-                        password_hash: password_hash.to_string(),
-                        feishu_open_id: None,
-                        phone: None,
-                        email: Some(email.to_string()),
-                        created_at,
-                        is_public: false,
-                        is_admin: false,
-                        deleted_at: None,
-                        password_changed_at: None,
-                    });
-                }
-                // A concurrent registration or trashed account holding the
-                // address is a hard stop — unlike the phone path, the caller's
-                // password must not be silently attached to someone else's
-                // account.
-                Err(e) if e.to_string().contains("users.email") => {
-                    anyhow::bail!("Email address is already registered");
-                }
-                Err(e) if e.to_string().contains("UNIQUE constraint") => {
-                    // Display name taken; loop for a new suffix.
-                }
-                Err(e) => return Err(anyhow::anyhow!("Failed to create user: {}", e)),
+        match result {
+            Ok(_) => Ok(User {
+                id,
+                username: username.to_string(),
+                password_hash: password_hash.to_string(),
+                feishu_open_id: None,
+                phone: None,
+                email: Some(email.to_string()),
+                created_at,
+                is_public: false,
+                is_admin: false,
+                deleted_at: None,
+                password_changed_at: None,
+            }),
+            Err(e) if e.to_string().contains("users.username") => {
+                anyhow::bail!("Username '{}' already exists", username)
             }
+            Err(e) if e.to_string().contains("users.email") => {
+                anyhow::bail!("Email address is already registered")
+            }
+            Err(e) => Err(anyhow::anyhow!("Failed to create user: {}", e)),
         }
-
-        anyhow::bail!("Failed to allocate a username for email address")
     }
 
     // ── Admin user management (super user) ──
@@ -693,26 +683,7 @@ fn default_username(phone: &str) -> String {
     format!("用户{}", tail)
 }
 
-/// Display name for an email-registered account, derived from the local part.
-///
-/// Lowercased first, then only `a-z`, digits, `.`, `_` and `-` survive,
-/// truncated to 16 characters; anything else falls back to "user".
-fn email_username(email: &str) -> String {
-    let lowered = email.to_lowercase();
-    let local = lowered.split('@').next().unwrap_or("");
-    let cleaned: String = local
-        .chars()
-        .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
-        .take(16)
-        .collect();
-    if cleaned.is_empty() {
-        "user".to_string()
-    } else {
-        cleaned
-    }
-}
-
-/// Short suffix used when the derived display name is already taken.
+/// Short suffix used when a provisioned display name is already taken.
 /// Ambiguous characters (0, 1, i, l, o) are excluded so the name stays legible.
 fn random_suffix() -> String {
     const ALPHABET: &[u8] = b"23456789abcdefghjkmnpqrstuvwxyz";
@@ -837,23 +808,15 @@ mod tests {
         assert!(store.clear_user_phone("nope").await.is_err());
     }
 
-    #[test]
-    fn email_username_sanitizes_and_truncates_the_local_part() {
-        assert_eq!(email_username("alice@example.com"), "alice");
-        assert_eq!(email_username("John.Doe_99@corp.io"), "john.doe_99");
-        assert_eq!(email_username("a-very-long-local-part@example.com"), "a-very-long-loca");
-        assert_eq!(email_username("+++@example.com"), "user");
-    }
-
     #[tokio::test]
-    async fn create_email_user_derives_username_and_is_findable() {
+    async fn create_email_user_keeps_the_supplied_username() {
         let (_dir, store) = setup().await;
         let user = store
-            .create_email_user("alice@example.com", "argon2hash")
+            .create_email_user("Alice", "alice@example.com", "argon2hash")
             .await
             .unwrap();
 
-        assert_eq!(user.username, "alice");
+        assert_eq!(user.username, "Alice");
         assert_eq!(user.email.as_deref(), Some("alice@example.com"));
         assert!(user.phone.is_none());
         assert!(!user.is_public);
@@ -861,18 +824,20 @@ mod tests {
 
         let found = store.get_user_by_email("alice@example.com").await.unwrap();
         assert_eq!(found.unwrap().id, user.id);
+        let by_name = store.get_user_by_username("Alice").await.unwrap();
+        assert_eq!(by_name.unwrap().id, user.id);
     }
 
     #[tokio::test]
     async fn create_email_user_rejects_a_registered_address() {
         let (_dir, store) = setup().await;
         store
-            .create_email_user("alice@example.com", "argon2hash")
+            .create_email_user("alice", "alice@example.com", "argon2hash")
             .await
             .unwrap();
 
         let err = store
-            .create_email_user("alice@example.com", "otherhash")
+            .create_email_user("alice2", "alice@example.com", "otherhash")
             .await
             .unwrap_err()
             .to_string();
@@ -880,28 +845,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn colliding_email_usernames_get_distinct_suffixes() {
+    async fn create_email_user_rejects_a_taken_username() {
         let (_dir, store) = setup().await;
-        let a = store
-            .create_email_user("alice@example.com", "hash1")
-            .await
-            .unwrap();
-        let b = store
-            .create_email_user("alice@other.org", "hash2")
+        store
+            .create_email_user("alice", "alice@example.com", "hash1")
             .await
             .unwrap();
 
-        assert_eq!(a.username, "alice");
-        assert_ne!(a.username, b.username);
-        assert!(b.username.starts_with("alice"), "got {}", b.username);
-        assert_eq!(b.email.as_deref(), Some("alice@other.org"));
+        let err = store
+            .create_email_user("alice", "alice@other.org", "hash2")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("already exists"), "got: {}", err);
+
+        let found = store.get_user_by_email("alice@other.org").await.unwrap();
+        assert!(found.is_none(), "the refused registration must not persist");
     }
 
     #[tokio::test]
     async fn get_user_by_email_still_finds_trashed_accounts() {
         let (_dir, store) = setup().await;
         let user = store
-            .create_email_user("bob@example.com", "hash")
+            .create_email_user("bob", "bob@example.com", "hash")
             .await
             .unwrap();
 
@@ -916,7 +882,7 @@ mod tests {
     async fn list_users_search_matches_email() {
         let (_dir, store) = setup().await;
         store
-            .create_email_user("carol@example.com", "hash")
+            .create_email_user("carol", "carol@example.com", "hash")
             .await
             .unwrap();
 

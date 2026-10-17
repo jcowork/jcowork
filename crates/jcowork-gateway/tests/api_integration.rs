@@ -331,11 +331,17 @@ impl TestApp {
 
     /// Register an email account through the public flow: fetch a captcha,
     /// then submit it with the form fields. Returns (status, body).
-    async fn register_email(&self, email: &str, password: &str) -> (StatusCode, serde_json::Value) {
+    async fn register_email(
+        &self,
+        username: &str,
+        email: &str,
+        password: &str,
+    ) -> (StatusCode, serde_json::Value) {
         let (captcha_id, captcha_code) = self.fetch_captcha().await;
         self.post_public(
             "/api/auth/email/register",
             json!({
+                "username": username,
                 "email": email,
                 "password": password,
                 "captcha_id": captcha_id,
@@ -2316,12 +2322,13 @@ async fn test_email_send_response_never_leaks_the_code() {
 
 /// Register (image captcha, no mailed code) → token works despite having no
 /// phone (the gate keys on phone-or-email) → the credentials mail carries the
-/// address and the plaintext password → password login in both directions →
-/// duplicate registration is a conflict, case-insensitively.
+/// chosen account name and the plaintext password → login by account name and
+/// by registration email → duplicate address or duplicate name is a conflict.
 #[tokio::test]
 async fn test_email_register_login_and_gate_passes_without_phone() {
     let app = TestApp::new().await;
     let email = app.next_email();
+    let username = "alice";
     let password = "initial-pass-1";
 
     // Cheap rejections happen before the captcha is spent, so one captcha can
@@ -2331,20 +2338,25 @@ async fn test_email_register_login_and_gate_passes_without_phone() {
         .post_public(
             "/api/auth/email/register",
             json!({
+                "username": "bad name with spaces",
                 "email": email,
-                "password": "short",
+                "password": password,
                 "captcha_id": captcha_id,
                 "captcha_code": captcha_code,
             }),
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{:?}", body);
-    assert_eq!(body["error"], json!("Password must be at least 8 characters"));
+    assert_eq!(
+        body["error"],
+        json!("Username cannot contain spaces, @, / or control characters")
+    );
 
     let (status, body) = app
         .post_public(
             "/api/auth/email/register",
             json!({
+                "username": username,
                 "email": email,
                 "password": password,
                 "captcha_id": captcha_id,
@@ -2361,23 +2373,19 @@ async fn test_email_register_login_and_gate_passes_without_phone() {
         "an email-born account never sees the change-password screen"
     );
     let user_id = body["user_id"].as_str().unwrap().to_string();
-    let username = body["username"].as_str().unwrap().to_string();
-    assert!(
-        username.starts_with("user"),
-        "username is derived from the local part: got {username}"
-    );
+    assert_eq!(body["username"], json!(username), "the name is the caller's choice");
 
-    // The credentials mail went to the right address and contains both the
-    // account and the password the user chose.
+    // The credentials mail went to the right address and carries the account
+    // name and the password the user chose.
     {
         let messages = app.mail_messages.lock().expect("capture lock poisoned");
         let matches: Vec<&(String, String, String)> =
             messages.iter().filter(|(e, _, _)| e == &email).collect();
         assert_eq!(matches.len(), 1, "exactly one credentials mail: {:?}", messages);
-        let (_, subject, body) = matches[0];
+        let (_, subject, mail_body) = matches[0];
         assert_eq!(subject, "Jcowork 注册成功");
-        assert!(body.contains(&email), "the mail names the account: {body}");
-        assert!(body.contains(password), "the mail carries the password: {body}");
+        assert!(mail_body.contains(username), "the mail names the account: {mail_body}");
+        assert!(mail_body.contains(password), "the mail carries the password: {mail_body}");
     }
     // Registration is captcha-gated, not code-gated: nothing was mailed as a
     // verification code.
@@ -2400,45 +2408,57 @@ async fn test_email_register_login_and_gate_passes_without_phone() {
     assert_eq!(profile["phone_bound"], json!(false));
     assert_eq!(profile["email_masked"], json!("****@example.com"));
 
-    // Password login works, and upper-casing the address still finds the
-    // account because the server normalizes before lookup.
+    // Login works with the account name...
     let (status, body) = app
         .post_public(
             "/api/auth/email/login",
-            json!({ "email": email.to_uppercase(), "password": password }),
+            json!({ "username": username, "password": password }),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{:?}", body);
     assert_eq!(body["user_id"], json!(user_id));
     assert_eq!(body["must_change_password"], json!(false));
 
+    // ...and the registration email still works for accounts whose mailed
+    // credentials only ever named the address. Case-insensitively, because
+    // the server normalizes before the email lookup.
     let (status, body) = app
         .post_public(
             "/api/auth/email/login",
-            json!({ "email": email, "password": "wrong-password" }),
+            json!({ "username": email.to_uppercase(), "password": password }),
         )
         .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert_eq!(body["error"], json!("Invalid email or password"));
+    assert_eq!(status, StatusCode::OK, "{:?}", body);
+    assert_eq!(body["user_id"], json!(user_id));
 
-    // Unknown addresses fail exactly like wrong passwords.
     let (status, body) = app
         .post_public(
             "/api/auth/email/login",
-            json!({ "email": app.next_email(), "password": password }),
+            json!({ "username": username, "password": "wrong-password" }),
         )
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert_eq!(body["error"], json!("Invalid email or password"));
+    assert_eq!(body["error"], json!("Invalid username or password"));
+
+    // Unknown names fail exactly like wrong passwords.
+    let (status, body) = app
+        .post_public(
+            "/api/auth/email/login",
+            json!({ "username": "nobody-here", "password": password }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], json!("Invalid username or password"));
 
     // Re-registering the address is a conflict — behind a fresh captcha, since
     // every attempt burns one.
-    let (status, body) = app.register_email(&email, "another-pass-2").await;
+    let (status, body) = app.register_email("alice2", &email, "another-pass-2").await;
     assert_eq!(status, StatusCode::CONFLICT, "{:?}", body);
     assert_eq!(body["error"], json!("Email address is already registered"));
-    // ...and the case-insensitive spelling is the same address.
-    let (status, _) = app.register_email(&email.to_uppercase(), "another-pass-2").await;
-    assert_eq!(status, StatusCode::CONFLICT);
+    // ...and so is re-registering the account name.
+    let (status, body) = app.register_email(username, &app.next_email(), "another-pass-2").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{:?}", body);
+    assert_eq!(body["error"], json!("Username already exists"));
     // The duplicates never mailed anything.
     let messages = app.mail_messages.lock().expect("capture lock poisoned");
     assert_eq!(
@@ -2463,7 +2483,7 @@ async fn test_register_captcha_wrong_burns_and_single_use() {
     let (status, body) = app
         .post_public(
             "/api/auth/email/register",
-            json!({ "email": email, "password": "some-pass-123" }),
+            json!({ "username": "capuser", "email": email, "password": "some-pass-123" }),
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{:?}", body);
@@ -2476,6 +2496,7 @@ async fn test_register_captcha_wrong_burns_and_single_use() {
         .post_public(
             "/api/auth/email/register",
             json!({
+                "username": "capuser",
                 "email": email,
                 "password": "some-pass-123",
                 "captcha_id": captcha_id,
@@ -2492,6 +2513,7 @@ async fn test_register_captcha_wrong_burns_and_single_use() {
         .post_public(
             "/api/auth/email/register",
             json!({
+                "username": "capuser",
                 "email": email,
                 "password": "some-pass-123",
                 "captcha_id": captcha_id,
@@ -2508,6 +2530,7 @@ async fn test_register_captcha_wrong_burns_and_single_use() {
         .post_public(
             "/api/auth/email/register",
             json!({
+                "username": "capuser",
                 "email": email,
                 "password": "some-pass-123",
                 "captcha_id": "cap-never-issued",
@@ -2519,7 +2542,7 @@ async fn test_register_captcha_wrong_burns_and_single_use() {
     assert_eq!(body["error"], json!("Captcha is incorrect or has expired"));
 
     // A fresh captcha carries the same registration through.
-    let (status, body) = app.register_email(&email, "some-pass-123").await;
+    let (status, body) = app.register_email("capuser", &email, "some-pass-123").await;
     assert_eq!(status, StatusCode::OK, "{:?}", body);
 
     // All of the above cost no mailed code: that channel is reset-only now.
@@ -2538,7 +2561,7 @@ async fn test_register_credentials_mail_shares_the_cooldown() {
     let app = TestApp::new().await;
     let email = app.next_email();
 
-    let (status, body) = app.register_email(&email, "throttle-pass-1").await;
+    let (status, body) = app.register_email("throttle-user", &email, "throttle-pass-1").await;
     assert_eq!(status, StatusCode::OK, "{:?}", body);
     let user_id = body["user_id"].as_str().unwrap().to_string();
 
@@ -2546,7 +2569,9 @@ async fn test_register_credentials_mail_shares_the_cooldown() {
     // cooldown is keyed on the address, not on the account.
     app.user_store.permanently_delete_user(&user_id).await.unwrap();
 
-    let (status, body) = app.register_email(&email, "throttle-pass-2").await;
+    let (status, body) = app
+        .register_email("throttle-user", &email, "throttle-pass-2")
+        .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{:?}", body);
     assert_eq!(body["error"], json!("Please wait before requesting another code"));
     assert!(
@@ -2573,7 +2598,10 @@ async fn test_email_reset_password_flow() {
     // Seeded directly so the address has never been mailed to: the 60-second
     // resend cooldown would otherwise block the test's own send.
     let old_hash = jcowork_gateway::auth::hash_password("old-pass-123").unwrap();
-    app.user_store.create_email_user(&email, &old_hash).await.unwrap();
+    app.user_store
+        .create_email_user("reset-user", &email, &old_hash)
+        .await
+        .unwrap();
 
     let (status, body) = app.post_public("/api/auth/email/send", json!({ "email": email })).await;
     assert_eq!(status, StatusCode::OK, "{:?}", body);
@@ -2599,7 +2627,7 @@ async fn test_email_reset_password_flow() {
     let (status, body) = app
         .post_public(
             "/api/auth/email/login",
-            json!({ "email": email, "password": "fresh-pass-45" }),
+            json!({ "username": email, "password": "fresh-pass-45" }),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "the new password must authenticate: {:?}", body);
@@ -2607,7 +2635,7 @@ async fn test_email_reset_password_flow() {
     let (status, body) = app
         .post_public(
             "/api/auth/email/login",
-            json!({ "email": email, "password": "old-pass-123" }),
+            json!({ "username": email, "password": "old-pass-123" }),
         )
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "the old password must be dead: {:?}", body);
@@ -2651,6 +2679,7 @@ async fn test_email_registration_can_be_disabled() {
         .post_public(
             "/api/auth/email/register",
             json!({
+                "username": "shut-out",
                 "email": email,
                 "password": "some-pass-89",
                 "captcha_id": "cap-anything",

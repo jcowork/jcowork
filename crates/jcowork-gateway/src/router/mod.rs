@@ -314,6 +314,9 @@ pub struct EmailSendRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct EmailRegisterRequest {
+    /// The login name the user chose. Uniqueness is enforced by the
+    /// `users.username` unique index, not by the client.
+    pub username: String,
     pub email: String,
     pub password: String,
     /// `Option` so a legacy client (or a missing field) gets a readable 400
@@ -324,7 +327,9 @@ pub struct EmailRegisterRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct EmailLoginRequest {
-    pub email: String,
+    /// Account name, or the registration email (contains `@`) for accounts
+    /// created before names were explicit.
+    pub username: String,
     pub password: String,
 }
 

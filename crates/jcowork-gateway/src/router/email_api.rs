@@ -11,9 +11,9 @@
 //!   has proven control of the mailbox by then.
 //! - Registration does NOT prove mailbox control (no emailed code anymore);
 //!   its human-check is the image captcha. The endpoint may reveal that an
-//!   address is taken (409) — a deliberate trade-off: probing costs one
-//!   captcha per attempt, and the true mailbox owner can always reclaim the
-//!   account through the code-verified password reset.
+//!   address or an account name is taken (409) — a deliberate trade-off:
+//!   probing costs one captcha per attempt, and the true mailbox owner can
+//!   always reclaim the account through the code-verified password reset.
 //! - The registration-credentials email (account + password, by explicit
 //!   product decision) is throttled through the shared `CodeStore` under the
 //!   `regcred:<email>` key, so it obeys the same cooldown / per-address daily
@@ -25,6 +25,7 @@
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 
 use super::code_store::{ConsumeError, CODE_TTL_SECS, RESEND_COOLDOWN_SECS};
+use super::profile::validate_username;
 use super::{
     AppState, EmailLoginRequest, EmailRegisterRequest, EmailSendRequest, PasswordResetRequest,
     mask_email,
@@ -88,15 +89,17 @@ pub(crate) async fn email_send(
     )
 }
 
-/// Register an account from an email address, a chosen password, and a
-/// solved image captcha — no mailbox proof required. On success the account
-/// and password are mailed to the address as a record; the response's
-/// `email_sent` says whether that delivery worked. A failed delivery never
-/// rolls the registration back: the account is fully usable without it.
+/// Register an account from a chosen account name, an email address, a
+/// password, and a solved image captcha — no mailbox proof required. On
+/// success the account name and password are mailed to the address as a
+/// record; the response's `email_sent` says whether that delivery worked. A
+/// failed delivery never rolls the registration back: the account is fully
+/// usable without it.
 ///
-/// Check order is load-bearing: the captcha is burned before the 409
-/// exists-check, so probing whether an address is registered costs one
-/// captcha per attempt.
+/// Check order is load-bearing: cheap format rejections (email, name,
+/// password) happen before the captcha is spent, and the captcha is burned
+/// before any 409 exists-check, so probing whether an address or a name is
+/// registered costs one captcha per attempt.
 pub(crate) async fn email_register(
     State(state): State<AppState>,
     Json(req): Json<EmailRegisterRequest>,
@@ -114,6 +117,11 @@ pub(crate) async fn email_register(
             Json(serde_json::json!({"error": "Invalid email address"})),
         );
     };
+
+    let username = req.username.trim();
+    if let Some(msg) = validate_username(username) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": msg})));
+    }
 
     if let Some(msg) = password_error(&req.password) {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": msg})));
@@ -154,6 +162,12 @@ pub(crate) async fn email_register(
             Json(serde_json::json!({"error": "Email address is already registered"})),
         );
     }
+    if let Ok(Some(_)) = state.user_store.get_user_by_username(username).await {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "Username already exists"})),
+        );
+    }
 
     // The credentials email is a real send: reserve the mail budget under a
     // dedicated key before creating anything. Refusal releases the budget
@@ -174,13 +188,17 @@ pub(crate) async fn email_register(
         }
     };
 
-    let user = match state.user_store.create_email_user(&email, &hash).await {
+    let user = match state
+        .user_store
+        .create_email_user(username, &email, &hash)
+        .await
+    {
         Ok(u) => u,
         Err(e) => {
-            // The pre-check above races with a concurrent registration for the
-            // same address; the unique index is the authority.
+            // The pre-checks above race with concurrent registrations; the
+            // unique indexes are the authority.
             let msg = e.to_string();
-            let status = if msg.contains("already registered") {
+            let status = if msg.contains("already registered") || msg.contains("already exists") {
                 StatusCode::CONFLICT
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -199,7 +217,7 @@ pub(crate) async fn email_register(
     // never consumed — commit just books the budget and the cooldown.
     let subject = "Jcowork 注册成功";
     let body = format!(
-        "您的账号：{email}\n您的密码：{}\n请妥善保管本邮件。\n若非本人操作，可忽略或通过忘记密码重置。",
+        "您的账号：{username}\n您的邮箱：{email}（可用于找回密码）\n您的密码：{}\n请妥善保管本邮件。\n若非本人操作，可忽略或通过忘记密码重置。",
         req.password
     );
     let email_sent = match mail.sender.send_message(&email, subject, &body).await {
@@ -244,23 +262,35 @@ pub(crate) async fn email_register(
     )
 }
 
-/// Log in with an email address and a password.
+/// Log in with an account name (or, for accounts created before names were
+/// explicit, the registration email) and a password.
 ///
-/// Every failure below answers identically — unknown address, wrong password,
+/// Every failure below answers identically — unknown account, wrong password,
 /// or an unparseable hash (SMS-only accounts hold a deliberate sentinel that
 /// Argon2 rejects) — so the endpoint is not an account-existence oracle.
 pub(crate) async fn email_login(
     State(state): State<AppState>,
     Json(req): Json<EmailLoginRequest>,
 ) -> impl IntoResponse {
-    let Some(email) = normalize_email(&req.email) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Invalid email address"})),
-        );
+    let submitted = req.username.trim();
+
+    // `@` can only come from an email address: usernames reject it at
+    // registration and on every later rename.
+    let user = if submitted.contains('@') {
+        match normalize_email(submitted) {
+            Some(email) => state.user_store.get_user_by_email(&email).await,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "Invalid email address"})),
+                );
+            }
+        }
+    } else {
+        state.user_store.get_user_by_username(submitted).await
     };
 
-    let user = match state.user_store.get_user_by_email(&email).await {
+    let user = match user {
         Ok(Some(u)) => u,
         Ok(None) => return invalid_credentials(),
         Err(e) => {
@@ -319,7 +349,7 @@ pub(crate) async fn email_login(
 fn invalid_credentials() -> (StatusCode, Json<serde_json::Value>) {
     (
         StatusCode::UNAUTHORIZED,
-        Json(serde_json::json!({"error": "Invalid email or password"})),
+        Json(serde_json::json!({"error": "Invalid username or password"})),
     )
 }
 

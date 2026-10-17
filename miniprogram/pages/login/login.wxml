@@ -74,14 +74,27 @@
         <view class="subtab {{emailMode === 'forgot' ? 'subtab-active' : ''}}" data-emode="forgot" bindtap="switchEmailMode">找回密码</view>
       </view>
 
-      <view class="field">
+      <view class="field" wx:if="{{emailMode !== 'forgot'}}">
+        <view class="label">用户名</view>
+        <input
+          class="jc-input"
+          value="{{username}}"
+          data-field="username"
+          bindinput="onInput"
+          placeholder="请输入用户名"
+          placeholder-class="jc-input-placeholder"
+          type="text"
+        />
+      </view>
+
+      <view class="field" wx:if="{{emailMode !== 'login'}}">
         <view class="label">邮箱地址</view>
         <input
           class="jc-input"
           value="{{email}}"
           data-field="email"
           bindinput="onInput"
-          placeholder="请输入邮箱地址"
+          placeholder="{{emailMode === 'register' ? '用于找回密码' : '请输入邮箱地址'}}"
           placeholder-class="jc-input-placeholder"
           type="text"
         />
