@@ -85,7 +85,8 @@
 - [x] A3 前端:文档详情预览自适应(详情容器 flex:1/minHeight:0,iframe flex 撑满替代 70vh)
 - [x] A4 测试与验证:cargo test --workspace(含 S5 集成测试)、npm build、eslint 基线
       (2026-10-18 全过:api_integration 51/51,含 test_public_document_content_requires_no_login)
-- [ ] A5 部署 + git commit & push 远程
+- [x] A5 部署 + git commit & push 远程(2026-10-18 晚:已部署并冒烟通过(见 S6);
+      提交 9f8e9d1 已推送 origin/mobile)
 
 ## 设计方案(已定)
 
@@ -221,3 +222,11 @@
   挪到 public 路由段。测试:summary 单测 8/8、api_integration 51/51(3 个新用例:
   写入钩子生成 / 读取回填 / 公开文档无 token 可读)、cargo test --workspace 全绿、
   npm build 通过、eslint 基线零新增。磁盘清理:删 debug/incremental(2.5G)后 ~2.7G 余。
+- 2026-10-18 晚 部署与提交:增量 release 构建 8m42s(仅 jcowork-server;desktop 不部署
+  本机,由 workspace 测试覆盖编译)。备份 jcowork.bak.2610181839 与 web/dist.bak.2610181839
+  → kill 165826 → 替换二进制+dist → ./run.sh(新 PID 207788)。冒烟:health 200;
+  cron_task_results.summary 开机迁移完成;documents.summary 首开索引懒迁移实测生效
+  (135164ad);公开文档无 token 200(非公开属主 404);/api/feed 无 token 401;
+  新 bundle index-DtSfUFrE.js 被引用;WS 历史恢复;日志无错误。存量 15 条任务结果与
+  历史文档将在用户下次浏览 feed 时自动回填摘要。git:9f8e9d1(30 文件,+3043/-38)
+  已推送 origin/mobile(cfe85e6..9f8e9d1)。
