@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useT } from '../i18n';
 import { formatFrequency, parseCronExpression, type TranslationFn } from '../utils/cron';
+import { useIsNarrow } from '../utils/useIsNarrow';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -53,6 +54,7 @@ interface ScheduleProps {
 type Frequency = 'hourly' | 'daily' | 'weekly' | 'monthly' | 'yearly';
 
 export default function Schedule({ userId, token }: ScheduleProps) {
+  const isNarrow = useIsNarrow();
   const t = useT();
   const [reminders, setReminders] = useState<Reminder[]>([]);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
@@ -446,13 +448,16 @@ export default function Schedule({ userId, token }: ScheduleProps) {
   const selectedResult = selected ? taskResults[selected.jobId]?.find(r => r.id === selected.resultId) : undefined;
 
   return (
-    <div style={{ display: 'flex', height: '100%' }}>
+    <div style={{ display: 'flex', height: '100%', flexDirection: isNarrow ? 'column' : 'row' }}>
       <style>{`
         .record-row:hover { background: #262626; }
       `}</style>
       {/* Left panel: task form + task/record list + reminders */}
       <div style={{
-        width: 380, flexShrink: 0, borderRight: '1px solid #333',
+        width: isNarrow ? '100%' : 380, flexShrink: 0,
+        height: isNarrow ? (selected ? '55%' : '100%') : '100%',
+        borderRight: isNarrow ? 'none' : '1px solid #333',
+        borderBottom: isNarrow && selected ? '1px solid #333' : 'none',
         display: 'flex', flexDirection: 'column', overflow: 'hidden',
       }}>
       {/* Header */}
@@ -980,7 +985,11 @@ export default function Schedule({ userId, token }: ScheduleProps) {
       </div>
 
       {/* Right panel: execution record preview */}
-      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+      {(!isNarrow || selected) && (
+      <div style={{
+        flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column',
+        height: isNarrow ? '45%' : '100%',
+      }}>
         {selectedJob && selectedResult ? (
           <>
             {/* Preview header: record name = task name + datetime */}
@@ -1024,6 +1033,7 @@ export default function Schedule({ userId, token }: ScheduleProps) {
           </div>
         )}
       </div>
+      )}
 
       {/* Delete-record confirmation modal (window.confirm is unsupported in Tauri's WKWebView) */}
       {confirmDeleteResult && (
@@ -1075,7 +1085,7 @@ export default function Schedule({ userId, token }: ScheduleProps) {
 }
 
 /** Renders an execution record's output as Markdown (GFM tables supported). */
-function ResultMarkdown({ content }: { content: string }) {
+export function ResultMarkdown({ content }: { content: string }) {
   return (
     <div style={{ fontSize: 14, lineHeight: 1.7, color: '#c9d1d9' }}>
       <ReactMarkdown

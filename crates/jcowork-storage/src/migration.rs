@@ -160,6 +160,17 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // Upgrade path for pre-existing databases missing the newer columns
+    for col in ["summary TEXT NOT NULL DEFAULT ''"] {
+        if let Err(e) = sqlx::query(&format!("ALTER TABLE cron_task_results ADD COLUMN {}", col))
+            .execute(pool)
+            .await
+        {
+            // Column already exists — safe to ignore
+            tracing::debug!(error = %e, column = %col, "cron_task_results column migration skipped");
+        }
+    }
+
     // Todos table
     sqlx::query(
         r#"
@@ -193,6 +204,11 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         .await?;
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_cron_task_results_job ON cron_task_results(cron_job_id)")
+        .execute(pool)
+        .await?;
+
+    // Covers the aggregated feed query (newest results per user).
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_cron_task_results_user_exec ON cron_task_results(user_id, executed_at)")
         .execute(pool)
         .await?;
 

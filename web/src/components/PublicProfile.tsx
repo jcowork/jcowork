@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useT } from '../i18n';
 import { formatFrequency, type TranslationFn } from '../utils/cron';
+import { useIsNarrow } from '../utils/useIsNarrow';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -56,6 +57,7 @@ const CONTENT_PAGE_SIZE = 30000;
  * HTML and Markdown files get a "Preview / Source" toggle (default: Preview).
  */
 export default function PublicProfile({ viewerToken, publicUser, onClose }: PublicProfileProps) {
+  const isNarrow = useIsNarrow();
   const t = useT();
   const [tab, setTab] = useState<'docs' | 'tasks'>('docs');
 
@@ -373,11 +375,13 @@ export default function PublicProfile({ viewerToken, publicUser, onClose }: Publ
       <div style={{ flex: 1, overflow: 'hidden', display: 'flex' }}>
         {tab === 'docs' ? (
           // ── Public Documents: dual-pane layout (list + preview) ──
-          <div style={{ display: 'flex', width: '100%', height: '100%', overflow: 'hidden' }}>
+          <div style={{ display: 'flex', width: '100%', height: '100%', overflow: 'hidden', flexDirection: isNarrow ? 'column' : 'row' }}>
             {/* Left: document list */}
             <div style={{
-              width: 280,
-              borderRight: '1px solid #333',
+              width: isNarrow ? '100%' : 280,
+              height: isNarrow ? (previewDoc ? '38%' : '100%') : '100%',
+              borderRight: isNarrow ? 'none' : '1px solid #333',
+              borderBottom: isNarrow && previewDoc ? '1px solid #333' : 'none',
               display: 'flex',
               flexDirection: 'column',
               overflow: 'hidden',
@@ -448,7 +452,11 @@ export default function PublicProfile({ viewerToken, publicUser, onClose }: Publ
             </div>
 
             {/* Right: preview panel */}
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+            {(!isNarrow || previewDoc) && (
+            <div style={{
+              flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0,
+              height: isNarrow ? '62%' : '100%',
+            }}>
               {previewDoc ? (
                 <>
                   {/* Preview header */}
@@ -625,6 +633,7 @@ export default function PublicProfile({ viewerToken, publicUser, onClose }: Publ
                 </div>
               )}
             </div>
+            )}
           </div>
         ) : (
           // ── Periodic Tasks tab ──

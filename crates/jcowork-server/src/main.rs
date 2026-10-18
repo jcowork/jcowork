@@ -181,10 +181,16 @@ async fn main() -> Result<()> {
     // Same contract for the email channel.
     let mail = router::MailRuntime::from_env()?;
 
+    let llm_router = Arc::new(RwLock::new(llm_router));
+    let summary = Arc::new(jcowork_gateway::summary::SummaryService::new(
+        llm_router.clone(),
+        config.default_model.clone(),
+    ));
+
     let state = AppState {
         session_manager,
         auth_config,
-        llm_router: Arc::new(RwLock::new(llm_router)),
+        llm_router,
         default_model: config.default_model.clone(),
         cron_scheduler,
         memory_manager,
@@ -195,6 +201,7 @@ async fn main() -> Result<()> {
         log_writer,
         app_settings: Arc::new(AppSettingsStore::new(pool.clone())),
         captcha: Arc::new(router::CaptchaService::new()),
+        summary,
         feishu_config_store: Arc::new(FeishuConfigStore::new(pool)),
         feishu_client_cache: Arc::new(dashmap::DashMap::new()),
         sms,
@@ -215,6 +222,7 @@ async fn main() -> Result<()> {
         state.cron_scheduler.clone(),
         state.llm_router.clone(),
         state.default_model.clone(),
+        state.summary.clone(),
         state.tool_registry.clone(),
         state.memory_manager.clone(),
         state.skill_manager.clone(),

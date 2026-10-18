@@ -19,6 +19,7 @@ use jcowork_gateway::{
     auth::AuthConfig,
     router::{self, AppState},
     session::SessionManager,
+    summary::SummaryService,
 };
 use jcowork_llm::{LlmRouter, MockLlmProvider};
 use jcowork_logs::LogWriter;
@@ -115,6 +116,8 @@ struct TestApp {
     _temp_dir: TempDir,
     router: Router,
     token: Option<String>,
+    /// Per-user data root (workspaces + index DBs live under here).
+    data_dir: String,
     /// Shared handle to the user store (for seeding/purge assertions).
     user_store: Arc<UserStore>,
     /// Codes captured from the fake SMS channel, as (phone, code) pairs.
@@ -213,7 +216,11 @@ impl TestApp {
 
         // Create mock LLM router
         let mock_provider = Arc::new(MockLlmProvider::new());
-        let llm_router = LlmRouter::from_mock(mock_provider);
+        let llm_router = Arc::new(RwLock::new(LlmRouter::from_mock(mock_provider)));
+        let summary = Arc::new(SummaryService::new(
+            llm_router.clone(),
+            "mock:test-model".to_string(),
+        ));
 
         let user_store_handle = user_store.clone();
 
@@ -237,9 +244,15 @@ impl TestApp {
                 jwt_secret: "test-secret".to_string(),
                 token_duration_hours: 24,
             },
-            llm_router: Arc::new(RwLock::new(llm_router)),
+            llm_router,
             default_model: "mock:test-model".to_string(),
-            cron_scheduler: Arc::new(jcowork_cron::CronScheduler::new()),
+            cron_scheduler: {
+                // Same wiring as the server binary: the scheduler persists
+                // jobs/results through the shared SQLite pool.
+                let mut scheduler = jcowork_cron::CronScheduler::new();
+                scheduler.with_store(Arc::new(jcowork_storage::CronJobStore::new(pool.clone())));
+                Arc::new(scheduler)
+            },
             memory_manager,
             skill_manager,
             tool_registry,
@@ -248,6 +261,7 @@ impl TestApp {
             log_writer,
             app_settings: Arc::new(jcowork_storage::AppSettingsStore::new(pool.clone())),
             captcha: Arc::new(captcha),
+            summary,
             feishu_config_store,
             feishu_client_cache: Arc::new(dashmap::DashMap::new()),
             sms,
@@ -261,6 +275,7 @@ impl TestApp {
             _temp_dir: temp_dir,
             router,
             token: None,
+            data_dir,
             user_store: user_store_handle,
             sms_sent,
             mail_sent,
@@ -2704,4 +2719,380 @@ async fn test_email_registration_can_be_disabled() {
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{:?}", body);
     assert_eq!(body["error"], json!("Account not found"));
+}
+
+// ── Aggregated AI feed ──
+
+#[tokio::test]
+async fn test_feed_requires_auth() {
+    let app = TestApp::new().await;
+    let res = app
+        .make_request_with_token(None, "GET", "/api/feed", None)
+        .await;
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let res = app
+        .make_request_with_token(None, "GET", "/api/feed/results/whatever", None)
+        .await;
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_own_feed_public_feed_and_result_visibility() {
+    let app = TestApp::new().await;
+    let (a_id, a_token) = app.provision_user().await;
+    let (_b_id, b_token) = app.provision_user().await;
+    let admin_token = app.seed_and_login_admin().await;
+
+    // User A creates a periodic task and stores one execution result.
+    let res = app
+        .make_request_with_token(
+            Some(&a_token),
+            "POST",
+            "/api/cron-jobs",
+            Some(json!({
+                "name": "Daily news digest",
+                "prompt": "Summarize today's AI news",
+                "model": "mock:test-model",
+                "frequency": "daily",
+                "hour": 9,
+                "minute": 0,
+                "second": 0,
+            })),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    let job_id = body["id"].as_str().unwrap().to_string();
+
+    let res = app
+        .make_request_with_token(
+            Some(&a_token),
+            "POST",
+            &format!("/api/cron-jobs/{}/results", job_id),
+            Some(json!({
+                "output": "# Headline one\n\nLong output body with **markdown**.",
+                "status": "success",
+            })),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // A's own feed lists the result as a task item with an excerpt and job metadata.
+    let res = app
+        .make_request_with_token(Some(&a_token), "GET", "/api/feed?offset=0&limit=20", None)
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let feed: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    let items = feed["items"].as_array().unwrap().clone();
+    assert_eq!(items.len(), 1, "feed: {:?}", feed);
+    assert_eq!(items[0]["type"], json!("task"));
+    assert_eq!(items[0]["job_name"], json!("Daily news digest"));
+    assert_eq!(items[0]["status"], json!("success"));
+    assert!(items[0]["excerpt"].as_str().unwrap().contains("Headline one"));
+    assert_eq!(feed["has_more"], json!(false));
+    let result_id = items[0]["id"].as_str().unwrap().to_string();
+
+    // The owner can fetch the full output by result id.
+    let res = app
+        .make_request_with_token(Some(&a_token), "GET", &format!("/api/feed/results/{}", result_id), None)
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let full: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert!(full["output"].as_str().unwrap().contains("**markdown**"));
+    assert_eq!(full["job_name"], json!("Daily news digest"));
+
+    // While A is private, another account sees neither the result nor A's feed.
+    let res = app
+        .make_request_with_token(Some(&b_token), "GET", &format!("/api/feed/results/{}", result_id), None)
+        .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let res = app
+        .make_request_with_token(Some(&b_token), "GET", &format!("/api/public-users/{}/feed", a_id), None)
+        .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // Admin flips A public: B now reads A's task through the public feed
+    // and can fetch the full result by id.
+    let res = app
+        .make_request_with_token(
+            Some(&admin_token),
+            "POST",
+            &format!("/api/admin/users/{}/public", a_id),
+            Some(json!({ "is_public": true })),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = app
+        .make_request_with_token(Some(&b_token), "GET", &format!("/api/public-users/{}/feed?limit=5", a_id), None)
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let feed: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    let items = feed["items"].as_array().unwrap().clone();
+    assert_eq!(items.len(), 1, "public feed: {:?}", feed);
+    assert_eq!(items[0]["type"], json!("task"));
+    assert_eq!(items[0]["job_name"], json!("Daily news digest"));
+
+    let res = app
+        .make_request_with_token(Some(&b_token), "GET", &format!("/api/feed/results/{}", result_id), None)
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Unknown result ids are a plain 404.
+    let res = app
+        .make_request_with_token(Some(&a_token), "GET", "/api/feed/results/no-such-result", None)
+        .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+// ── AI teaser summaries on feed items ──
+
+/// The fixed string the mock LLM returns for every non-streaming call; a
+/// stored summary must equal exactly this.
+const MOCK_SUMMARY: &str = "This is a mock response for testing.";
+
+async fn get_feed_json(app: &TestApp, token: &str) -> serde_json::Value {
+    let res = app
+        .make_request_with_token(Some(token), "GET", "/api/feed?limit=50", None)
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+        .unwrap()
+}
+
+/// Create one cron job owned by `token`'s account and return its id.
+async fn create_cron_job(app: &TestApp, token: &str) -> String {
+    let res = app
+        .make_request_with_token(
+            Some(token),
+            "POST",
+            "/api/cron-jobs",
+            Some(json!({
+                "name": "Daily news digest",
+                "prompt": "Summarize today's AI news",
+                "model": "mock:test-model",
+                "frequency": "daily",
+                "hour": 9,
+                "minute": 0,
+                "second": 0,
+            })),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    body["id"].as_str().unwrap().to_string()
+}
+
+async fn store_result(app: &TestApp, token: &str, job_id: &str, output: &str, status: &str) {
+    let res = app
+        .make_request_with_token(
+            Some(token),
+            "POST",
+            &format!("/api/cron-jobs/{}/results", job_id),
+            Some(json!({ "output": output, "status": status })),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_feed_task_summary_generated_via_write_hook() {
+    let app = TestApp::new().await;
+    let (_a_id, a_token) = app.provision_user().await;
+    let job_id = create_cron_job(&app, &a_token).await;
+
+    // A long successful output earns an AI teaser; generation is a spawned
+    // background task, so poll the feed until it lands.
+    let long_output = format!("# AI Daily\n\n{}", "A concrete insight paragraph. ".repeat(20));
+    store_result(&app, &a_token, &job_id, &long_output, "success").await;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut summary = String::new();
+    let mut excerpt = String::new();
+    loop {
+        let feed = get_feed_json(&app, &a_token).await;
+        let items = feed["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "feed: {:?}", feed);
+        assert_eq!(items[0]["type"], json!("task"));
+        excerpt = items[0]["excerpt"].as_str().unwrap().to_string();
+        if let Some(s) = items[0]["summary"].as_str() {
+            if !s.is_empty() {
+                summary = s.to_string();
+                break;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "summary never generated, feed: {:?}",
+            feed
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(summary, MOCK_SUMMARY);
+    // The raw excerpt stays a truncation of the original output.
+    assert!(excerpt.contains("AI Daily"));
+
+    // Guards: a short output and a failed run never get a summary — the card
+    // keeps showing the raw text, which already tells the story.
+    store_result(&app, &a_token, &job_id, "short output", "success").await;
+    store_result(
+        &app,
+        &a_token,
+        &job_id,
+        &format!("Execution failed: {}", "boom ".repeat(100)),
+        "error",
+    ).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let feed = get_feed_json(&app, &a_token).await;
+    let items = feed["items"].as_array().unwrap();
+    assert_eq!(items.len(), 3, "feed: {:?}", feed);
+    for item in items {
+        let status = item["status"].as_str().unwrap();
+        let summary = item["summary"].as_str().unwrap();
+        if status == "error" || item["excerpt"].as_str().unwrap() == "short output" {
+            assert_eq!(summary, "", "guard case must stay unsummarized: {:?}", item);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_feed_doc_summary_backfilled_on_read() {
+    let app = TestApp::new().await;
+    let (a_id, a_token) = app.provision_user().await;
+
+    // Write files straight into A's workspace and index them through the
+    // storage layer — no HTTP write hook fires, so the summary can only come
+    // from the feed's lazy backfill on first read.
+    let ws = format!("{}/{}/workspace", app.data_dir, a_id);
+    std::fs::create_dir_all(&ws).unwrap();
+    let long_body = format!("# Quarterly report\n\n{}", "Revenue grew in every segment. ".repeat(20));
+    std::fs::write(format!("{}/report.md", ws), &long_body).unwrap();
+    std::fs::write(format!("{}/tiny.md", ws), "# Tiny\n\nshort note").unwrap();
+    let index = jcowork_storage::WorkspaceIndex::cached(&app.data_dir, &a_id)
+        .await
+        .unwrap();
+    index.add_document("report.md", &ws).await.unwrap();
+    index.add_document("tiny.md", &ws).await.unwrap();
+
+    // First read kicks off generation; poll until the long document's teaser
+    // lands. The tiny document must never get one.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut report_summary = String::new();
+    loop {
+        let feed = get_feed_json(&app, &a_token).await;
+        let items = feed["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2, "feed: {:?}", feed);
+        let mut seen = std::collections::HashMap::new();
+        for item in items {
+            assert_eq!(item["type"], json!("document"));
+            seen.insert(
+                item["filename"].as_str().unwrap().to_string(),
+                item["summary"].as_str().unwrap().to_string(),
+            );
+        }
+        assert_eq!(
+            seen.get("tiny.md").map(String::as_str),
+            Some(""),
+            "short documents must stay unsummarized"
+        );
+        if let Some(s) = seen.get("report.md") {
+            if !s.is_empty() {
+                report_summary = s.clone();
+                break;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "doc summary never generated, feed: {:?}",
+            feed
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(report_summary, MOCK_SUMMARY);
+
+    // The snippet field is untouched: still the raw content head, so the
+    // client fallback keeps working for anything not yet summarized.
+    let feed = get_feed_json(&app, &a_token).await;
+    for item in feed["items"].as_array().unwrap() {
+        if item["filename"] == json!("report.md") {
+            assert!(item["snippet"].as_str().unwrap().contains("Quarterly report"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_public_document_content_requires_no_login() {
+    let app = TestApp::new().await;
+    let (a_id, a_token) = app.provision_user().await;
+
+    let ws = format!("{}/{}/workspace", app.data_dir, a_id);
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(format!("{}/share.md", ws), "# Shared\n\npublic body text").unwrap();
+    let index = jcowork_storage::WorkspaceIndex::cached(&app.data_dir, &a_id)
+        .await
+        .unwrap();
+    index.add_document("share.md", &ws).await.unwrap();
+
+    // The document's own feed entry carries the public flag (off by default).
+    let feed = get_feed_json(&app, &a_token).await;
+    let items = feed["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["is_public"], json!(false));
+
+    // Mark it public, then flip the account public (admin) — the state a
+    // shareable standalone-doc link assumes.
+    let res = app
+        .make_request_with_token(
+            Some(&a_token),
+            "PUT",
+            "/api/workspace/index/public",
+            Some(json!({ "path": "share.md", "is_public": true })),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let admin_token = app.seed_and_login_admin().await;
+    let res = app
+        .make_request_with_token(
+            Some(&admin_token),
+            "POST",
+            &format!("/api/admin/users/{}/public", a_id),
+            Some(json!({ "is_public": true })),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // The share link's backend: the content endpoint answers without any
+    // Authorization header at all.
+    let res = app
+        .make_request_with_token(
+            None,
+            "GET",
+            &format!(
+                "/api/public-users/{}/documents/content?path=share.md&offset=0&limit=100",
+                a_id
+            ),
+            None,
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert!(body["content"].as_str().unwrap().contains("public body text"));
+
+    // The feed entry now reports is_public, so the client builds a login-free
+    // share URL for it.
+    let feed = get_feed_json(&app, &a_token).await;
+    assert_eq!(feed["items"][0]["is_public"], json!(true));
 }

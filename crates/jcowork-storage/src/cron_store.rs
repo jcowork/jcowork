@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use jcowork_cron::{CronStore, CronStoreJob, TaskResult};
+use jcowork_cron::{CronStore, CronStoreJob, TaskResult, UserTaskResultEntry};
 use sqlx::SqlitePool;
 
 /// SQLite-backed implementation of [`CronStore`].
@@ -150,6 +150,109 @@ impl CronStore for CronJobStore {
     async fn delete_results(&self, cron_job_id: &str) -> Result<()> {
         sqlx::query("DELETE FROM cron_task_results WHERE cron_job_id = ?")
             .bind(cron_job_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn list_user_results(
+        &self,
+        user_id: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<UserTaskResultEntry>> {
+        // output is truncated in SQL: the aggregated feed only shows a summary
+        // card, so shipping full task outputs would be pure waste.
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+        )> = sqlx::query_as(
+            r#"
+            SELECT r.id, r.cron_job_id, r.user_id, substr(r.output, 1, 400), r.status, r.executed_at,
+                   j.name, j.prompt, r.summary
+            FROM cron_task_results r
+            LEFT JOIN cron_jobs j ON j.id = r.cron_job_id
+            WHERE r.user_id = ?1
+            ORDER BY r.executed_at DESC
+            LIMIT ?2 OFFSET ?3
+            "#,
+        )
+        .bind(user_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(id, cron_job_id, user_id, output, status, executed_at, job_name, job_prompt, summary)| {
+                    UserTaskResultEntry {
+                        id,
+                        cron_job_id,
+                        user_id,
+                        output,
+                        status,
+                        executed_at,
+                        job_name,
+                        job_prompt,
+                        summary,
+                    }
+                },
+            )
+            .collect())
+    }
+
+    async fn get_result(&self, result_id: &str) -> Result<Option<UserTaskResultEntry>> {
+        let row: Option<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+        )> = sqlx::query_as(
+            r#"
+            SELECT r.id, r.cron_job_id, r.user_id, r.output, r.status, r.executed_at,
+                   j.name, j.prompt, r.summary
+            FROM cron_task_results r
+            LEFT JOIN cron_jobs j ON j.id = r.cron_job_id
+            WHERE r.id = ?1
+            "#,
+        )
+        .bind(result_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(
+            |(id, cron_job_id, user_id, output, status, executed_at, job_name, job_prompt, summary)| {
+                UserTaskResultEntry {
+                    id,
+                    cron_job_id,
+                    user_id,
+                    output,
+                    status,
+                    executed_at,
+                    job_name,
+                    job_prompt,
+                    summary,
+                }
+            },
+        ))
+    }
+
+    async fn set_result_summary(&self, result_id: &str, summary: &str) -> Result<()> {
+        sqlx::query("UPDATE cron_task_results SET summary = ?2 WHERE id = ?1")
+            .bind(result_id)
+            .bind(summary)
             .execute(&self.pool)
             .await?;
         Ok(())

@@ -392,7 +392,12 @@ pub(crate) async fn store_cron_job_result(
         status: req.status,
         executed_at: chrono::Utc::now().to_rfc3339(),
     };
+    let result_id = result.id.clone();
+    let is_success = result.status == "success";
     state.cron_scheduler.store_task_result(result).await;
+    if is_success {
+        state.summary.ensure_task_summary(state.cron_scheduler.clone(), &result_id);
+    }
     (StatusCode::OK, Json(serde_json::json!({"status": "stored"})))
 }
 

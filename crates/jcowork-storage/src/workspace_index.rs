@@ -196,6 +196,12 @@ impl WorkspaceIndex {
             .await
             .ok(); // Ignore error if column already exists
 
+        // Add summary column if it doesn't exist (AI teaser for the feed).
+        sqlx::query("ALTER TABLE documents ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
+            .execute(pool)
+            .await
+            .ok(); // Ignore error if column already exists
+
         // --- Vector search tables ---
         
         // Document chunks table (for semantic search)
@@ -462,7 +468,9 @@ impl WorkspaceIndex {
                 size = ?5,
                 content_text = ?6,
                 doc_hash = ?7,
-                indexed_at = ?8
+                indexed_at = ?8,
+                summary = CASE WHEN excluded.content_text IS NOT documents.content_text
+                               THEN '' ELSE documents.summary END
             "#,
         )
         .bind(file_path)
@@ -872,6 +880,71 @@ impl WorkspaceIndex {
                 is_public: r.is_public,
             })
             .collect())
+    }
+
+    /// Newest-indexed documents (all visibility), for the aggregated feed.
+    pub async fn list_recent(&self, limit: i64, offset: i64) -> Result<Vec<FeedDocument>> {
+        let docs = sqlx::query_as::<_, FeedDocumentRow>(
+            r#"
+            SELECT file_path, dir_path, filename, content_type, size, indexed_at,
+                   substr(content_text, 1, 200) as snippet, summary, is_public
+            FROM documents
+            ORDER BY indexed_at DESC, id DESC
+            LIMIT ?1 OFFSET ?2
+            "#,
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(docs.into_iter().map(FeedDocument::from).collect())
+    }
+
+    /// Newest-indexed public documents, for a public account's feed.
+    pub async fn list_public_recent(&self, limit: i64, offset: i64) -> Result<Vec<FeedDocument>> {
+        let docs = sqlx::query_as::<_, FeedDocumentRow>(
+            r#"
+            SELECT file_path, dir_path, filename, content_type, size, indexed_at,
+                   substr(content_text, 1, 200) as snippet, summary, is_public
+            FROM documents
+            WHERE is_public = 1
+            ORDER BY indexed_at DESC, id DESC
+            LIMIT ?1 OFFSET ?2
+            "#,
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(docs.into_iter().map(FeedDocument::from).collect())
+    }
+
+    /// Persist the AI teaser summary of one indexed document.
+    pub async fn set_document_summary(&self, file_path: &str, summary: &str) -> Result<()> {
+        sqlx::query("UPDATE documents SET summary = ?2 WHERE file_path = ?1")
+            .bind(file_path)
+            .bind(summary)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// The stored summary plus a head of the content text (for summary
+    /// generation). Returns None when the document is not indexed.
+    pub async fn get_summary_source(&self, file_path: &str) -> Result<Option<SummarySource>> {
+        let row: Option<SummarySource> = sqlx::query_as(
+            r#"
+            SELECT summary, substr(content_text, 1, 4000) as head
+            FROM documents
+            WHERE file_path = ?1
+            "#,
+        )
+        .bind(file_path)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
     }
 
     /// Keyword search (FTS5) restricted to public documents.
@@ -1557,6 +1630,62 @@ struct IndexedDocumentRow {
     indexed_at: String,
     snippet: String,
     is_public: bool,
+}
+
+/// An indexed document as it appears in the aggregated feed, carrying the
+/// AI teaser summary (empty until generated).
+#[derive(Debug, Clone)]
+pub struct FeedDocument {
+    pub file_path: String,
+    pub dir_path: String,
+    pub filename: String,
+    pub content_type: String,
+    pub size: i64,
+    pub indexed_at: String,
+    /// Raw head of the content text (SQL-truncated fallback display).
+    pub snippet: String,
+    /// AI-generated teaser summary; empty when not yet generated.
+    pub summary: String,
+    /// Whether the owner marked this document public (share eligibility).
+    pub is_public: bool,
+}
+
+/// Internal row type for the feed document queries.
+#[derive(Debug, sqlx::FromRow)]
+struct FeedDocumentRow {
+    file_path: String,
+    dir_path: String,
+    filename: String,
+    content_type: String,
+    size: i64,
+    indexed_at: String,
+    snippet: String,
+    summary: String,
+    is_public: bool,
+}
+
+impl From<FeedDocumentRow> for FeedDocument {
+    fn from(r: FeedDocumentRow) -> Self {
+        FeedDocument {
+            file_path: r.file_path,
+            dir_path: r.dir_path,
+            filename: r.filename,
+            content_type: r.content_type,
+            size: r.size,
+            indexed_at: r.indexed_at,
+            snippet: r.snippet,
+            summary: r.summary,
+            is_public: r.is_public,
+        }
+    }
+}
+
+/// Stored summary plus a content-text head, read together when generating
+/// a document's teaser summary.
+#[derive(Debug, sqlx::FromRow)]
+pub struct SummarySource {
+    pub summary: String,
+    pub head: String,
 }
 
 /// Row type for doc_chunks queries.

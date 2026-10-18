@@ -299,6 +299,8 @@ pub(crate) async fn upload_file(
                     let err_msg = format!("Failed to index {}: {}", relative_path, e);
                     tracing::error!(file = %relative_path, err = %e, "Failed to index uploaded file");
                     index_error = Some(err_msg);
+                } else {
+                    state.summary.ensure_doc_summary(&state.data_dir, &auth_user.user_id, &relative_path);
                 }
             }
             Err(e) => {

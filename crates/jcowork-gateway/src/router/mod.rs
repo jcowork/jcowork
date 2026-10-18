@@ -25,6 +25,7 @@ pub(crate) mod connectors;
 pub(crate) mod cron;
 pub(crate) mod doc_index;
 pub(crate) mod email_api;
+pub(crate) mod feed;
 pub(crate) mod feishu;
 pub(crate) mod fetch_url;
 pub(crate) mod memory;
@@ -230,6 +231,8 @@ pub struct AppState {
     pub app_settings: Arc<jcowork_storage::AppSettingsStore>,
     /// Image captchas for the email registration form.
     pub captcha: Arc<captcha::CaptchaService>,
+    /// Background AI teaser summaries for the aggregated feed.
+    pub summary: Arc<crate::summary::SummaryService>,
     /// Data directory for per-user workspaces.
     pub data_dir: String,
 }
@@ -444,7 +447,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/auth/email/login", post(email_api::email_login))
         .route("/api/auth/password/reset", post(email_api::password_reset))
         .route("/api/health", get(auth_api::health))
-        .route("/api/feishu/event", post(crate::feishu::feishu_event_handler));
+        .route("/api/feishu/event", post(crate::feishu::feishu_event_handler))
+        // Public-document preview, reachable without login so a shared
+        // standalone-doc link works for recipients with no account. The
+        // handler itself gates on the owner being public and the document
+        // carrying the is_public flag.
+        .route("/api/public-users/{user_id}/documents/content", get(public_users::get_public_document_content));
 
     // Protected routes (auth required)
     let protected = Router::new()
@@ -478,6 +486,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/cron-jobs/{id}/results", get(cron::get_cron_job_results))
         .route("/api/cron-jobs/{id}/results", post(cron::store_cron_job_result))
         .route("/api/cron-jobs/{id}/results/{result_id}", delete(cron::delete_cron_job_result))
+        // Aggregated "AI feed" (mobile AI头条 tab)
+        .route("/api/feed", get(feed::get_own_feed))
+        .route("/api/feed/results/{result_id}", get(feed::get_feed_result))
         .route("/api/providers", get(providers::list_providers))
         .route("/api/providers/entries", get(providers::list_provider_entries))
         .route("/api/providers", post(providers::save_providers))
@@ -535,9 +546,9 @@ pub fn build_router(state: AppState) -> Router {
         // Read-only cross-user endpoints for public accounts
         .route("/api/public-users", get(public_users::list_public_users))
         .route("/api/public-users/{user_id}/documents", get(public_users::list_public_documents))
-        .route("/api/public-users/{user_id}/documents/content", get(public_users::get_public_document_content))
         .route("/api/public-users/{user_id}/cron-jobs", get(public_users::list_public_cron_jobs))
         .route("/api/public-users/{user_id}/cron-jobs/{job_id}/results", get(public_users::get_public_cron_job_results))
+        .route("/api/public-users/{user_id}/feed", get(feed::get_public_feed))
         .layer(auth_mw)
         // Allow up to 50MB for file uploads (default axum limit is only 2MB)
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024));

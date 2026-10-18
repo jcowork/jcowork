@@ -521,7 +521,10 @@ pub(crate) async fn reindex_workspace_dir(
         };
 
         match index.add_document(&rel_path, &workspace_root).await {
-            Ok(()) => indexed += 1,
+            Ok(()) => {
+                indexed += 1;
+                state.summary.ensure_doc_summary(&state.data_dir, &auth_user.user_id, &rel_path);
+            }
             Err(e) => {
                 tracing::warn!(file = %rel_path, err = %e, "Failed to index file during re-index");
                 errors += 1;
@@ -584,6 +587,7 @@ pub(crate) async fn set_document_public(
                     Json(serde_json::json!({ "error": format!("File not indexed and cannot be indexed: {}", e) })),
                 ).into_response();
             }
+            state.summary.ensure_doc_summary(&state.data_dir, &auth_user.user_id, &body.path);
         }
         Err(e) => {
             return (

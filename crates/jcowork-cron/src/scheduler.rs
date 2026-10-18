@@ -146,6 +146,22 @@ pub struct TaskResult {
     pub executed_at: String,
 }
 
+/// A task execution result joined with its owning job's name/prompt.
+/// Used by the aggregated feed endpoints.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UserTaskResultEntry {
+    pub id: String,
+    pub cron_job_id: String,
+    pub user_id: String,
+    pub output: String,
+    pub status: String,
+    pub executed_at: String,
+    pub job_name: Option<String>,
+    pub job_prompt: Option<String>,
+    /// AI teaser summary for the feed card; empty until generated.
+    pub summary: String,
+}
+
 /// Flat representation of a persisted cron job (store layer interchange format).
 #[derive(Debug, Clone)]
 pub struct CronStoreJob {
@@ -187,6 +203,18 @@ pub trait CronStore: Send + Sync {
     async fn list_results(&self, cron_job_id: &str) -> Result<Vec<TaskResult>>;
     async fn delete_result(&self, result_id: &str) -> Result<()>;
     async fn delete_results(&self, cron_job_id: &str) -> Result<()>;
+    /// Newest execution results of one user across all their jobs,
+    /// joined with job name/prompt, ordered by executed_at DESC.
+    async fn list_user_results(
+        &self,
+        user_id: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<UserTaskResultEntry>>;
+    /// One execution result by id (any user), joined with job name/prompt.
+    async fn get_result(&self, result_id: &str) -> Result<Option<UserTaskResultEntry>>;
+    /// Persist the AI teaser summary of one execution result.
+    async fn set_result_summary(&self, result_id: &str, summary: &str) -> Result<()>;
 }
 
 /// A one-time reminder.
@@ -571,6 +599,49 @@ impl CronScheduler {
         };
         items.sort_by(|a, b| b.executed_at.cmp(&a.executed_at)); // most recent first
         items
+    }
+
+    /// Newest execution results of one user across all their jobs (feed API).
+    /// Reads straight from persistence so it stays correct across restarts.
+    pub async fn list_user_task_results(
+        &self,
+        user_id: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Vec<UserTaskResultEntry> {
+        match &self.store {
+            Some(store) => match store.list_user_results(user_id, limit, offset).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, user_id = %user_id, "Failed to load user task results");
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        }
+    }
+
+    /// One execution result by id (any user), joined with job name/prompt.
+    pub async fn get_task_result_by_id(&self, result_id: &str) -> Option<UserTaskResultEntry> {
+        match &self.store {
+            Some(store) => match store.get_result(result_id).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, result_id = %result_id, "Failed to load task result");
+                    None
+                }
+            },
+            None => None,
+        }
+    }
+
+    /// Persist the AI teaser summary of one execution result.
+    pub async fn set_task_result_summary(&self, result_id: &str, summary: &str) {
+        if let Some(store) = &self.store {
+            if let Err(e) = store.set_result_summary(result_id, summary).await {
+                tracing::warn!(error = %e, result_id = %result_id, "Failed to persist task result summary");
+            }
+        }
     }
 
     /// Delete a single execution result (store + in-memory cache).

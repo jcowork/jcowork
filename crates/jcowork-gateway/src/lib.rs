@@ -6,4 +6,5 @@ pub mod delivery;
 pub mod feishu;
 pub mod router;
 pub mod session;
+pub mod summary;
 pub mod ws;

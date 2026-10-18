@@ -8,6 +8,11 @@ import Settings from './components/Settings';
 import SkillsSquare from './components/SkillsSquare';
 import PublicProfile from './components/PublicProfile';
 import AdminUsers from './components/AdminUsers';
+import AiFeed from './components/AiFeed';
+import ContactsTab from './components/ContactsTab';
+import MineTab from './components/MineTab';
+import { DocViewer } from './components/DocViewer';
+import { parseDocHash } from './utils/docUrl';
 import EmailCodeFields from './components/EmailCode';
 import PhoneCodeFields from './components/PhoneCode';
 import { I18nProvider, useT } from './i18n';
@@ -107,9 +112,12 @@ function AuthBanner({ msg, type }: { msg: string; type: 'error' | 'success' }) {
 const SMS_LOGIN_VISIBLE = false;
 
 export default function App() {
+  // Standalone shared-document URLs (`#/doc?...`) render a bare viewer —
+  // no login wall, no app shell — so a link can be opened by anyone.
+  const standaloneDoc = parseDocHash();
   return (
     <I18nProvider>
-      <AppInner />
+      {standaloneDoc ? <DocViewer /> : <AppInner />}
     </I18nProvider>
   );
 }
@@ -133,6 +141,18 @@ function AppInner() {
   // Admin-only user management view (visible only when activeAccount.isAdmin)
   const [showAdminUsers, setShowAdminUsers] = useState(false);
   const [mobileSidebar, setMobileSidebar] = useState(false);
+  // Mobile shell: bottom-tab root state. On narrow screens the root view is
+  // one of the three tabs (AI头条 / 联系人 / 我的); every other view (chat,
+  // documents, schedule, memory, skills, settings, admin, public profile) is
+  // a detail layer reached from the tabs or the drawer, with a back arrow.
+  const [mobileTab, setMobileTab] = useState<'feed' | 'contacts' | 'mine'>('feed');
+  const [mobileChatOpen, setMobileChatOpen] = useState(false);
+  const [isNarrow, setIsNarrow] = useState(() => window.innerWidth <= 768);
+  useEffect(() => {
+    const onResize = () => setIsNarrow(window.innerWidth <= 768);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConvId, setActiveConvIdState] = useState<string>('');
   const [, setTick] = useState(0); // periodic re-render for 1h history threshold
@@ -272,6 +292,8 @@ function AppInner() {
     setShowSettings(false); setShowSchedule(false); setShowMemory(false);
     setShowSkills(false); setShowDocuments(false);
     setViewingPublicUser(null);
+    // On mobile the chat is a detail layer above the tab root.
+    setMobileChatOpen(true);
   };
 
   const handleNewChat = useCallback(() => {
@@ -754,6 +776,7 @@ function AppInner() {
     setShowSkills(false); setShowDocuments(false);
     setViewingPublicUser(null);
     setShowAdminUsers(false);
+    setMobileChatOpen(false);
   }, [activeUserId, activeAccount, conversations, activeConvId]);
 
   const handleAddAccount = useCallback(() => {
@@ -1275,7 +1298,43 @@ function AppInner() {
   }
 
   // --- Authenticated view ---
-  const chatVisible = !showSettings && !showDocuments && !showSchedule && !showMemory && !showSkills && !showAdminUsers && !viewingPublicUser;
+  const anyDetailOpen = showSettings || showDocuments || showSchedule || showMemory || showSkills || showAdminUsers || viewingPublicUser !== null;
+  // On narrow screens the tab root (AI头条 / 联系人 / 我的) replaces the
+  // chat as the default view; everything else layers on top with a back arrow.
+  const mobileRootView = isNarrow && !anyDetailOpen && !mobileChatOpen;
+  const chatVisible = !anyDetailOpen && (!isNarrow || mobileChatOpen);
+
+  // Leave any detail layer (or the chat) and return to the mobile tab root.
+  const closeMobileDetail = () => {
+    setShowSettings(false); setShowSchedule(false); setShowMemory(false);
+    setShowSkills(false); setShowDocuments(false); setShowAdminUsers(false);
+    setViewingPublicUser(null);
+    setMobileChatOpen(false);
+  };
+
+  const openTabDetail = (open: () => void) => () => {
+    setShowSettings(false); setShowSchedule(false); setShowMemory(false);
+    setShowSkills(false); setShowDocuments(false); setShowAdminUsers(false);
+    setViewingPublicUser(null);
+    setMobileChatOpen(false);
+    open();
+  };
+
+  const mobileTitleNode = mobileRootView
+    ? (mobileTab === 'feed' ? t('tabFeed') : mobileTab === 'contacts' ? t('tabContacts') : t('tabMine'))
+    : viewingPublicUser ? viewingPublicUser.username
+    : showSettings ? t('navSettings')
+    : showMemory ? t('navMemo')
+    : showSkills ? t('navSkillsConnectors')
+    : showDocuments ? t('documents')
+    : showSchedule ? t('schedule')
+    : showAdminUsers ? t('userManagement')
+    : (
+      <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <img src="/logo.png" alt="Jcowork" style={{ width: 20, height: 20 }} />
+        Jcowork
+      </span>
+    );
 
   return (
     <div style={{ display: 'flex', height: '100vh', background: '#111', color: '#eee' }}>
@@ -1331,17 +1390,28 @@ function AppInner() {
             </button>
           </div>
         )}
-        {/* Mobile top bar with hamburger */}
+        {/* Mobile top bar: hamburger at the tab root, back arrow in detail layers */}
         <div className="mobile-topbar">
-          <button
-            onClick={() => setMobileSidebar(true)}
-            style={{ background: 'none', border: 'none', color: '#eee', fontSize: 22, cursor: 'pointer', padding: '4px 8px' }}
-          >
-            ☰
-          </button>
-          <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 600, fontSize: 16 }}>
-            <img src="/logo.png" alt="Jcowork" style={{ width: 20, height: 20 }} />
-            Jcowork
+          {mobileRootView ? (
+            <button
+              onClick={() => setMobileSidebar(true)}
+              aria-label="menu"
+              style={{ background: 'none', border: 'none', color: '#eee', fontSize: 22, cursor: 'pointer', padding: '4px 8px' }}
+            >
+              ☰
+            </button>
+          ) : (
+            <button
+              onClick={closeMobileDetail}
+              aria-label={t('back')}
+              title={t('back')}
+              style={{ background: 'none', border: 'none', color: '#eee', fontSize: 22, cursor: 'pointer', padding: '4px 8px', lineHeight: 1 }}
+            >
+              ←
+            </button>
+          )}
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 600, fontSize: 16, flex: 1, minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap' }}>
+            {mobileTitleNode}
           </span>
           <span style={{ width: 30 }} />
         </div>
@@ -1366,6 +1436,39 @@ function AppInner() {
               </div>
             );
           })}
+          {/* Mobile tab root: AI头条 / 联系人 / 我的 */}
+          {mobileRootView && (
+            <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
+              {mobileTab === 'feed' ? (
+                activeAccount ? (
+                  <AiFeed accounts={accounts} activeToken={activeAccount.token} publicUsers={publicUsers} />
+                ) : null
+              ) : mobileTab === 'contacts' ? (
+                <ContactsTab
+                  accounts={accounts.map((a) => ({ userId: a.userId, username: a.username }))}
+                  activeUserId={activeUserId}
+                  streamingAccounts={streamingAccounts}
+                  unreadAccounts={unreadAccounts}
+                  onSwitchAccount={(id) => { handleSwitchAccount(id); setMobileChatOpen(true); }}
+                  onAddAccount={handleAddAccount}
+                  onRemoveAccount={handleRemoveAccount}
+                  publicUsers={publicUsers}
+                  onOpenPublicUser={(u) => {
+                    setViewingPublicUser(u);
+                    setShowSettings(false); setShowSchedule(false); setShowMemory(false);
+                    setShowSkills(false); setShowDocuments(false); setShowAdminUsers(false);
+                  }}
+                />
+              ) : (
+                <MineTab
+                  username={activeAccount?.username ?? ''}
+                  onMemory={openTabDetail(() => setShowMemory(true))}
+                  onSkills={openTabDetail(() => setShowSkills(true))}
+                  onSettings={openTabDetail(() => setShowSettings(true))}
+                />
+              )}
+            </div>
+          )}
           {viewingPublicUser && activeAccount ? (
             <PublicProfile
               viewerToken={activeAccount.token}
@@ -1386,6 +1489,25 @@ function AppInner() {
             <AdminUsers token={activeAccount.token} />
           ) : null}
         </div>
+        {/* Mobile bottom tab bar: shown only at the tab root */}
+        {mobileRootView && (
+          <div className="mobile-tabbar">
+            {([
+              ['feed', t('tabFeed'), '📰'],
+              ['contacts', t('tabContacts'), '👥'],
+              ['mine', t('tabMine'), '👤'],
+            ] as const).map(([key, label, icon]) => (
+              <button
+                key={key}
+                className={`mobile-tabbar-item${mobileTab === key ? ' tab-active' : ''}`}
+                onClick={() => setMobileTab(key)}
+              >
+                <span className="tab-icon">{icon}</span>
+                <span>{label}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

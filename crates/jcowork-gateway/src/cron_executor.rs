@@ -218,6 +218,7 @@ pub fn spawn_cron_executor(
     cron_scheduler: Arc<CronScheduler>,
     llm_router: Arc<RwLock<LlmRouter>>,
     default_model: String,
+    summary: Arc<crate::summary::SummaryService>,
     tool_registry: Arc<ToolRegistry>,
     memory_manager: Arc<MemoryManager>,
     skill_manager: Arc<SkillManager>,
@@ -296,6 +297,7 @@ pub fn spawn_cron_executor(
             let exec_result = std::panic::AssertUnwindSafe(execute_cron_task(
                 &cron_scheduler,
                 &llm_router,
+                &summary,
                 &tool_registry,
                 &memory_manager,
                 &skill_manager,
@@ -350,8 +352,9 @@ pub fn spawn_cron_executor(
 /// Execute a single cron task: call LLM and store the result.
 /// Returns Ok(()) if the result was stored successfully, Err otherwise.
 async fn execute_cron_task(
-    cron_scheduler: &CronScheduler,
+    cron_scheduler: &Arc<CronScheduler>,
     llm_router: &RwLock<LlmRouter>,
+    summary: &Arc<crate::summary::SummaryService>,
     tool_registry: &Arc<ToolRegistry>,
     memory_manager: &MemoryManager,
     skill_manager: &SkillManager,
@@ -464,8 +467,9 @@ async fn execute_cron_task(
     );
 
     // Always store a result
+    let result_id = uuid::Uuid::new_v4().to_string();
     let task_result = TaskResult {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: result_id.clone(),
         cron_job_id: cron_job_id.to_string(),
         user_id: user_id.to_string(),
         output,
@@ -473,6 +477,12 @@ async fn execute_cron_task(
         executed_at: chrono::Utc::now().to_rfc3339(),
     };
     cron_scheduler.store_task_result(task_result).await;
+
+    // Successful runs get an AI teaser for the feed card; failed outputs keep
+    // the raw error text, which already says what went wrong.
+    if status == "success" {
+        summary.ensure_task_summary(Arc::clone(cron_scheduler), &result_id);
+    }
 
     Ok(())
 }

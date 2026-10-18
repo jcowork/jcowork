@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useT } from '../i18n';
 import { API_BASE } from '../config';
+import { useIsNarrow } from '../utils/useIsNarrow';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -142,6 +143,7 @@ const treeMaxWidth = () => Math.max(TREE_MIN_WIDTH, Math.min(TREE_MAX_WIDTH, Mat
 const clampTreeWidth = (w: number) => Math.min(treeMaxWidth(), Math.max(TREE_MIN_WIDTH, w));
 
 export default function Documents({ token }: DocumentsProps) {
+  const isNarrow = useIsNarrow();
   const t = useT();
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1120,7 +1122,7 @@ export default function Documents({ token }: DocumentsProps) {
   };
 
   return (
-    <div style={{ display: 'flex', height: '100%' }}>
+    <div style={{ display: 'flex', height: '100%', flexDirection: isNarrow ? 'column' : 'row' }}>
       <style>{`
         .tree-row { background: transparent; }
         .tree-row:hover { background: #1e1e1e; }
@@ -1136,8 +1138,10 @@ export default function Documents({ token }: DocumentsProps) {
       `}</style>
       {/* File tree sidebar */}
       <div style={{
-        width: treeWidth,
-        borderRight: '1px solid #333',
+        width: isNarrow ? '100%' : treeWidth,
+        height: isNarrow ? (previewPath ? '38%' : '100%') : '100%',
+        borderRight: isNarrow ? 'none' : '1px solid #333',
+        borderBottom: isNarrow && previewPath ? '1px solid #333' : 'none',
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',
@@ -1363,6 +1367,7 @@ export default function Documents({ token }: DocumentsProps) {
         )}
       </div>
       {/* Drag the divider left/right to resize the workspace panel */}
+      {!isNarrow && (
       <div
         className="docs-resizer"
         data-resizing={treeResizing || undefined}
@@ -1381,7 +1386,12 @@ export default function Documents({ token }: DocumentsProps) {
           background: 'transparent',
         }}
       />
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+      )}
+      {(!isNarrow || previewPath) && (
+      <div style={{
+        flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0,
+        height: isNarrow ? '62%' : '100%',
+      }}>
         {previewPath ? (
           <>
             <div style={{
@@ -1727,6 +1737,7 @@ export default function Documents({ token }: DocumentsProps) {
           </div>
         )}
       </div>
+      )}
       {/* Delete confirmation dialog */}
       {deleteConfirm && (
         <div style={{
