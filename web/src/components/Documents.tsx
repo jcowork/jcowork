@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useT } from '../i18n';
 import { API_BASE } from '../config';
 import { useIsNarrow } from '../utils/useIsNarrow';
+import { buildDocUrl } from '../utils/docUrl';
+import { loadAccounts } from '../accountStore';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -142,7 +144,7 @@ const TREE_DEFAULT_WIDTH = 280;
 const treeMaxWidth = () => Math.max(TREE_MIN_WIDTH, Math.min(TREE_MAX_WIDTH, Math.floor(window.innerWidth * 0.6)));
 const clampTreeWidth = (w: number) => Math.min(treeMaxWidth(), Math.max(TREE_MIN_WIDTH, w));
 
-export default function Documents({ token }: DocumentsProps) {
+export default function Documents({ userId, token }: DocumentsProps) {
   const isNarrow = useIsNarrow();
   const t = useT();
   const [tree, setTree] = useState<TreeNode[]>([]);
@@ -702,22 +704,21 @@ export default function Documents({ token }: DocumentsProps) {
   };
 
   const openFile = async (filePath: string) => {
-    setPreviewPath(filePath);
-    setPreviewLoading(true);
-    setPreviewContent('');
-    setExcelData(null);
-    setDocChunks(null);
-    setPreviewMode('content');
-    setHtmlViewMode('preview');
-    setPreviewPaging(null);
-    setPreviewLoadingMore(false);
-    setEditing(false);
-    setEditDirty(false);
-
     const ext = filePath.split('.').pop()?.toLowerCase();
 
-    // Excel files: show the parsed SQLite database tables
+    // Excel files: show the parsed SQLite database tables in the in-app preview
     if (ext === 'xlsx' || ext === 'xls') {
+      setPreviewPath(filePath);
+      setPreviewLoading(true);
+      setPreviewContent('');
+      setExcelData(null);
+      setDocChunks(null);
+      setPreviewMode('content');
+      setHtmlViewMode('preview');
+      setPreviewPaging(null);
+      setPreviewLoadingMore(false);
+      setEditing(false);
+      setEditDirty(false);
       setActiveTable(0);
       const res = await fetch(`/api/workspace/excel-db?path=${encodeURIComponent(filePath)}`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -733,48 +734,10 @@ export default function Documents({ token }: DocumentsProps) {
       return;
     }
 
-    // PDF & Word files: get extracted text from workspace index (parsed during upload),
-    // first page only — more pages load automatically when scrolling down
-    if (ext === 'pdf' || ext === 'doc' || ext === 'docx') {
-      const res = await fetch(`/api/workspace/index/content?path=${encodeURIComponent(filePath)}&offset=0&limit=${PREVIEW_PAGE_SIZE}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setPreviewContent(data.content || '[No indexed content found]');
-        if (data.has_more) {
-          setPreviewPaging({ nextOffset: data.next_offset });
-        }
-      } else {
-        const docType = ext === 'pdf' ? 'PDF' : 'Word document';
-        setPreviewContent(`[${docType} not indexed. Please re-upload or re-index the directory.]`);
-      }
-      
-      // Also load chunks for vector search preview
-      const chunksRes = await fetch(`/api/workspace/doc/chunks?file_path=${encodeURIComponent(filePath)}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (chunksRes.ok) {
-        const chunksData = await chunksRes.json();
-        if (chunksData.chunks && chunksData.chunks.length > 0) {
-          setDocChunks(chunksData.chunks);
-        }
-      }
-    } else {
-      // Text files: fetch directly (use raw=true for HTML to get clean content)
-      const isHtml = ext === 'html' || ext === 'htm';
-      const rawParam = isHtml ? '&raw=true' : '';
-      const res = await fetch(`/api/workspace/download?path=${encodeURIComponent(filePath)}${rawParam}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (res.ok) {
-        const text = await res.text();
-        setPreviewContent(text);
-      } else {
-        setPreviewContent('Failed to load file.');
-      }
-    }
-    setPreviewLoading(false);
+    // Other documents open in the standalone full-screen viewer (DocViewer),
+    // the same browsing experience as clicking a document in the AI feed.
+    const account = loadAccounts().find((a) => a.userId === userId);
+    window.open(buildDocUrl(userId, account?.username ?? userId, filePath, false), '_blank');
   };
 
   // Fetch the next page of a long document and append it to the preview

@@ -35,8 +35,10 @@ export function DocViewer() {
       if (!params) return;
       if (!params.pub && !tokenRef.current) {
         const accounts = loadAccounts();
-        if (accounts.length === 0) return; // the needsLogin gate handles this
-        tokenRef.current = accounts[0].token;
+        const account =
+          accounts.find((a) => a.userId === params.userId) || accounts[0];
+        if (!account) return; // the needsLogin gate handles this
+        tokenRef.current = account.token;
       }
       setLoading(true);
       setError('');
