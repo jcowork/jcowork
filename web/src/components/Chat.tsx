@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useT } from '../i18n';
@@ -10,6 +10,7 @@ import {
   updateConvMessages,
   touchConversation,
 } from '../chatStore';
+import { loadAccounts } from '../accountStore';
 
 interface ContextDoc {
   name: string;
@@ -145,6 +146,38 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
   const t = useT();
   const [messages, setMessages] = useState<Message[]>(() => loadMessages(userId, conversationId));
   const [input, setInput] = useState('');
+  // Header title: nickname saved in memory wins, else the login username.
+  const accountName = useMemo(
+    () => loadAccounts().find((a) => a.userId === userId)?.username ?? '',
+    [userId],
+  );
+  const [nickname, setNickname] = useState('');
+  useEffect(() => {
+    if (!visible) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/memory', { headers: { Authorization: `Bearer ${token}` } });
+        if (!res.ok) return;
+        const items: { id: string; content: string }[] = await res.json();
+        // Nickname is free-text memory like "昵称：小明" / "称呼我为老王";
+        // the last matching entry wins (memories come back oldest first).
+        let found = '';
+        for (const item of items) {
+          const m = item.content.match(/(?:昵称|称呼)(?:[是为叫:：=,，\s]|我)*([^\n]{1,40})/);
+          if (!m?.[1]) continue;
+          const cleaned = m[1]
+            .split(/[\s,，。;；、!？?!]/)[0]
+            .replace(/^["'“”‘’「『]+|["'“”‘’」』]+$/g, '');
+          if (cleaned) found = cleaned;
+        }
+        if (!cancelled) setNickname(found);
+      } catch {
+        // Title falls back to the username.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [visible, token]);
   // Public users available for @mention autocomplete
   const [publicUsers, setPublicUsers] = useState<{ userId: string; username: string }[]>([]);
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -786,7 +819,9 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       <div style={{ padding: '8px 16px', borderBottom: '1px solid #333', display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontWeight: 600 }}>Jcowork Agent</span>
+          <span style={{ fontWeight: 600, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {nickname || accountName || 'Jcowork Agent'}
+          </span>
           <span style={{ width: 8, height: 8, borderRadius: '50%', background: connected ? '#4caf50' : '#f44336' }} />
           {alarmActive && (
             <button
