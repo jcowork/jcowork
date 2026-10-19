@@ -27,6 +27,10 @@ const TRACE_RESULT_MAX: usize = 320;
 const TRACE_TEXT_MAX: usize = 500;
 /// Overall cap for the rendered trace appended to a failed result.
 const TRACE_TOTAL_MAX: usize = 60_000;
+/// Number of past execution results injected as history context into a cron run.
+const MAX_HISTORY_RESULTS: usize = 5;
+/// Maximum characters kept for a single historical result's output.
+const MAX_RESULT_CHARS: usize = 2000;
 
 /// Flatten whitespace and truncate to `max` chars on a char boundary.
 fn excerpt(s: &str, max: usize) -> String {
@@ -349,6 +353,65 @@ pub fn spawn_cron_executor(
     })
 }
 
+/// Format an RFC3339 executed_at as local time; fall back to the raw string.
+fn format_executed_at(executed_at: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(executed_at) {
+        Ok(t) => t
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string(),
+        Err(_) => executed_at.to_string(),
+    }
+}
+
+/// Truncate a historical result's output to `MAX_RESULT_CHARS` chars.
+fn truncate_history_output(output: &str) -> String {
+    if output.chars().count() > MAX_RESULT_CHARS {
+        let cut: String = output.chars().take(MAX_RESULT_CHARS).collect();
+        format!("{}…(已截断)", cut)
+    } else {
+        output.to_string()
+    }
+}
+
+/// Build the [Context] message carrying this job's past execution results,
+/// so a run can compare against history when its prompt asks for it.
+/// `results` must be newest-first (as returned by `list_task_results`).
+/// Returns None when the job has no history (first run).
+fn build_cron_history_context_msg(
+    results: &[TaskResult],
+) -> Option<jcowork_llm::provider::ChatMessage> {
+    if results.is_empty() {
+        return None;
+    }
+    let blocks: Vec<String> = results
+        .iter()
+        .take(MAX_HISTORY_RESULTS)
+        .enumerate()
+        .map(|(i, r)| {
+            format!(
+                "【最近第{}次】时间: {} | 状态: {}\n{}",
+                i + 1,
+                format_executed_at(&r.executed_at),
+                r.status,
+                truncate_history_output(&r.output),
+            )
+        })
+        .collect();
+    Some(jcowork_llm::provider::ChatMessage {
+        role: "user".to_string(),
+        content: format!(
+            "[Context] 以下是本周期任务此前{}次执行的结果记录(时间倒序)。如果本次指令要求与历史结果对比或分析趋势,请基于这些记录;当前这次执行的结果尚不在其中。\n\n{}",
+            blocks.len(),
+            blocks.join("\n\n")
+        ),
+        tool_calls: None,
+        tool_call_id: None,
+        reasoning_content: None,
+        images: None,
+    })
+}
+
 /// Execute a single cron task: call LLM and store the result.
 /// Returns Ok(()) if the result was stored successfully, Err otherwise.
 async fn execute_cron_task(
@@ -391,6 +454,11 @@ async fn execute_cron_task(
         },
     ];
 
+    // Fetch this job's past execution results (newest first; the current run
+    // is only stored after run_turn, so these are strictly historical).
+    let past_results = cron_scheduler.list_task_results(cron_job_id).await;
+    let history_ctx = build_cron_history_context_msg(&past_results);
+
     // Build tools filtered by user's enabled skills
     let (_skill_prompt, enabled_skill_ids) =
         agent_loop::build_skill_prompt(memory_manager, skill_manager, user_id).await;
@@ -417,7 +485,7 @@ async fn execute_cron_task(
         provider,
         tool_registry: tool_registry.clone(),
         tool_ctx: &tool_ctx,
-        pre_context: None,
+        pre_context: history_ctx.as_ref(),
         max_turns: 60,
         llm_timeout_secs: 120,
         stream_timeout_secs: 120,
@@ -566,5 +634,68 @@ mod tests {
     fn trace_is_empty_without_events() {
         let mut sink = LogSink::new();
         assert_eq!(sink.render_trace(), "");
+    }
+
+    fn make_result(id: &str, executed_at: &str, status: &str, output: &str) -> TaskResult {
+        TaskResult {
+            id: id.to_string(),
+            cron_job_id: "job-1".to_string(),
+            user_id: "u1".to_string(),
+            output: output.to_string(),
+            status: status.to_string(),
+            executed_at: executed_at.to_string(),
+        }
+    }
+
+    #[test]
+    fn history_context_is_none_without_results() {
+        assert!(build_cron_history_context_msg(&[]).is_none());
+    }
+
+    #[test]
+    fn history_context_truncates_long_output() {
+        let results = [make_result(
+            "r1",
+            "2026-10-19T01:00:00Z",
+            "success",
+            &"长".repeat(3000),
+        )];
+        let msg = build_cron_history_context_msg(&results).expect("context for non-empty history");
+        assert_eq!(msg.role, "user");
+        assert!(msg.content.contains("(已截断)"), "content: {}", msg.content);
+        assert!(msg.content.contains("状态: success"));
+        assert!(msg.content.contains("时间: "));
+        assert!(!msg.content.contains("T01:00:00Z"), "raw RFC3339 leaked");
+        assert!(msg.content.contains("当前这次执行的结果尚不在其中"));
+    }
+
+    #[test]
+    fn history_context_keeps_only_recent_five() {
+        // 7 results ordered newest-first, as list_task_results returns.
+        let results: Vec<TaskResult> = (1..=7)
+            .rev()
+            .map(|i| {
+                make_result(
+                    &format!("r{}", i),
+                    &format!("2026-10-{:02}T01:00:00Z", i),
+                    "success",
+                    &format!("output-{}", i),
+                )
+            })
+            .collect();
+        let msg = build_cron_history_context_msg(&results).expect("context for non-empty history");
+        assert!(msg.content.contains("output-7"), "newest kept first");
+        assert!(msg.content.contains("output-3"), "5th newest kept");
+        assert!(!msg.content.contains("output-2"), "older dropped");
+        assert!(!msg.content.contains("output-1"), "oldest dropped");
+        assert!(msg.content.contains("此前5次"));
+    }
+
+    #[test]
+    fn history_context_falls_back_to_raw_time_when_unparseable() {
+        let results = [make_result("r1", "not-a-timestamp", "error", "boom")];
+        let msg = build_cron_history_context_msg(&results).expect("context for non-empty history");
+        assert!(msg.content.contains("时间: not-a-timestamp"));
+        assert!(msg.content.contains("状态: error"));
     }
 }
