@@ -11,6 +11,7 @@ import {
   touchConversation,
 } from '../chatStore';
 import { loadAccounts } from '../accountStore';
+import { useIsNarrow } from '../utils/useIsNarrow';
 
 interface ContextDoc {
   name: string;
@@ -218,6 +219,12 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
   // Image attachment state
   const [selectedImages, setSelectedImages] = useState<SelectedImage[]>([]);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+
+  // Attach "+" menu (mobile): folds doc picker / link / photo into one button
+  const isNarrow = useIsNarrow();
+  const [attachOpen, setAttachOpen] = useState(false);
+  const attachRef = useRef<HTMLDivElement>(null);
 
   // Reset conversation-scoped state when switching to a different conversation
   // (clicking "+" for a new task chat, or picking a history item). The Chat
@@ -468,6 +475,9 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
       if (urlInputRef.current && !urlInputRef.current.contains(e.target as Node)) {
         setShowUrlInput(false);
       }
+      if (attachRef.current && !attachRef.current.contains(e.target as Node)) {
+        setAttachOpen(false);
+      }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
@@ -555,27 +565,6 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
 
   const sendMessage = async () => {
     if ((!input.trim() && selectedImages.length === 0) || !connected || streaming) return;
-
-    // Images require the image_to_html skill to be enabled
-    if (selectedImages.length > 0) {
-      let skillEnabled = false;
-      try {
-        const res = await fetch('/api/skills/all', {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (res.ok) {
-          const skills: { id: string; enabled: boolean }[] = await res.json();
-          skillEnabled = skills.some((s) => s.id === 'builtin:image_to_html' && s.enabled);
-        }
-      } catch {}
-      if (!skillEnabled) {
-        setMessages((prev) => [
-          ...prev,
-          { role: 'system', content: `⚠️ ${t('imageSkillRequired')}`, timestamp: Date.now() },
-        ]);
-        return;
-      }
-    }
 
     const images = selectedImages.length > 0 ? selectedImages : undefined;
     const msg: Message = {
@@ -1129,8 +1118,78 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
 
         {/* Input row */}
         <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+          {/* Attach area: desktop shows 3 buttons; mobile folds them into a "+" menu */}
+          <div
+            ref={attachRef}
+            style={{ position: 'relative', display: 'flex', gap: isNarrow ? 0 : 8, alignItems: 'flex-end', flexShrink: 0 }}
+          >
+          {/* Mobile "+" attach menu */}
+          {isNarrow && (
+            <>
+              <button
+                onClick={() => setAttachOpen(!attachOpen)}
+                disabled={!connected || streaming}
+                title={t('attachMenu')}
+                style={{
+                  padding: '8px 12px',
+                  borderRadius: 8,
+                  border: '1px solid #555',
+                  background: attachOpen || selectedImages.length > 0 || selectedDocs.length > 0 ? '#1e3a5a' : '#1a1a1a',
+                  color: attachOpen || selectedImages.length > 0 || selectedDocs.length > 0 ? '#8ab4f8' : '#aaa',
+                  cursor: 'pointer',
+                  fontSize: 14,
+                  lineHeight: 1,
+                  flexShrink: 0,
+                }}
+              >
+                ＋
+              </button>
+              {attachOpen && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    bottom: '100%',
+                    left: 0,
+                    marginBottom: 4,
+                    background: '#1a1a1a',
+                    border: '1px solid #333',
+                    borderRadius: 8,
+                    boxShadow: '0 4px 16px rgba(0,0,0,0.5)',
+                    padding: 4,
+                    zIndex: 100,
+                    minWidth: 140,
+                  }}
+                >
+                  {([
+                    ['📎', t('attachDocMenu'), () => openDocPicker()],
+                    ['🔗', t('attachLinkMenu'), () => { setUrlInput(''); setShowUrlInput(true); }],
+                    ['📷', t('takePhoto'), 'camera'],
+                    ['🖼', t('photoLibrary'), 'gallery'],
+                  ] as [string, string, string | (() => void)][]).map(([icon, label, action]) => (
+                    <div
+                      key={label}
+                      onClick={() => {
+                        setAttachOpen(false);
+                        if (action === 'camera') cameraInputRef.current?.click();
+                        else if (action === 'gallery') imageInputRef.current?.click();
+                        else (action as () => void)();
+                      }}
+                      style={{ padding: '8px 10px', borderRadius: 4, cursor: 'pointer', fontSize: 13, color: '#ccc', display: 'flex', alignItems: 'center', gap: 8 }}
+                      onMouseEnter={e => { e.currentTarget.style.background = '#2a2a2a'; }}
+                      onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+                    >
+                      <span>{icon}</span>
+                      <span>{label}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+
           {/* Doc picker button */}
           <div style={{ position: 'relative' }} ref={docPickerRef}>
+            {!isNarrow && (
             <button
               onClick={openDocPicker}
               disabled={!connected || streaming}
@@ -1149,6 +1208,7 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
             >
               📎
             </button>
+            )}
 
             {/* Doc picker dropdown */}
             {showDocPicker && (
@@ -1225,6 +1285,7 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
 
           {/* URL reference button */}
           <div style={{ position: 'relative' }} ref={urlInputRef}>
+            {!isNarrow && (
             <button
               onClick={() => { setShowUrlInput(!showUrlInput); setUrlInput(''); }}
               disabled={!connected || streaming || urlFetching}
@@ -1243,6 +1304,7 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
             >
               {urlFetching ? '⏳' : '🔗'}
             </button>
+            )}
 
             {/* URL input popover */}
             {showUrlInput && (
@@ -1302,7 +1364,7 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
             )}
           </div>
 
-          {/* Image attach button */}
+          {/* Image attach: gallery input (multi) + camera capture input (mobile menu) */}
           <input
             ref={imageInputRef}
             type="file"
@@ -1311,6 +1373,15 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
             style={{ display: 'none' }}
             onChange={e => { handleImageFiles(e.target.files); e.target.value = ''; }}
           />
+          <input
+            ref={cameraInputRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            style={{ display: 'none' }}
+            onChange={e => { handleImageFiles(e.target.files); e.target.value = ''; }}
+          />
+          {!isNarrow && (
           <button
             onClick={() => imageInputRef.current?.click()}
             disabled={!connected || streaming}
@@ -1329,6 +1400,8 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
           >
             🖼
           </button>
+          )}
+          </div>
 
           {/* Text input + @mention autocomplete */}
           <div style={{ position: 'relative', flex: 1, display: 'flex', minWidth: 0 }}>

@@ -525,13 +525,19 @@ pub async fn ws_handler(
                             history[0].content = system_prompt.clone();
                         }
 
-                        // ── Handle image attachments: convert to HTML via a vision model ──
-                        // Snapshot how many HTML delivery messages we already have:
-                        // entries added while handling this message get pushed into
-                        // the history right after the user message below.
+                        // ── Handle image attachments ──
+                        // Plain image Q&A is answered natively by the chat model when it
+                        // supports vision. HTML conversion only runs when the user
+                        // explicitly asks for it — or as a fallback so a text-only chat
+                        // model can still reason about the picture.
                         let html_msgs_base = delivered_html_messages.len();
+                        let has_images = input.images.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
+                        let wants_image_html = has_images && user_wants_image_html(&user_content);
+                        let native_images = has_images
+                            && !wants_image_html
+                            && llm_router.read().map(|r| r.model_supports_vision(model_str)).unwrap_or(false);
                         if let Some(imgs) = &input.images {
-                            if !imgs.is_empty() {
+                            if !imgs.is_empty() && !native_images {
                                 // Live re-check skill enablement and read the skill config
                                 // (enabled_skill_ids is computed once at connection start
                                 // and may be stale).
@@ -542,7 +548,7 @@ pub async fn ws_handler(
                                 let image_skill_enabled = memory_entries
                                     .iter()
                                     .any(|e| e.category == "skill_enabled" && e.content == "builtin:image_to_html");
-                                if !image_skill_enabled {
+                                if wants_image_html && !image_skill_enabled {
                                     let _ = ws_sender.send(Message::Text(
                                         serde_json::json!({"type": "error", "message": "无法处理图片输入：请先在「技能」页面开启「图片转HTML」技能"})
                                             .to_string().into(),
@@ -601,8 +607,13 @@ pub async fn ws_handler(
 
                                 let mut conversion_failed = false;
                                 for img in imgs {
+                                    let convert_note = if wants_image_html {
+                                        format!("🖼 正在用 {} 将图片 {} 转换为 HTML ...", vision_model, img.name)
+                                    } else {
+                                        format!("🖼 对话模型不支持视觉输入，正用 {} 把图片 {} 转成文字描述供问答参考 ...", vision_model, img.name)
+                                    };
                                     let _ = ws_sender.send(Message::Text(
-                                        serde_json::json!({"type": "status", "message": format!("🖼 正在用 {} 将图片 {} 转换为 HTML ...", vision_model, img.name)})
+                                        serde_json::json!({"type": "status", "message": convert_note})
                                             .to_string().into(),
                                     )).await;
 
@@ -747,10 +758,12 @@ pub async fn ws_handler(
                         }
 
                         // Add user message to history
-                        let user_content = if user_content.trim().is_empty()
-                            && input.images.as_ref().map(|v| !v.is_empty()).unwrap_or(false)
-                        {
-                            "请基于图片转换得到的 HTML，介绍图片的内容。".to_string()
+                        let user_content = if user_content.trim().is_empty() && has_images {
+                            if native_images {
+                                "请描述这张图片的内容。".to_string()
+                            } else {
+                                "请基于图片转换得到的 HTML，介绍图片的内容。".to_string()
+                            }
                         } else {
                             user_content
                         };
@@ -760,7 +773,13 @@ pub async fn ws_handler(
                             tool_calls: None,
                             tool_call_id: None,
                             reasoning_content: None,
-                            images: None,
+                            images: if native_images {
+                                input.images.as_ref().map(|imgs| {
+                                    imgs.iter().map(|i| i.data.clone()).collect()
+                                })
+                            } else {
+                                None
+                            },
                         });
 
                         // Record the converted HTML as the assistant's own messages right
@@ -1023,5 +1042,39 @@ pub async fn ws_handler(
                 }
             }
         }
+    }
+}
+
+/// True when the message text explicitly asks to convert an uploaded image
+/// into HTML / a web page, as opposed to asking questions about the image.
+fn user_wants_image_html(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    if !lower.contains("html") && !text.contains("网页") {
+        return false;
+    }
+    ["转", "转换", "生成", "还原", "变", "变成", "做", "制作", "输出", "导出", "画"]
+        .iter()
+        .any(|kw| lower.contains(kw))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::user_wants_image_html;
+
+    #[test]
+    fn html_intent_detection() {
+        // Explicit conversion requests
+        assert!(user_wants_image_html("把这张图转成html"));
+        assert!(user_wants_image_html("帮我生成一个网页"));
+        assert!(user_wants_image_html("还原成网页"));
+        assert!(user_wants_image_html("输出HTML代码"));
+        // Plain image Q&A — no conversion intent
+        assert!(!user_wants_image_html("这张图里写了什么"));
+        assert!(!user_wants_image_html("介绍一下图片内容"));
+        assert!(!user_wants_image_html("图上有几个人"));
+        // Mentions html but not as a conversion request
+        assert!(!user_wants_image_html("html 是什么缩写"));
+        assert!(!user_wants_image_html(""));
+        assert!(!user_wants_image_html("这张网页截图好看吗"));
     }
 }
