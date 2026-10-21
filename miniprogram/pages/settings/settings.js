@@ -41,8 +41,10 @@ Page({
       providers.forEach((p) => {
         const models = p.models && p.models.length ? p.models : [];
         models.forEach((m) => {
-          labels.push((p.name || p.id) + ' · ' + m);
-          values.push(p.id + ':' + m);
+          const modelId = typeof m === 'string' ? m : (m && m.id) || '';
+          if (!modelId) return;
+          labels.push((p.name || p.id) + ' · ' + (typeof m === 'string' ? m : m.name || modelId));
+          values.push(p.id + ':' + modelId);
         });
       });
       const current = store.getModel(this.userId);

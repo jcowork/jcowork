@@ -19,6 +19,18 @@
  */
 const path = require('path');
 
+// Node 20 exposes the WebSocket client only behind --experimental-websocket;
+// relaunch once instead of making callers remember the flag.
+if (typeof WebSocket === 'undefined' && !process.execArgv.includes('--experimental-websocket')) {
+  const { spawnSync } = require('child_process');
+  const run = spawnSync(
+    process.execPath,
+    ['--experimental-websocket', ...process.execArgv, __filename, ...process.argv.slice(2)],
+    { stdio: 'inherit' }
+  );
+  process.exit(run.status === null ? 1 : run.status);
+}
+
 const BASE = (process.argv[2] || process.env.JC_SERVER || 'http://localhost:3000').replace(/\/+$/, '');
 const MP = path.join(__dirname, '..', 'miniprogram');
 const TOKEN = (process.env.JCWORK_SMOKE_TOKEN || '').trim();

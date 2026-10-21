@@ -298,7 +298,7 @@ function changePassword(newPassword) {
 
 // ─── 其他 ────────────────────────────────────────────────
 
-/** 可用 LLM provider 列表（仅已注册的活跃 provider）→ { providers:[{id,name,models}], default_model } */
+/** 可用 LLM provider 列表（仅已注册的活跃 provider）→ { providers:[{id,name,models:[{id,name,...}]}], default_model } */
 function fetchProviders() {
   return request('/api/providers');
 }
