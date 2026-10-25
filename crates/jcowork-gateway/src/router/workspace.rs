@@ -90,6 +90,34 @@ pub(crate) async fn list_workspace_files_recursive(
     }
 }
 
+/// Map a workspace file path to the HTTP content type served for it.
+///
+/// PDFs are served as `application/pdf` so browsers and webviews render the
+/// original document inline (e.g. the DocViewer's "Original PDF" mode).
+pub(crate) fn content_type_for_path(path: &str) -> &'static str {
+    if path.ends_with(".html") || path.ends_with(".htm") {
+        "text/html; charset=utf-8"
+    } else if path.ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else if path.ends_with(".js") || path.ends_with(".mjs") {
+        "application/javascript; charset=utf-8"
+    } else if path.ends_with(".json") {
+        "application/json; charset=utf-8"
+    } else if path.ends_with(".svg") {
+        "image/svg+xml"
+    } else if path.ends_with(".pdf") {
+        "application/pdf"
+    } else if path.ends_with(".png") || path.ends_with(".jpg")
+        || path.ends_with(".jpeg") || path.ends_with(".gif")
+        || path.ends_with(".webp") || path.ends_with(".ico")
+    {
+        // For binary images, we'd need a different approach; return as download
+        "application/octet-stream"
+    } else {
+        "text/plain; charset=utf-8"
+    }
+}
+
 pub(crate) async fn download_workspace_file(
     State(state): State<AppState>,
     axum::Extension(auth_user): axum::Extension<AuthUser>,
@@ -98,35 +126,18 @@ pub(crate) async fn download_workspace_file(
     let workspace_root = format!("{}/{}/workspace", state.data_dir, auth_user.user_id);
     let store = FileStore::new(&workspace_root);
 
-    match store.read_file(&params.path).await {
+    match store.read_file_bytes(&params.path).await {
         Ok(content) => {
             // Determine content type from extension
             let is_html = params.path.ends_with(".html") || params.path.ends_with(".htm");
-            let content_type = if is_html {
-                "text/html; charset=utf-8"
-            } else if params.path.ends_with(".css") {
-                "text/css; charset=utf-8"
-            } else if params.path.ends_with(".js") || params.path.ends_with(".mjs") {
-                "application/javascript; charset=utf-8"
-            } else if params.path.ends_with(".json") {
-                "application/json; charset=utf-8"
-            } else if params.path.ends_with(".svg") {
-                "image/svg+xml"
-            } else if params.path.ends_with(".png") || params.path.ends_with(".jpg")
-                || params.path.ends_with(".jpeg") || params.path.ends_with(".gif")
-                || params.path.ends_with(".webp") || params.path.ends_with(".ico")
-            {
-                // For binary images, we'd need a different approach; return as download
-                "application/octet-stream"
-            } else {
-                "text/plain; charset=utf-8"
-            };
+            let content_type = content_type_for_path(&params.path);
 
             // For HTML files, inject a script that overrides fetch() to resolve
             // relative URLs against the workspace download API. This allows HTML
             // files to load sibling files (e.g. CSV data) regardless of whether
             // they are opened in an iframe, a new tab, or an external browser.
             let final_content = if is_html && !params.raw {
+                let content = String::from_utf8_lossy(&content).into_owned();
                 let dir = params.path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
                 let token = &auth_user.token;
                 let inject_script = format!(
@@ -155,11 +166,11 @@ pub(crate) async fn download_workspace_file(
                     token_json = serde_json::to_string(token).unwrap_or_default(),
                 );
                 if let Some(pos) = content.find("<head>") {
-                    format!("{}{}{}", &content[..pos + 6], inject_script, &content[pos + 6..])
+                    format!("{}{}{}", &content[..pos + 6], inject_script, &content[pos + 6..]).into_bytes()
                 } else if let Some(pos) = content.find("<HEAD>") {
-                    format!("{}{}{}", &content[..pos + 6], inject_script, &content[pos + 6..])
+                    format!("{}{}{}", &content[..pos + 6], inject_script, &content[pos + 6..]).into_bytes()
                 } else {
-                    format!("{}{}", inject_script, content)
+                    format!("{}{}", inject_script, content).into_bytes()
                 }
             } else {
                 content

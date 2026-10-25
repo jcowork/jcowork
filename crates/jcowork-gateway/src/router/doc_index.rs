@@ -164,6 +164,37 @@ pub(crate) async fn get_indexed_content(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct UpdateIndexedContentRequest {
+    path: String,
+    content: String,
+}
+
+/// PUT /api/workspace/index/content — overwrite the indexed content text of
+/// a document, i.e. its parsed preview. Used by the viewer's editor for PDF
+/// extractions and other indexed files; the raw file on disk is untouched.
+/// Operates strictly on the requester's own index.
+pub(crate) async fn update_indexed_content(
+    State(state): State<AppState>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Json(body): Json<UpdateIndexedContentRequest>,
+) -> impl IntoResponse {
+    let index = match WorkspaceIndex::cached(&state.data_dir, &auth_user.user_id).await {
+        Ok(idx) => idx,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Failed to open index: {}", e) })),
+            ).into_response();
+        }
+    };
+
+    match index.update_content(&body.path, &body.content).await {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "ok": true, "path": body.path }))).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
 // --- Vector Search API ---
 
 #[derive(Debug, Deserialize)]

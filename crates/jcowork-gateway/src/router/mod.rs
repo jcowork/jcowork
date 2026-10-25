@@ -452,7 +452,8 @@ pub fn build_router(state: AppState) -> Router {
         // standalone-doc link works for recipients with no account. The
         // handler itself gates on the owner being public and the document
         // carrying the is_public flag.
-        .route("/api/public-users/{user_id}/documents/content", get(public_users::get_public_document_content));
+        .route("/api/public-users/{user_id}/documents/content", get(public_users::get_public_document_content))
+        .route("/api/public-users/{user_id}/documents/download", get(public_users::download_public_document));
 
     // Protected routes (auth required)
     let protected = Router::new()
@@ -515,6 +516,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/workspace/index/list", get(doc_index::list_workspace_index))
         .route("/api/workspace/index/public", put(doc_index::set_document_public))
         .route("/api/workspace/index/content", get(doc_index::get_indexed_content))
+        .route("/api/workspace/index/content", put(doc_index::update_indexed_content))
         .route("/api/workspace/index/reindex", post(doc_index::reindex_workspace_dir))
         .route("/api/workspace/vector/search", get(doc_index::vector_search_chunks))
         .route("/api/workspace/doc/chunks", get(doc_index::get_document_chunks))

@@ -3096,3 +3096,132 @@ async fn test_public_document_content_requires_no_login() {
     let feed = get_feed_json(&app, &a_token).await;
     assert_eq!(feed["items"][0]["is_public"], json!(true));
 }
+
+/// The raw-file download endpoint behind the DocViewer's "Original PDF" mode:
+/// public document + public account serves the file without login; a document
+/// that is not flagged public stays hidden.
+#[tokio::test]
+async fn test_public_document_download_serves_raw_file() {
+    let app = TestApp::new().await;
+    let (a_id, a_token) = app.provision_user().await;
+
+    let ws = format!("{}/{}/workspace", app.data_dir, a_id);
+    std::fs::create_dir_all(&ws).unwrap();
+    // Real PDF streams contain binary (non-UTF-8) bytes — the download
+    // endpoint must serve them byte-for-byte, not decode them as text.
+    let pdf_bytes = b"%PDF-1.4\nraw pdf bytes: \xff\xfe\x00\x89PNG-like binary\n%%EOF";
+    std::fs::write(format!("{}/doc.pdf", ws), pdf_bytes).unwrap();
+    let index = jcowork_storage::WorkspaceIndex::cached(&app.data_dir, &a_id)
+        .await
+        .unwrap();
+    index.add_document("doc.pdf", &ws).await.unwrap();
+
+    // Not public yet: the anonymous download endpoint must refuse.
+    let res = app
+        .make_request_with_token(
+            None,
+            "GET",
+            &format!("/api/public-users/{}/documents/download?path=doc.pdf", a_id),
+            None,
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // Mark the document public and the account public (admin).
+    let res = app
+        .make_request_with_token(
+            Some(&a_token),
+            "PUT",
+            "/api/workspace/index/public",
+            Some(json!({ "path": "doc.pdf", "is_public": true })),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let admin_token = app.seed_and_login_admin().await;
+    let res = app
+        .make_request_with_token(
+            Some(&admin_token),
+            "POST",
+            &format!("/api/admin/users/{}/public", a_id),
+            Some(json!({ "is_public": true })),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Now the original file is served without any Authorization header,
+    // with the PDF content type so the viewer renders it inline.
+    let res = app
+        .make_request_with_token(
+            None,
+            "GET",
+            &format!("/api/public-users/{}/documents/download?path=doc.pdf", a_id),
+            None,
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/pdf")
+    );
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(&body[..], pdf_bytes);
+}
+
+/// PUT /api/workspace/index/content overwrites the indexed (parsed) preview
+/// text of a document — the storage behind the PDF parsed-content editor.
+/// The raw file on disk stays untouched, and unindexed paths are refused.
+#[tokio::test]
+async fn test_update_indexed_content_overwrites_parsed_preview() {
+    let app = TestApp::new().await;
+    let (a_id, a_token) = app.provision_user().await;
+
+    let ws = format!("{}/{}/workspace", app.data_dir, a_id);
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(format!("{}/note.md", ws), "# Original content\n").unwrap();
+    let index = jcowork_storage::WorkspaceIndex::cached(&app.data_dir, &a_id)
+        .await
+        .unwrap();
+    index.add_document("note.md", &ws).await.unwrap();
+
+    // Unindexed path → 404.
+    let res = app
+        .make_request_with_token(
+            Some(&a_token),
+            "PUT",
+            "/api/workspace/index/content",
+            Some(json!({ "path": "missing.md", "content": "nope" })),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // Overwrite the indexed content (as the PDF parsed-content editor does).
+    let res = app
+        .make_request_with_token(
+            Some(&a_token),
+            "PUT",
+            "/api/workspace/index/content",
+            Some(json!({ "path": "note.md", "content": "# Edited by the user\n" })),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // The content endpoint now serves the edited text.
+    let res = app
+        .make_request_with_token(
+            Some(&a_token),
+            "GET",
+            "/api/workspace/index/content?path=note.md",
+            None,
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["content"], "# Edited by the user\n");
+
+    // The raw file on disk is untouched.
+    let raw = std::fs::read_to_string(format!("{}/note.md", ws)).unwrap();
+    assert_eq!(raw, "# Original content\n");
+}

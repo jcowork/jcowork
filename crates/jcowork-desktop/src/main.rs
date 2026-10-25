@@ -502,7 +502,7 @@ async fn main() {
 
     // ── 17. Launch Tauri desktop app ──
     if let Err(e) = tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![open_in_browser, get_web_access_url])
+        .invoke_handler(tauri::generate_handler![open_in_browser, get_web_access_url, open_doc_window])
         .run(tauri::generate_context!()) {
         error!(error = %e, "Tauri application error");
         eprintln!("Tauri error: {}", e);
@@ -515,6 +515,32 @@ async fn main() {
 #[tauri::command]
 fn open_in_browser(url: String) -> Result<(), String> {
     open::that(&url).map_err(|e| format!("Failed to open browser: {}", e))
+}
+
+/// Counter for unique document window labels.
+static DOC_WINDOW_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Open the standalone document viewer in a separate app window.
+///
+/// `window.open` is blocked inside the Tauri webview, so the frontend routes
+/// document links here instead; a real OS window gives the same "new tab"
+/// experience as the web app (and keeps the main window's state intact).
+#[tauri::command]
+fn open_doc_window(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    let label = format!(
+        "doc-{}",
+        DOC_WINDOW_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let parsed: tauri::Url = url
+        .parse()
+        .map_err(|e| format!("Invalid document URL: {}", e))?;
+    tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::External(parsed))
+        .title("Jcowork")
+        .inner_size(1000.0, 800.0)
+        .min_inner_size(600.0, 400.0)
+        .build()
+        .map_err(|e| format!("Failed to open document window: {}", e))?;
+    Ok(())
 }
 
 /// Return a browser-reachable URL for the embedded web app.

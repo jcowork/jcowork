@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useT } from '../i18n';
 import { ResultMarkdown } from './Schedule';
-import { buildDocUrl } from '../utils/docUrl';
+import { buildDocUrl, openStandaloneDoc } from '../utils/docUrl';
 
 /** Feed items per source page request. */
 const PAGE = 20;
@@ -344,7 +344,7 @@ export default function AiFeed({ accounts, activeToken, publicUsers }: AiFeedPro
 
   const openStandalone = () => {
     const url = docStandaloneUrl();
-    if (url) window.open(url, '_blank');
+    if (url) openStandaloneDoc(url);
   };
 
   const shareDoc = async () => {

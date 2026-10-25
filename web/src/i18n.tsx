@@ -162,6 +162,8 @@ const translations = {
     copyLink: '复制链接',
     linkCopied: '链接已复制',
     docNeedsLogin: '该文档需要登录后查看',
+    parsedContent: '解析内容',
+    originalPdf: '原始PDF',
 
     // Chat
     typeMessage: '输入消息...',
@@ -697,6 +699,8 @@ const translations = {
     copyLink: 'Copy link',
     linkCopied: 'Link copied',
     docNeedsLogin: 'Sign in to view this document',
+    parsedContent: 'Parsed content',
+    originalPdf: 'Original PDF',
 
     // Chat
     typeMessage: 'Type a message...',

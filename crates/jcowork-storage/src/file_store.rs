@@ -113,6 +113,14 @@ impl FileStore {
         Ok(content)
     }
 
+    /// Read a file's raw bytes (required for binary files such as PDFs).
+    pub async fn read_file_bytes(&self, path: &str) -> Result<Vec<u8>> {
+        let full_path = self.validate_path(path)?;
+        let content = fs::read(&full_path).await?;
+        info!(path = path, "Read file bytes");
+        Ok(content)
+    }
+
     /// Write content to a file, creating parent directories as needed.
     pub async fn write_file(&self, path: &str, content: &str) -> Result<()> {
         let full_path = self.validate_path(path)?;

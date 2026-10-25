@@ -8,6 +8,7 @@
   "permissions": [
     "core:default",
     "allow-open-in-browser",
-    "allow-get-web-access-url"
+    "allow-get-web-access-url",
+    "allow-open-doc-window"
   ]
 }

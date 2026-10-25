@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useT } from '../i18n';
 import { API_BASE } from '../config';
 import { useIsNarrow } from '../utils/useIsNarrow';
-import { buildDocUrl } from '../utils/docUrl';
+import { buildDocUrl, openStandaloneDoc } from '../utils/docUrl';
 import { loadAccounts } from '../accountStore';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -737,7 +737,7 @@ export default function Documents({ userId, token }: DocumentsProps) {
     // Other documents open in the standalone full-screen viewer (DocViewer),
     // the same browsing experience as clicking a document in the AI feed.
     const account = loadAccounts().find((a) => a.userId === userId);
-    window.open(buildDocUrl(userId, account?.username ?? userId, filePath, false), '_blank');
+    openStandaloneDoc(buildDocUrl(userId, account?.username ?? userId, filePath, false));
   };
 
   // Fetch the next page of a long document and append it to the preview

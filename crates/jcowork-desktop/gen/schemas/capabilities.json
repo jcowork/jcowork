@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capabilities for Jcowork desktop","remote":{"urls":["http://localhost:*"]},"local":true,"windows":["main"],"permissions":["core:default","allow-open-in-browser","allow-get-web-access-url"]}}
+{"default":{"identifier":"default","description":"Default capabilities for Jcowork desktop","remote":{"urls":["http://localhost:*"]},"local":true,"windows":["main"],"permissions":["core:default","allow-open-in-browser","allow-get-web-access-url","allow-open-doc-window"]}}

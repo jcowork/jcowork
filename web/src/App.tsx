@@ -114,6 +114,16 @@ const SMS_LOGIN_VISIBLE = false;
 export default function App() {
   // Standalone shared-document URLs (`#/doc?...`) render a bare viewer —
   // no login wall, no app shell — so a link can be opened by anyone.
+  //
+  // The hash can change without a page load (e.g. opening a document falls
+  // back to in-place navigation when the popup/desktop window is blocked),
+  // so re-evaluate the route on every hashchange.
+  const [, setHashTick] = useState(0);
+  useEffect(() => {
+    const onHash = () => setHashTick((v) => v + 1);
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
   const standaloneDoc = parseDocHash();
   return (
     <I18nProvider>

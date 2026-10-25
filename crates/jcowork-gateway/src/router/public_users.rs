@@ -15,7 +15,7 @@ use axum::{
 use serde::Deserialize;
 
 use super::{AppState, AuthUser};
-use jcowork_storage::WorkspaceIndex;
+use jcowork_storage::{FileStore, WorkspaceIndex};
 
 /// Verify that `user_id` refers to an existing public account.
 ///
@@ -179,6 +179,75 @@ pub(crate) async fn get_public_document_content(
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": format!("Failed to get content: {}", e) })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct PublicDownloadQuery {
+    path: String,
+}
+
+/// GET /api/public-users/{user_id}/documents/download — the raw file behind a
+/// public document (e.g. the original PDF for the viewer's "Original PDF"
+/// mode). Double-gated like the content endpoint: the target account must be
+/// public AND the document must be flagged public.
+pub(crate) async fn download_public_document(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    Query(query): Query<PublicDownloadQuery>,
+) -> impl IntoResponse {
+    if let Err(resp) = ensure_public_user(&state, &user_id).await {
+        return resp;
+    }
+
+    let index = match WorkspaceIndex::cached(&state.data_dir, &user_id).await {
+        Ok(idx) => idx,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Failed to open index: {}", e) })),
+            )
+                .into_response();
+        }
+    };
+
+    match index.is_public(&query.path).await {
+        Ok(Some(true)) => {}
+        _ => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "Document not public or not indexed" })),
+            )
+                .into_response();
+        }
+    }
+
+    let workspace_root = format!("{}/{}/workspace", state.data_dir, user_id);
+    let store = FileStore::new(&workspace_root);
+    match store.read_file_bytes(&query.path).await {
+        Ok(content) => {
+            let filename = query.path.rsplit('/').next().unwrap_or("file");
+            (
+                StatusCode::OK,
+                [
+                    (
+                        axum::http::header::CONTENT_TYPE,
+                        super::workspace::content_type_for_path(&query.path).to_string(),
+                    ),
+                    (
+                        axum::http::header::CONTENT_DISPOSITION,
+                        format!("inline; filename=\"{}\"", filename),
+                    ),
+                ],
+                content,
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": e.to_string() })),
         )
             .into_response(),
     }

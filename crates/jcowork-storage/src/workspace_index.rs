@@ -699,6 +699,40 @@ impl WorkspaceIndex {
         Ok(row.map(|r| r.0))
     }
 
+    /// Overwrite the indexed content text of a document — the parsed preview
+    /// (e.g. a user-edited PDF extraction). FTS stays in sync via the
+    /// `documents_fts_update` trigger; the teaser summary is cleared because
+    /// it is stale once the content changed, and chunks are rebuilt so vector
+    /// search matches the edited text.
+    pub async fn update_content(&self, file_path: &str, content: &str) -> Result<()> {
+        let updated = sqlx::query(
+            "UPDATE documents SET content_text = ?2, summary = '' WHERE file_path = ?1"
+        )
+        .bind(file_path)
+        .bind(content)
+        .execute(&self.pool)
+        .await?;
+
+        if updated.rows_affected() == 0 {
+            anyhow::bail!("Document not indexed: {}", file_path);
+        }
+
+        let ext = file_path
+            .rsplit('.')
+            .next()
+            .unwrap_or("")
+            .to_lowercase();
+        if matches!(ext.as_str(), "pdf" | "doc" | "docx" | "md" | "markdown") && !content.is_empty() {
+            self.delete_file_chunks(file_path).await?;
+            if let Err(e) = self.store_document_chunks(file_path, content).await {
+                warn!(file = %file_path, err = %e, "Failed to re-chunk edited document");
+            }
+        }
+
+        info!(file = %file_path, "Document content updated");
+        Ok(())
+    }
+
     /// Get a character-based slice of the indexed content, for paginated preview.
     ///
     /// `offset` is 0-based and counted in Unicode code points (SQLite
