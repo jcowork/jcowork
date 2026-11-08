@@ -164,6 +164,10 @@ const translations = {
     docNeedsLogin: '该文档需要登录后查看',
     parsedContent: '解析内容',
     originalPdf: '原始PDF',
+    findInDoc: '查找内容',
+    findNoResult: '无匹配',
+    prevMatch: '上一个匹配',
+    nextMatch: '下一个匹配',
 
     // Chat
     typeMessage: '输入消息...',
@@ -701,6 +705,10 @@ const translations = {
     docNeedsLogin: 'Sign in to view this document',
     parsedContent: 'Parsed content',
     originalPdf: 'Original PDF',
+    findInDoc: 'Find in document',
+    findNoResult: 'No matches',
+    prevMatch: 'Previous match',
+    nextMatch: 'Next match',
 
     // Chat
     typeMessage: 'Type a message...',

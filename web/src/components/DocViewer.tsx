@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useT } from '../i18n';
 import { ResultMarkdown } from './Schedule';
+import { EditorWithFind } from './EditorWithFind';
 import { loadAccounts } from '../accountStore';
 import { parseDocHash } from '../utils/docUrl';
 import type { DocViewerParams } from '../utils/docUrl';
@@ -41,6 +42,14 @@ export function DocViewer() {
   const [saving, setSaving] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
   const tokenRef = useRef<string>('');
+  // Preview position carried across preview ↔ editor switches: `enterRatioRef`
+  // seeks the editor to the spot being read, `returnPosRef` puts the preview
+  // back exactly where it was when the editor is left.
+  const previewScrollRef = useRef<HTMLDivElement>(null);
+  const editorRef = useRef<HTMLTextAreaElement>(null);
+  const htmlFrameRef = useRef<HTMLIFrameElement>(null);
+  const enterRatioRef = useRef<number | null>(null);
+  const returnPosRef = useRef<{ top: number; inFrame: boolean } | null>(null);
   // Only shown when the viewer replaced the app in the same tab (e.g. a
   // blocked popup) — then history holds the app to go back to.
   const [canGoBack] = useState(() => window.history.length > 1);
@@ -137,7 +146,73 @@ export function DocViewer() {
     }
   };
   
+  const capturePreviewPosition = useCallback(() => {
+    const frame = htmlFrameRef.current;
+    if (frame) {
+      // HTML previews scroll inside the iframe, not the outer container.
+      try {
+        const win = frame.contentWindow;
+        if (!win) return;
+        const max = win.document.documentElement.scrollHeight - win.innerHeight;
+        returnPosRef.current = { top: win.scrollY, inFrame: true };
+        enterRatioRef.current = max > 0 ? win.scrollY / max : 0;
+      } catch {
+        // Frame not accessible — fall back to the top.
+        returnPosRef.current = { top: 0, inFrame: true };
+        enterRatioRef.current = 0;
+      }
+      return;
+    }
+    const el = previewScrollRef.current;
+    if (!el) return;
+    const max = el.scrollHeight - el.clientHeight;
+    returnPosRef.current = { top: el.scrollTop, inFrame: false };
+    enterRatioRef.current = max > 0 ? el.scrollTop / max : 0;
+  }, []);
+
+  const applyPendingPosition = useCallback(() => {
+    if (editing) {
+      // Seek the editor once, to the fraction of the document being read.
+      const ratio = enterRatioRef.current;
+      const el = editorRef.current;
+      if (ratio != null && el) {
+        el.scrollTop = ratio * Math.max(0, el.scrollHeight - el.clientHeight);
+        enterRatioRef.current = null;
+      }
+      return;
+    }
+    const pos = returnPosRef.current;
+    if (pos == null) return;
+    if (loading) return; // preview content is still reloading
+    if (pos.inFrame) {
+      try {
+        const win = htmlFrameRef.current?.contentWindow;
+        if (!win) return;
+        const max = win.document.documentElement.scrollHeight - win.innerHeight;
+        if (max <= 0) return; // iframe not laid out yet; retried on load
+        win.scrollTo(0, Math.min(pos.top, max));
+        returnPosRef.current = null;
+      } catch {
+        returnPosRef.current = null;
+      }
+      return;
+    }
+    const el = previewScrollRef.current;
+    if (el) {
+      el.scrollTop = Math.min(pos.top, Math.max(0, el.scrollHeight - el.clientHeight));
+      returnPosRef.current = null;
+    }
+  }, [editing, loading]);
+
+  // Re-position once the target view (editor textarea or preview) has rendered.
+  useEffect(() => {
+    if (enterRatioRef.current == null && returnPosRef.current == null) return;
+    const id = requestAnimationFrame(applyPendingPosition);
+    return () => cancelAnimationFrame(id);
+  }, [applyPendingPosition, content, editing, loading]);
+
   const startEditing = async () => {
+    capturePreviewPosition();
     if (isPdf) {
       // The parsed view is paginated; fetch the full indexed content so the
       // editor always starts from the complete document.
@@ -331,6 +406,7 @@ export function DocViewer() {
       </div>
 
       <div
+        ref={previewScrollRef}
         style={{ flex: 1, minHeight: 0, overflowY: isHtml || pdfView ? 'hidden' : 'auto', WebkitOverflowScrolling: 'touch', display: 'flex', flexDirection: 'column' }}
         onScroll={(e) => {
           if (isHtml || pdfView || editing || nextOffset === null) return;
@@ -343,22 +419,17 @@ export function DocViewer() {
         {needsLogin ? (
           <div style={{ color: '#e57373', padding: 40, textAlign: 'center', fontSize: 13 }}>{t('docNeedsLogin')}</div>
         ) : editing ? (
-          <textarea
+          <EditorWithFind
+            textareaRef={editorRef}
             value={editContent}
-            onChange={(e) => { setEditContent(e.target.value); setEditDirty(true); }}
+            onChange={(v) => { setEditContent(v); setEditDirty(true); }}
             onKeyDown={(e) => {
               if ((e.metaKey || e.ctrlKey) && e.key === 's') {
                 e.preventDefault();
                 void saveEdit();
               }
             }}
-            spellCheck={false}
-            style={{
-              flex: 1, minHeight: 0, width: '100%', padding: 16,
-              background: '#0d1117', color: '#c9d1d9', border: 'none', outline: 'none',
-              resize: 'none', fontSize: 13, lineHeight: 1.6,
-              fontFamily: "'SF Mono', 'Fira Code', 'Consolas', monospace",
-            }}
+            containerStyle={{ flex: 1, minHeight: 0 }}
           />
         ) : error ? (
           <div style={{ color: '#e57373', padding: 40, textAlign: 'center', fontSize: 13 }}>{error}</div>
@@ -376,6 +447,8 @@ export function DocViewer() {
           )
         ) : isHtml ? (
           <iframe
+            ref={htmlFrameRef}
+            onLoad={applyPendingPosition}
             srcDoc={content}
             title={filename}
             sandbox="allow-scripts allow-same-origin"
