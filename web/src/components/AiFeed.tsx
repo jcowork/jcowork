@@ -57,10 +57,12 @@ interface FeedSource {
 interface AiFeedProps {
   /** All locally signed-in accounts (each contributes its own /api/feed). */
   accounts: { userId: string; username: string; token: string }[];
-  /** Token used for public-user feed requests. */
-  activeToken: string;
-  /** Public accounts visible to the active account. */
+  /** Token used for public-user feed requests; null when signed out. */
+  activeToken: string | null;
+  /** Public accounts visible to the viewer (also fetched for guests). */
   publicUsers: { userId: string; username: string }[];
+  /** Signed-out mode: when set, the header offers a sign-in entry. */
+  onLogin?: () => void;
 }
 
 interface FeedEntry {
@@ -124,7 +126,7 @@ interface TaskDetailData {
  * source with the newest buffered head; when a source's buffer runs dry but
  * has more pages, the next page is fetched before the merge continues.
  */
-export default function AiFeed({ accounts, activeToken, publicUsers }: AiFeedProps) {
+export default function AiFeed({ accounts, activeToken, publicUsers, onLogin }: AiFeedProps) {
   const t = useT();
   const sourcesRef = useRef<FeedSource[]>([]);
   const entriesRef = useRef<FeedEntry[]>([]);
@@ -153,7 +155,7 @@ export default function AiFeed({ accounts, activeToken, publicUsers }: AiFeedPro
   const fetchPage = useCallback(async (source: FeedSource): Promise<void> => {
     try {
       const res = await fetch(`${source.endpoint}?offset=${source.nextOffset}&limit=${PAGE}`, {
-        headers: { Authorization: `Bearer ${source.token}` },
+        headers: source.token ? { Authorization: `Bearer ${source.token}` } : undefined,
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
@@ -245,7 +247,7 @@ export default function AiFeed({ accounts, activeToken, publicUsers }: AiFeedPro
         username: u.username,
         isLocal: false,
         endpoint: `/api/public-users/${u.userId}/feed`,
-        token: activeToken,
+        token: activeToken ?? '',
         items: [],
         ptr: 0,
         nextOffset: 0,
@@ -280,8 +282,13 @@ export default function AiFeed({ accounts, activeToken, publicUsers }: AiFeedPro
     setDocError('');
     if (entry.item.type === 'task') {
       setTaskDetailLoading(true);
-      fetch(`/api/feed/results/${entry.item.id}`, {
-        headers: { Authorization: `Bearer ${entry.source.token}` },
+      // Local accounts read their own result; public sources use the
+      // signed-out endpoint (which re-checks that the owner is public).
+      const resultUrl = entry.source.isLocal
+        ? `/api/feed/results/${entry.item.id}`
+        : `/api/public-users/${entry.source.userId}/feed/results/${entry.item.id}`;
+      fetch(resultUrl, {
+        headers: entry.source.token ? { Authorization: `Bearer ${entry.source.token}` } : undefined,
       })
         .then(async (res) => {
           const data = await res.json().catch(() => ({}));
@@ -310,7 +317,9 @@ export default function AiFeed({ accounts, activeToken, publicUsers }: AiFeedPro
       ? `/api/workspace/index/content?path=${encodeURIComponent(entry.item.file_path)}&offset=${offset}&limit=${DOC_PAGE}`
       : `/api/public-users/${entry.source.userId}/documents/content?path=${encodeURIComponent(entry.item.file_path)}&offset=${offset}&limit=${DOC_PAGE}`;
     try {
-      const res = await fetch(url, { headers: { Authorization: `Bearer ${entry.source.token}` } });
+      const res = await fetch(url, {
+        headers: entry.source.token ? { Authorization: `Bearer ${entry.source.token}` } : undefined,
+      });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       setDocContent((prev) => (offset === 0 ? data.content || '' : prev + (data.content || '')));
@@ -504,7 +513,25 @@ export default function AiFeed({ accounts, activeToken, publicUsers }: AiFeedPro
         >
           {busy ? t('feedLoadingMore') : t('refresh')}
         </button>
+        {onLogin && (
+          <button
+            onClick={onLogin}
+            style={{
+              padding: '4px 12px', borderRadius: 6, border: 'none',
+              background: '#1a73e8', color: '#fff', cursor: 'pointer', fontSize: 12,
+            }}
+          >
+            {t('login')}
+          </button>
+        )}
       </div>
+
+      {/* Signed-out banner: the feed only carries public accounts' content */}
+      {onLogin && (
+        <div style={{ padding: '6px 14px', background: '#1a2433', borderBottom: '1px solid #24303f', fontSize: 12, color: '#8b98a9' }}>
+          {t('feedGuestHint')}
+        </div>
+      )}
 
       {/* Source failures */}
       {failedSources.length > 0 && (

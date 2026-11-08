@@ -501,6 +501,36 @@ pub(crate) async fn get_excel_db_content(
 pub(crate) struct ReindexRequest {
     /// Directory path to re-index (relative to workspace root). Defaults to "." (entire workspace).
     path: Option<String>,
+    /// Only index files that have no index entry yet (incremental rebuild).
+    /// Already-indexed files keep their parsed content and are not re-parsed.
+    #[serde(default)]
+    only_missing: bool,
+}
+
+/// Files whose extension can never yield searchable text (images, media,
+/// archives, fonts, compiled binaries, databases) and dotfiles are excluded
+/// from a directory re-index. Indexing them would only create empty document
+/// rows that pollute the feed, so they are left out of the scanned file list.
+fn is_indexable_file(name: &str) -> bool {
+    if name.starts_with('.') {
+        return false;
+    }
+    let ext = name
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_lowercase())
+        .unwrap_or_default();
+    if ext.is_empty() {
+        return true; // LICENSE, Makefile, ... read as text
+    }
+    !matches!(
+        ext.as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "svg"
+        | "mp3" | "wav" | "flac" | "aac" | "mp4" | "mov" | "avi" | "mkv"
+        | "zip" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "7z" | "rar"
+        | "woff" | "woff2" | "ttf" | "otf" | "eot"
+        | "exe" | "dll" | "so" | "dylib" | "bin" | "pyc" | "o" | "a"
+        | "db" | "sqlite" | "sqlite3"
+    )
 }
 
 pub(crate) async fn reindex_workspace_dir(
@@ -520,8 +550,8 @@ pub(crate) async fn reindex_workspace_dir(
         ).into_response();
     }
 
-    // List all files recursively
-    let files = match store.list_dir_recursive(dir_path).await {
+    // List all files recursively, keeping only document-like files.
+    let files: Vec<String> = match store.list_dir_recursive(dir_path).await {
         Ok(f) => f,
         Err(e) => {
             return (
@@ -529,7 +559,13 @@ pub(crate) async fn reindex_workspace_dir(
                 Json(serde_json::json!({ "error": format!("Failed to list files: {}", e) })),
             ).into_response();
         }
-    };
+    }
+    .into_iter()
+    .filter(|f| {
+        let name = f.rsplit('/').next().unwrap_or(f);
+        is_indexable_file(name)
+    })
+    .collect();
 
     let index = match WorkspaceIndex::cached(&state.data_dir, &auth_user.user_id).await {
         Ok(idx) => idx,
@@ -542,6 +578,7 @@ pub(crate) async fn reindex_workspace_dir(
     };
 
     let mut indexed = 0;
+    let mut skipped = 0;
     let mut errors = 0;
     for file in &files {
         // Compute the full relative path
@@ -550,6 +587,21 @@ pub(crate) async fn reindex_workspace_dir(
         } else {
             format!("{}/{}", dir_path, file)
         };
+
+        // Incremental mode: leave already-indexed documents untouched (their
+        // parsed content may come from Docling and re-parsing is expensive).
+        if body.only_missing {
+            match index.is_indexed(&rel_path).await {
+                Ok(true) => {
+                    skipped += 1;
+                    continue;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(file = %rel_path, err = %e, "Failed to check index state");
+                }
+            }
+        }
 
         match index.add_document(&rel_path, &workspace_root).await {
             Ok(()) => {
@@ -565,6 +617,7 @@ pub(crate) async fn reindex_workspace_dir(
 
     (StatusCode::OK, Json(serde_json::json!({
         "indexed": indexed,
+        "skipped": skipped,
         "errors": errors,
         "total_files": files.len(),
     }))).into_response()

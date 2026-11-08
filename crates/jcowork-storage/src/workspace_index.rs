@@ -24,6 +24,22 @@ use crate::vector_index::VectorIndex;
 /// document; it only guards against pathological inputs.
 const MAX_INDEX_CONTENT_LEN: usize = 2_000_000;
 
+/// Document types that may appear in the aggregated AI feed. Everything else
+/// (scripts, code, images, archives, ...) stays out of the stream even when it
+/// is indexed. Matched against the lowercased filename suffix.
+const FEED_DOC_EXTENSIONS: &[&str] = &[
+    "html", "htm", "md", "markdown", "doc", "docx", "ppt", "pptx", "pdf",
+];
+
+/// SQL predicate matching `documents.filename` against [`FEED_DOC_EXTENSIONS`].
+fn feed_doc_extension_filter() -> String {
+    FEED_DOC_EXTENSIONS
+        .iter()
+        .map(|ext| format!("lower(filename) LIKE '%.{}'", ext))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
 /// Manages per-user workspace document index.
 ///
 /// Each user gets their own SQLite database with FTS5 full-text search
@@ -686,6 +702,19 @@ impl WorkspaceIndex {
             .collect())
     }
 
+    /// Whether a document row already exists for this file. Lightweight check
+    /// used by incremental re-indexing to skip files that are already indexed.
+    pub async fn is_indexed(&self, file_path: &str) -> Result<bool> {
+        let row = sqlx::query_as::<_, (i64,)>(
+            "SELECT 1 FROM documents WHERE file_path = ?1"
+        )
+        .bind(file_path)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.is_some())
+    }
+
     /// Get the full indexed content of a document by its file path.
     /// Returns None if the file is not indexed.
     pub async fn get_content(&self, file_path: &str) -> Result<Option<String>> {
@@ -917,40 +946,50 @@ impl WorkspaceIndex {
     }
 
     /// Newest-indexed documents (all visibility), for the aggregated feed.
+    ///
+    /// Only [`FEED_DOC_EXTENSIONS`] files are returned: the feed is a reading
+    /// stream, so scripts/code/images never show up there even when indexed.
+    /// The filter lives in SQL so offset pagination stays exact.
     pub async fn list_recent(&self, limit: i64, offset: i64) -> Result<Vec<FeedDocument>> {
-        let docs = sqlx::query_as::<_, FeedDocumentRow>(
+        let sql = format!(
             r#"
             SELECT file_path, dir_path, filename, content_type, size, indexed_at,
                    substr(content_text, 1, 200) as snippet, summary, is_public
             FROM documents
+            WHERE {}
             ORDER BY indexed_at DESC, id DESC
             LIMIT ?1 OFFSET ?2
             "#,
-        )
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.pool)
-        .await?;
+            feed_doc_extension_filter(),
+        );
+        let docs = sqlx::query_as::<_, FeedDocumentRow>(&sql)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?;
 
         Ok(docs.into_iter().map(FeedDocument::from).collect())
     }
 
     /// Newest-indexed public documents, for a public account's feed.
+    /// Extension filter matches [`list_recent`](Self::list_recent).
     pub async fn list_public_recent(&self, limit: i64, offset: i64) -> Result<Vec<FeedDocument>> {
-        let docs = sqlx::query_as::<_, FeedDocumentRow>(
+        let sql = format!(
             r#"
             SELECT file_path, dir_path, filename, content_type, size, indexed_at,
                    substr(content_text, 1, 200) as snippet, summary, is_public
             FROM documents
-            WHERE is_public = 1
+            WHERE is_public = 1 AND ({})
             ORDER BY indexed_at DESC, id DESC
             LIMIT ?1 OFFSET ?2
             "#,
-        )
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.pool)
-        .await?;
+            feed_doc_extension_filter(),
+        );
+        let docs = sqlx::query_as::<_, FeedDocumentRow>(&sql)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?;
 
         Ok(docs.into_iter().map(FeedDocument::from).collect())
     }

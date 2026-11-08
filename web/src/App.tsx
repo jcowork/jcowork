@@ -32,9 +32,16 @@ import {
   saveAccounts,
   getActiveAccount,
   setActiveAccount,
+  clearActiveAccount,
   upsertAccount,
   removeAccount,
 } from './accountStore';
+
+// Idle sign-out bookkeeping (one hour). The timestamp is persisted because
+// the sleep/wake handler reloads the page after 30s hidden, and it is cleared
+// on every path that ends a session so the next sign-in starts a fresh hour.
+const IDLE_LOGOUT_MS = 60 * 60 * 1000;
+const IDLE_ACTIVITY_KEY = 'jcowork_last_activity';
 
 // Global fetch wrapper:
 // 1. Prepend API_BASE for relative URLs (Tauri custom-protocol → http://localhost:3000)
@@ -63,6 +70,8 @@ window.fetch = async function(input: RequestInfo | URL, init?: RequestInit) {
         saveAccounts(remaining);
         // If no accounts left, reload to show login
         if (remaining.length === 0) {
+          localStorage.removeItem(IDLE_ACTIVITY_KEY);
+          clearActiveAccount();
           window.location.reload();
         } else {
           // Switch to the first remaining account
@@ -156,6 +165,8 @@ function AppInner() {
   // documents, schedule, memory, skills, settings, admin, public profile) is
   // a detail layer reached from the tabs or the drawer, with a back arrow.
   const [mobileTab, setMobileTab] = useState<'feed' | 'contacts' | 'mine'>('feed');
+  // Whether the chat view is showing instead of the root view (the tab root
+  // on phones, the AI头条 home on PC).
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [isNarrow, setIsNarrow] = useState(() => window.innerWidth <= 768);
   useEffect(() => {
@@ -268,16 +279,14 @@ function AppInner() {
   }, [activeAccount?.userId]);
 
   // Fetch public accounts for the active account's token. They show up in
-  // the contacts list and can be @mentioned in chat.
+  // the contacts list and can be @mentioned in chat. Signed-out visitors get
+  // the same list from the public endpoint so the AI头条 feed still works.
   useEffect(() => {
-    if (!activeAccount) {
-      setPublicUsers([]);
-      return;
-    }
     let cancelled = false;
-    fetch('/api/public-users', {
-      headers: { Authorization: `Bearer ${activeAccount.token}` },
-    })
+    const endpoint = activeAccount ? '/api/public-users' : '/api/public-feed/users';
+    fetch(endpoint, activeAccount
+      ? { headers: { Authorization: `Bearer ${activeAccount.token}` } }
+      : undefined)
       .then((res) => (res.ok ? res.json() : []))
       .then((data) => {
         if (cancelled) return;
@@ -302,7 +311,7 @@ function AppInner() {
     setShowSettings(false); setShowSchedule(false); setShowMemory(false);
     setShowSkills(false); setShowDocuments(false);
     setViewingPublicUser(null);
-    // On mobile the chat is a detail layer above the tab root.
+    // The chat is a view on top of the AI头条 home, on phone and PC alike.
     setMobileChatOpen(true);
   };
 
@@ -761,8 +770,49 @@ function AppInner() {
     } else {
       setActiveUserId('');
       setActiveAccount('');
+      localStorage.removeItem(IDLE_ACTIVITY_KEY);
+      clearActiveAccount();
     }
   };
+
+  // Idle sign-out: after one hour without any interaction, drop every stored
+  // session and reload into the signed-out feed. Activity events only bump an
+  // in-memory stamp (persisted at most every 10s) so scrolling stays cheap.
+  useEffect(() => {
+    if (accounts.length === 0) return;
+    let last = Number(localStorage.getItem(IDLE_ACTIVITY_KEY)) || Date.now();
+    localStorage.setItem(IDLE_ACTIVITY_KEY, String(last));
+    let lastPersist = last;
+    let fired = false;
+
+    const touch = () => {
+      last = Date.now();
+      if (last - lastPersist >= 10_000) {
+        lastPersist = last;
+        localStorage.setItem(IDLE_ACTIVITY_KEY, String(last));
+      }
+    };
+    const check = () => {
+      if (fired || Date.now() - last < IDLE_LOGOUT_MS) return;
+      fired = true;
+      localStorage.removeItem(IDLE_ACTIVITY_KEY);
+      clearActiveAccount();
+      saveAccounts([]);
+      window.location.reload();
+    };
+    // A session left idle across a reload may already be past the limit.
+    check();
+
+    const events = ['pointerdown', 'keydown', 'wheel', 'touchstart', 'scroll'];
+    events.forEach((name) => window.addEventListener(name, touch, { passive: true, capture: true }));
+    document.addEventListener('visibilitychange', check);
+    const iv = window.setInterval(check, 30_000);
+    return () => {
+      events.forEach((name) => window.removeEventListener(name, touch, { capture: true }));
+      document.removeEventListener('visibilitychange', check);
+      window.clearInterval(iv);
+    };
+  }, [accounts.length]);
 
   // Switch active account: save current convs to ref, load target's
   const handleSwitchAccount = useCallback((userId: string) => {
@@ -851,6 +901,10 @@ function AppInner() {
     setAccounts(remaining);
     delete accountConvsRef.current[userId];
     delete accountActiveConvRef.current[userId];
+    if (remaining.length === 0) {
+      localStorage.removeItem(IDLE_ACTIVITY_KEY);
+      clearActiveAccount();
+    }
     if (userId === activeUserId) {
       // Removed the active account — switch to another or show login
       if (remaining.length > 0) {
@@ -901,6 +955,22 @@ function AppInner() {
       return prev;
     });
   }, [activeUserId]);
+
+  // Signed-out visitors land on the public AI头条: public accounts' task
+  // results and documents load without a token. The header's 登录 button
+  // opens the usual login card (cancel returns here).
+  if (accounts.length === 0 && !addingAccount) {
+    return (
+      <div style={{ position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column', background: '#111' }}>
+        <AiFeed
+          accounts={[]}
+          activeToken={null}
+          publicUsers={publicUsers}
+          onLogin={handleAddAccount}
+        />
+      </div>
+    );
+  }
 
   if (accounts.length === 0 || addingAccount) {
     return (
@@ -1312,9 +1382,13 @@ function AppInner() {
   // On narrow screens the tab root (AI头条 / 联系人 / 我的) replaces the
   // chat as the default view; everything else layers on top with a back arrow.
   const mobileRootView = isNarrow && !anyDetailOpen && !mobileChatOpen;
-  const chatVisible = !anyDetailOpen && (!isNarrow || mobileChatOpen);
+  // PC mirrors the phone: AI头条 is the home view and a chat opens on top of
+  // it; every detail layer closes back to whichever root was showing.
+  const desktopFeedView = !isNarrow && !anyDetailOpen && !mobileChatOpen;
+  const chatVisible = !anyDetailOpen && mobileChatOpen;
 
-  // Leave any detail layer (or the chat) and return to the mobile tab root.
+  // Leave any detail layer (or the chat) and return to the root view (the
+  // tab root on phones, the AI头条 home on PC).
   const closeMobileDetail = () => {
     setShowSettings(false); setShowSchedule(false); setShowMemory(false);
     setShowSkills(false); setShowDocuments(false); setShowAdminUsers(false);
@@ -1365,6 +1439,7 @@ function AppInner() {
           setShowSkills(false); setShowDocuments(false); setShowAdminUsers(false);
         }}
         isAdmin={activeAccount?.isAdmin}
+        onFeed={() => { closeMobileDetail(); setMobileTab('feed'); }}
         onChat={() => { setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); setShowAdminUsers(false); setViewingPublicUser(null); setMobileChatOpen(true); }}
         onDocuments={() => { setShowDocuments(true); setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowAdminUsers(false); setViewingPublicUser(null); }}
         onSettings={() => { setShowSettings(true); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); setShowAdminUsers(false); setViewingPublicUser(null); }}
@@ -1372,7 +1447,7 @@ function AppInner() {
         onMemory={() => { setShowMemory(true); setShowSchedule(false); setShowSettings(false); setShowSkills(false); setShowDocuments(false); setShowAdminUsers(false); setViewingPublicUser(null); }}
         onSkills={() => { setShowSkills(true); setShowMemory(false); setShowSchedule(false); setShowSettings(false); setShowDocuments(false); setShowAdminUsers(false); setViewingPublicUser(null); }}
         onAdminUsers={() => { setShowAdminUsers(true); setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); setViewingPublicUser(null); }}
-        currentView={showSettings ? 'settings' : showSchedule ? 'schedule' : showMemory ? 'memory' : showSkills ? 'skills' : showDocuments ? 'documents' : showAdminUsers ? 'admin' : 'chat'}
+        currentView={showSettings ? 'settings' : showSchedule ? 'schedule' : showMemory ? 'memory' : showSkills ? 'skills' : showDocuments ? 'documents' : showAdminUsers ? 'admin' : mobileChatOpen ? 'chat' : 'feed'}
         conversations={conversations}
         activeConvId={activeConvId}
         onNewChat={handleNewChat}
@@ -1446,6 +1521,12 @@ function AppInner() {
               </div>
             );
           })}
+          {/* PC home: the same AI头条 stream as the phone tab root */}
+          {desktopFeedView && activeAccount && (
+            <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
+              <AiFeed accounts={accounts} activeToken={activeAccount.token} publicUsers={publicUsers} />
+            </div>
+          )}
           {/* Mobile tab root: AI头条 / 联系人 / 我的 */}
           {mobileRootView && (
             <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>

@@ -12,6 +12,7 @@ interface SidebarProps {
   onAddAccount: () => void;
   onRemoveAccount: (userId: string) => void;
   onLogout: () => void;
+  onFeed: () => void;
   onChat: () => void;
   onSettings: () => void;
   onSchedule: () => void;
@@ -36,7 +37,7 @@ interface SidebarProps {
   onAdminUsers?: () => void;
 }
 
-export default function Sidebar({ accounts, activeUserId, streamingAccounts, unreadAccounts, onSwitchAccount, onAddAccount, onRemoveAccount, onLogout, onChat, onSettings, onSchedule, onMemory, onSkills, onDocuments, currentView, conversations, activeConvId, onNewChat, onSelectConversation, onDeleteConversation, mobileOpen, onClose, publicUsers, viewingPublicUserId, onOpenPublicUser, isAdmin, onAdminUsers }: SidebarProps) {
+export default function Sidebar({ accounts, activeUserId, streamingAccounts, unreadAccounts, onSwitchAccount, onAddAccount, onRemoveAccount, onLogout, onFeed, onChat, onSettings, onSchedule, onMemory, onSkills, onDocuments, currentView, conversations, activeConvId, onNewChat, onSelectConversation, onDeleteConversation, mobileOpen, onClose, publicUsers, viewingPublicUserId, onOpenPublicUser, isAdmin, onAdminUsers }: SidebarProps) {
   const t = useT();
   const [historyOpen, setHistoryOpen] = useState(true);
   // History list shows only the first few chats by default; the rest sit
@@ -50,9 +51,11 @@ export default function Sidebar({ accounts, activeUserId, streamingAccounts, unr
   // Whether the web access URL was just copied (shows "copied" feedback)
   const [webCopied, setWebCopied] = useState(false);
 
-  // Collapse preference: shrink the sidebar to an icon-only rail.
+  // Collapse preference: shrink the sidebar to an icon-only rail. The rail
+  // is the default (PC mirrors the phone layout); only an explicit expand
+  // stores '0' and keeps the full sidebar open.
   const [collapsedPref, setCollapsedPref] = useState(
-    () => localStorage.getItem('jcowork_sidebar_collapsed') === '1',
+    () => localStorage.getItem('jcowork_sidebar_collapsed') !== '0',
   );
   // The mobile drawer is an off-canvas overlay, so the rail only applies on
   // desktop widths — below the breakpoint the sidebar is always full width.
@@ -81,6 +84,7 @@ export default function Sidebar({ accounts, activeUserId, streamingAccounts, unr
   const visibleHistoryConvs = showAllHistory ? historyConvs : historyConvs.slice(0, HISTORY_CHAT_VISIBLE);
 
   const NAV_ITEMS = [
+    { key: 'feed', label: t('tabFeed') },
     { key: 'chat', label: t('chat') },
     { key: 'documents', label: t('documents') },
     { key: 'schedule', label: t('schedule') },
@@ -94,6 +98,7 @@ export default function Sidebar({ accounts, activeUserId, streamingAccounts, unr
   // Icons shown in the collapsed rail — one logo per module (matches each
   // page's own emoji: 📋 tasks, 📁 documents, 🧠 memory, 🔌 connectors, 👥 admin).
   const NAV_ICONS: Record<string, string> = {
+    feed: '📰',
     chat: '💬',
     documents: '📁',
     schedule: '📋',
@@ -103,7 +108,7 @@ export default function Sidebar({ accounts, activeUserId, streamingAccounts, unr
     settings: '⚙️',
   };
 
-  const navHandlers: Record<string, () => void> = { chat: onChat, documents: onDocuments, schedule: onSchedule, memory: onMemory, skills: onSkills, settings: onSettings, admin: onAdminUsers ?? (() => {}) };
+  const navHandlers: Record<string, () => void> = { feed: onFeed, chat: onChat, documents: onDocuments, schedule: onSchedule, memory: onMemory, skills: onSkills, settings: onSettings, admin: onAdminUsers ?? (() => {}) };
 
   const handleNav = (key: string) => {
     navHandlers[key]?.();

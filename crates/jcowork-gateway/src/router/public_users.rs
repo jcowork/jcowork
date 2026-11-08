@@ -67,6 +67,33 @@ pub(crate) async fn list_public_users(
     }
 }
 
+/// GET /api/public-feed/users — public accounts for signed-out visitors.
+///
+/// Same DTO as `list_public_users`, but reachable without a token so the
+/// guest AI feed can fan out over public accounts. There is no requester to
+/// exclude here.
+pub(crate) async fn list_public_users_anonymous(State(state): State<AppState>) -> impl IntoResponse {
+    match state.user_store.list_public_users().await {
+        Ok(users) => {
+            let items: Vec<serde_json::Value> = users
+                .into_iter()
+                .map(|u| {
+                    serde_json::json!({
+                        "user_id": u.id,
+                        "username": u.username,
+                    })
+                })
+                .collect();
+            (StatusCode::OK, Json(items)).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 /// GET /api/public-users/{user_id}/documents — the target's public documents.
 pub(crate) async fn list_public_documents(
     State(state): State<AppState>,

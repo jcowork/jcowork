@@ -234,6 +234,42 @@ pub(crate) async fn get_public_feed(
     }
 }
 
+/// GET /api/public-users/{user_id}/feed/results/{result_id} — one task result
+/// of a public account, with full output.
+///
+/// The signed-out counterpart of `/api/feed/results/{id}`: the result must
+/// belong to the named user and that user must be public. Documents in a
+/// public feed already use their public content endpoint.
+pub(crate) async fn get_public_feed_result(
+    State(state): State<AppState>,
+    Path((user_id, result_id)): Path<(String, String)>,
+) -> Response {
+    if let Err(resp) = super::public_users::ensure_public_user(&state, &user_id).await {
+        return resp;
+    }
+    let entry = match state.cron_scheduler.get_task_result_by_id(&result_id).await {
+        Some(e) if e.user_id == user_id => e,
+        _ => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "Task result not found" })),
+            )
+                .into_response()
+        }
+    };
+    (StatusCode::OK, Json(serde_json::json!({
+        "id": entry.id,
+        "job_id": entry.cron_job_id,
+        "user_id": entry.user_id,
+        "output": entry.output,
+        "status": entry.status,
+        "executed_at": to_rfc3339_utc(&entry.executed_at),
+        "job_name": entry.job_name,
+        "prompt": entry.job_prompt,
+    })))
+    .into_response()
+}
+
 /// GET /api/feed/results/{result_id} — one task result with full output.
 ///
 /// Visible to the result's owner, or to anyone when the owner is a public

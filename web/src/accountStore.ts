@@ -72,6 +72,13 @@ export function setActiveAccount(userId: string) {
   } catch {}
 }
 
+/// Clear the active-account pointer (full sign-out; the list is already empty).
+export function clearActiveAccount() {
+  try {
+    localStorage.removeItem(ACTIVE_KEY);
+  } catch {}
+}
+
 /// Add or replace an account in the list (upsert by userId).
 export function upsertAccount(account: AuthState): AuthState[] {
   const accounts = loadAccounts();

@@ -453,7 +453,13 @@ pub fn build_router(state: AppState) -> Router {
         // handler itself gates on the owner being public and the document
         // carrying the is_public flag.
         .route("/api/public-users/{user_id}/documents/content", get(public_users::get_public_document_content))
-        .route("/api/public-users/{user_id}/documents/download", get(public_users::download_public_document));
+        .route("/api/public-users/{user_id}/documents/download", get(public_users::download_public_document))
+        // Public AI feed, readable without an account: signed-out visitors
+        // see the public accounts' task results and public documents. The
+        // handlers gate on the owner carrying the is_public flag.
+        .route("/api/public-feed/users", get(public_users::list_public_users_anonymous))
+        .route("/api/public-users/{user_id}/feed", get(feed::get_public_feed))
+        .route("/api/public-users/{user_id}/feed/results/{result_id}", get(feed::get_public_feed_result));
 
     // Protected routes (auth required)
     let protected = Router::new()
@@ -550,7 +556,6 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/public-users/{user_id}/documents", get(public_users::list_public_documents))
         .route("/api/public-users/{user_id}/cron-jobs", get(public_users::list_public_cron_jobs))
         .route("/api/public-users/{user_id}/cron-jobs/{job_id}/results", get(public_users::get_public_cron_job_results))
-        .route("/api/public-users/{user_id}/feed", get(feed::get_public_feed))
         .layer(auth_mw)
         // Allow up to 50MB for file uploads (default axum limit is only 2MB)
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024));
