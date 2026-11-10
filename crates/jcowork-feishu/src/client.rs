@@ -42,6 +42,19 @@ struct MessageResponse {
     data: Option<serde_json::Value>,
 }
 
+/// Event delivery configuration from the developer console.
+///
+/// A long connection only receives events when the console's event
+/// subscription is set to long connection; an app still pointing at a webhook
+/// keeps the websocket open but delivers nothing.
+#[derive(Debug, Clone, Default)]
+pub struct CallbackInfo {
+    /// Console value, e.g. `webhook`.
+    pub callback_type: Option<String>,
+    /// Webhook request URL, when one is configured.
+    pub request_url: Option<String>,
+}
+
 impl FeishuClient {
     pub fn new(app_id: String, app_secret: String) -> Self {
         Self::with_base_url(app_id, app_secret, default_base_url())
@@ -114,6 +127,48 @@ impl FeishuClient {
         }
 
         Ok(token)
+    }
+
+    /// Read the app's event delivery configuration (Open Platform app info).
+    pub async fn callback_info(&self) -> Result<CallbackInfo> {
+        let token = self.get_tenant_token().await?;
+        let url = format!(
+            "{}/open-apis/application/v6/applications/{}",
+            self.base_url, self.app_id
+        );
+
+        let resp = self
+            .http
+            .get(&url)
+            .query(&[("lang", "zh_cn")])
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let body = resp.text().await?;
+        debug!(%status, %body, "Feishu app info response");
+
+        if !status.is_success() {
+            anyhow::bail!("Feishu app info failed ({}): {}", status, body);
+        }
+        let value: serde_json::Value = serde_json::from_str(&body)?;
+        if value.get("code").and_then(|c| c.as_i64()).unwrap_or(0) != 0 {
+            anyhow::bail!("Feishu app info error: {}", body);
+        }
+
+        let callback = value.pointer("/data/app/callback_info");
+        Ok(CallbackInfo {
+            callback_type: callback
+                .and_then(|c| c.get("callback_type"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            request_url: callback
+                .and_then(|c| c.get("request_url"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+        })
     }
 
     /// Reply to a specific message in a chat.

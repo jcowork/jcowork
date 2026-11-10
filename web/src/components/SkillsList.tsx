@@ -27,6 +27,8 @@ interface FeishuConnection {
   state: string;
   detail?: string | null;
   last_error?: string | null;
+  /** Non-fatal config problem, e.g. the console still uses a webhook. */
+  warning?: string | null;
   app_id?: string | null;
   since?: string | null;
 }
@@ -770,6 +772,20 @@ export default function SkillsList({ token, userId, onCountChange }: {
                           boxShadow: botState === 'connected' ? `0 0 6px ${botColor}` : 'none',
                         }} />
                         <span style={{ color: botColor, fontWeight: 500, flexShrink: 0 }}>{botText}</span>
+                        {botState === 'connected' && feishuCfg?.connection?.warning && (
+                          <span
+                            title={feishuCfg.connection.warning}
+                            style={{
+                              color: '#d29922',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                              minWidth: 0,
+                            }}
+                          >
+                            · {t('feishuWebhookWarn')}
+                          </span>
+                        )}
                         {botState === 'error' && botError && (
                           <span
                             title={botError}

@@ -48,6 +48,9 @@ pub struct BotStatus {
     /// Short human-readable detail (Chinese, shown as-is in the UI).
     pub detail: Option<String>,
     pub last_error: Option<String>,
+    /// Non-fatal configuration warning (e.g. the console still delivers
+    /// events to a webhook, so the socket stays silent).
+    pub warning: Option<String>,
     pub app_id: Option<String>,
     /// When the connection was started (RFC 3339).
     pub since: Option<String>,
@@ -108,6 +111,7 @@ impl FeishuBotManager {
             state: "connecting".to_string(),
             detail: Some("正在建立飞书长连接…".to_string()),
             last_error: None,
+            warning: None,
             app_id: Some(config.app_id.clone()),
             since: Some(chrono::Utc::now().to_rfc3339()),
         }));
@@ -263,6 +267,18 @@ async fn run_bot(
         };
         let env = build_cli_env(&app_id, &app_secret, &token, &state.lark_cli.config_dir());
 
+        // With a webhook callback configured in the console, Feishu never
+        // pushes events down the socket: the connection looks healthy but
+        // stays silent. Surface the real cause instead of letting the user
+        // guess why messages get no reply.
+        let callback_warning = match client.callback_info().await {
+            Ok(info) => webhook_warning(&info),
+            Err(e) => {
+                tracing::debug!(error = %e, "Feishu callback info unavailable");
+                None
+            }
+        };
+
         let mut cmd = tokio::process::Command::new(&bin);
         cmd.arg("event")
             .arg("consume")
@@ -339,6 +355,11 @@ async fn run_bot(
         tokio::pin!(connect_grace);
         let recycle = tokio::time::sleep(RECYCLE_AFTER);
         tokio::pin!(recycle);
+        // Re-check the console's delivery mode while connected, so the
+        // warning clears once the user switches to long connection.
+        let mut callback_check = tokio::time::interval(Duration::from_secs(120));
+        callback_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        callback_check.tick().await;
 
         loop {
             tokio::select! {
@@ -359,6 +380,12 @@ async fn run_bot(
                         None,
                     )
                     .await;
+                    set_warning(&status, callback_warning.clone()).await;
+                }
+                _ = callback_check.tick(), if connected => {
+                    if let Ok(info) = client.callback_info().await {
+                        set_warning(&status, webhook_warning(&info)).await;
+                    }
                 }
                 _ = &mut recycle, if connected => {
                     tracing::info!(app_id = %app_id, "Recycling Feishu event stream to refresh the tenant token");
@@ -378,6 +405,8 @@ async fn run_bot(
                                     None,
                                 )
                                 .await;
+                                // A delivered event proves the stream works.
+                                set_warning(&status, None).await;
                             }
                             if let Some(ev) = parse_cli_event(&line) {
                                 if seen.insert(ev.message_id.clone()) {
@@ -475,6 +504,29 @@ async fn set_status(
     if last_error.is_some() {
         status.last_error = last_error;
     }
+    // A warning only makes sense while the socket is up.
+    if state != "connected" {
+        status.warning = None;
+    }
+}
+
+/// Set or clear the non-fatal configuration warning.
+async fn set_warning(status: &Arc<Mutex<BotStatus>>, warning: Option<String>) {
+    status.lock().await.warning = warning;
+}
+
+/// Explain a silent long connection: when the console still delivers events
+/// to a webhook, Feishu never pushes them down the websocket.
+fn webhook_warning(info: &jcowork_feishu::client::CallbackInfo) -> Option<String> {
+    if info.callback_type.as_deref() != Some("webhook") {
+        return None;
+    }
+    Some(match info.request_url.as_deref() {
+        Some(url) => format!(
+            "飞书后台的事件订阅仍向 Webhook 推送（{url}），长连接收不到消息。请在开放平台「事件与回调 → 事件配置」中改为「使用长连接接收事件」，并发布新版本。"
+        ),
+        None => "飞书后台的事件订阅不是「使用长连接接收事件」，长连接收不到消息。请在开放平台切换订阅方式并发布新版本。".to_string(),
+    })
 }
 
 /// Turn the CLI's stderr tail into a one-line reason.
@@ -545,5 +597,26 @@ mod tests {
     fn summarize_stderr_falls_back_to_last_line() {
         let tail = lines(&["first", "", "last line"]);
         assert_eq!(summarize_stderr(&tail).as_deref(), Some("last line"));
+    }
+
+    #[test]
+    fn webhook_warning_flags_webhook_delivery() {
+        let info = jcowork_feishu::client::CallbackInfo {
+            callback_type: Some("webhook".into()),
+            request_url: Some("http://example.com/api/feishu/event".into()),
+        };
+        let warning = webhook_warning(&info).expect("warning");
+        assert!(warning.contains("http://example.com/api/feishu/event"));
+        assert!(warning.contains("长连接"));
+    }
+
+    #[test]
+    fn webhook_warning_ignores_long_connection() {
+        let info = jcowork_feishu::client::CallbackInfo {
+            callback_type: Some("long_connection".into()),
+            request_url: None,
+        };
+        assert!(webhook_warning(&info).is_none());
+        assert!(webhook_warning(&Default::default()).is_none());
     }
 }
