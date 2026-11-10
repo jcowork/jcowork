@@ -501,8 +501,9 @@ pub(crate) async fn get_excel_db_content(
 pub(crate) struct ReindexRequest {
     /// Directory path to re-index (relative to workspace root). Defaults to "." (entire workspace).
     path: Option<String>,
-    /// Only index files that have no index entry yet (incremental rebuild).
-    /// Already-indexed files keep their parsed content and are not re-parsed.
+    /// Incremental rebuild: only files without an index entry, with an empty
+    /// body, or holding a parse-error placeholder are (re)indexed. Fully
+    /// parsed documents keep their content and are skipped.
     #[serde(default)]
     only_missing: bool,
 }
@@ -588,15 +589,16 @@ pub(crate) async fn reindex_workspace_dir(
             format!("{}/{}", dir_path, file)
         };
 
-        // Incremental mode: leave already-indexed documents untouched (their
-        // parsed content may come from Docling and re-parsing is expensive).
+        // Incremental mode: skip files that already carry usable parsed
+        // content. Files indexed while their format was unsupported hold an
+        // empty body or a parse-error placeholder, so they get re-parsed.
         if body.only_missing {
-            match index.is_indexed(&rel_path).await {
-                Ok(true) => {
+            match index.needs_index(&rel_path).await {
+                Ok(false) => {
                     skipped += 1;
                     continue;
                 }
-                Ok(false) => {}
+                Ok(true) => {}
                 Err(e) => {
                     tracing::warn!(file = %rel_path, err = %e, "Failed to check index state");
                 }

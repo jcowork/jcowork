@@ -352,14 +352,15 @@ impl WorkspaceIndex {
 
     /// Add or update a document in the index.
     ///
-    /// For PDF files, automatically parses the content using Docling service.
+    /// For PDF, Word (doc/docx) and PowerPoint (ppt/pptx) files, automatically
+    /// parses the content using the Docling service (as Markdown).
     /// For text files, reads the content directly.
     /// Excel files (xlsx/xls) are imported into a per-document SQLite database
     /// (see `excel_db` module) and a structural summary is indexed.
-    /// Other binary files (docx, etc.) are indexed with metadata only.
+    /// Other binary files are indexed with metadata only.
     /// 
-    /// For PDF and Markdown files, document chunks are also stored and embedded
-    /// for semantic (vector) search.
+    /// For parsed documents and Markdown files, document chunks are also stored
+    /// and embedded for semantic (vector) search.
     pub async fn add_document(&self, file_path: &str, workspace_root: &str) -> Result<()> {
         let full_path = Path::new(workspace_root).join(file_path);
         if !full_path.exists() {
@@ -390,6 +391,7 @@ impl WorkspaceIndex {
             "html" | "htm" => "html",
             "xlsx" | "xls" => "excel",
             "docx" | "doc" => "word",
+            "pptx" | "ppt" => "presentation",
             _ => "text",
         };
 
@@ -398,9 +400,10 @@ impl WorkspaceIndex {
 
         // Extract text content based on file type
         let mut doc_hash = String::new();
-        let content_text = if matches!(ext.as_str(), "pdf" | "doc" | "docx") {
-            // Parse PDF / Word documents using Docling service (returns Markdown).
-            // Legacy .doc binaries are converted to .docx inside the service.
+        let content_text = if matches!(ext.as_str(), "pdf" | "doc" | "docx" | "ppt" | "pptx") {
+            // Parse PDF / Word / PowerPoint documents using Docling service
+            // (returns Markdown). Legacy .doc/.ppt binaries are converted to
+            // .docx/.pptx inside the service.
             match self.parse_with_docling(&full_path.to_string_lossy(), file_path, workspace_root).await {
                 Ok((markdown, hash)) => {
                     doc_hash = hash;
@@ -500,8 +503,9 @@ impl WorkspaceIndex {
         .execute(&self.pool)
         .await?;
 
-        // For PDF, Word and Markdown files, also store chunks for vector search
-        if matches!(ext.as_str(), "pdf" | "doc" | "docx" | "md" | "markdown") && !content_text.is_empty() {
+        // For parsed documents and Markdown files, also store chunks for
+        // vector search
+        if matches!(ext.as_str(), "pdf" | "doc" | "docx" | "ppt" | "pptx" | "md" | "markdown") && !content_text.is_empty() {
             // Delete existing chunks first (in case of re-index)
             self.delete_file_chunks(file_path).await?;
             
@@ -713,6 +717,28 @@ impl WorkspaceIndex {
         .await?;
 
         Ok(row.is_some())
+    }
+
+    /// True when the document still needs (re)indexing: it has no index row,
+    /// or its stored text is empty / a parse-error placeholder (e.g. a format
+    /// that was not supported yet when the file was first indexed).
+    pub async fn needs_index(&self, file_path: &str) -> Result<bool> {
+        let row = sqlx::query_as::<_, (String,)>(
+            "SELECT content_text FROM documents WHERE file_path = ?1"
+        )
+        .bind(file_path)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(match row {
+            None => true,
+            Some((text,)) => {
+                let text = text.trim();
+                text.is_empty()
+                    || text.starts_with("[Document parse")
+                    || text.starts_with("[Excel import error")
+            }
+        })
     }
 
     /// Get the full indexed content of a document by its file path.
@@ -1218,7 +1244,7 @@ impl WorkspaceIndex {
     /// If the service is not running, attempts to auto-start it (useful for
     /// the desktop app where the service is not started alongside the server).
     /// Returns the structured Markdown content and the document hash (for image assets).
-    async fn parse_with_docling(&self, pdf_path: &str, file_path: &str, _workspace_root: &str) -> Result<(String, String)> {
+    async fn parse_with_docling(&self, source_path: &str, file_path: &str, _workspace_root: &str) -> Result<(String, String)> {
         let service_url = std::env::var("DOCLING_SERVICE_URL")
             .unwrap_or_else(|_| "http://localhost:50060".to_string());
 
@@ -1233,18 +1259,20 @@ impl WorkspaceIndex {
             .timeout(std::time::Duration::from_secs(180))
             .build()?;
         
-        // Read the PDF file
-        let file_content = tokio::fs::read(pdf_path).await?;
+        // Read the source document
+        let file_content = tokio::fs::read(source_path).await?;
         
         // Send to Docling service
-        let mime = match Path::new(pdf_path).extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref() {
+        let mime = match Path::new(source_path).extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref() {
             Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             Some("doc") => "application/msword",
+            Some("pptx") => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            Some("ppt") => "application/vnd.ms-powerpoint",
             _ => "application/pdf",
         };
         let form = reqwest::multipart::Form::new()
             .part("file", reqwest::multipart::Part::bytes(file_content)
-                .file_name(Path::new(pdf_path).file_name().unwrap_or_default().to_string_lossy().to_string())
+                .file_name(Path::new(source_path).file_name().unwrap_or_default().to_string_lossy().to_string())
                 .mime_str(mime)?);
         
         let response = client

@@ -292,6 +292,9 @@ export function DocViewer() {
   const isHtml = /\.(html?|htm)$/i.test(params.path);
   const isMd = /\.(md|markdown)$/i.test(params.path);
   const isPdf = /\.pdf$/i.test(params.path);
+  // PowerPoint decks have no in-browser renderer: they show Docling's
+  // Markdown extraction (one heading block per slide), like Markdown files.
+  const isPresentation = /\.(pptx?)$/i.test(params.path);
   const isEditableFile = /\.(md|markdown|txt|csv|html?|htm)$/i.test(params.path);
   // Only the document owner can edit; public share links stay read-only.
   const isOwner = loadAccounts().some((a) => a.userId === params.userId);
@@ -313,7 +316,7 @@ export function DocViewer() {
         display: 'flex', alignItems: 'center', gap: 10, background: '#1a1a1a',
         paddingTop: 'calc(10px + env(safe-area-inset-top))',
       }}>
-        <span style={{ fontSize: 18, flexShrink: 0 }}>📄</span>
+        <span style={{ fontSize: 18, flexShrink: 0 }}>{isPresentation ? '📽' : isPdf ? '📕' : isMd ? '📝' : isHtml ? '🌐' : '📄'}</span>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div className="clamp-1" style={{ fontSize: 14, fontWeight: 600, color: '#e6edf3' }}>{filename}</div>
           <div className="clamp-1" style={{ fontSize: 11, color: '#777' }}>{params.username}</div>
@@ -432,7 +435,12 @@ export function DocViewer() {
             containerStyle={{ flex: 1, minHeight: 0 }}
           />
         ) : error ? (
-          <div style={{ color: '#e57373', padding: 40, textAlign: 'center', fontSize: 13 }}>{error}</div>
+          <div style={{ color: '#e57373', padding: 40, textAlign: 'center', fontSize: 13 }}>
+            {error}
+            {/not indexed/i.test(error) && (
+              <div style={{ color: '#888', marginTop: 8, lineHeight: 1.6 }}>{t('docNotIndexedHint')}</div>
+            )}
+          </div>
         ) : loading && content === '' ? (
           <div style={{ color: '#666', padding: 40, textAlign: 'center', fontSize: 13 }}>{t('loading')}</div>
         ) : pdfView ? (
@@ -456,7 +464,7 @@ export function DocViewer() {
           />
         ) : (
           <div style={{ padding: '16px 16px 32px', flex: 1, minWidth: 0 }}>
-            {isMd ? <ResultMarkdown content={content} /> : (
+            {isMd || isPresentation ? <ResultMarkdown content={content} /> : (
               <pre style={{ margin: 0, fontSize: 13, lineHeight: 1.6, color: '#c9d1d9', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: "'SF Mono', 'Fira Code', 'Consolas', monospace" }}>
                 {content}
               </pre>

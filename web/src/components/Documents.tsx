@@ -97,7 +97,7 @@ interface DocChunk {
   image_path?: string;
 }
 
-const ALLOWED_EXTENSIONS = '.pdf,.md,.html,.htm,.xlsx,.xls,.docx,.doc';
+const ALLOWED_EXTENSIONS = '.pdf,.md,.html,.htm,.xlsx,.xls,.docx,.doc,.pptx,.ppt';
 
 // Characters fetched per page when previewing long documents (PDFs)
 const PREVIEW_PAGE_SIZE = 30000;
@@ -500,9 +500,9 @@ export default function Documents({ userId, token }: DocumentsProps) {
     setUploading(true);
     setStatusMessage('');
     try {
-      // Check if any files need Docling parsing (PDF / Word)
+      // Check if any files need Docling parsing (PDF / Word / PowerPoint)
       const needsDocling = Array.from(files).some(f =>
-        /\.(pdf|doc|docx)$/i.test(f.name)
+        /\.(pdf|doc|docx|ppt|pptx)$/i.test(f.name)
       );
 
       if (needsDocling) {
@@ -996,6 +996,7 @@ export default function Documents({ userId, token }: DocumentsProps) {
       case 'pdf': return '📕';
       case 'xlsx': case 'xls': return '📊';
       case 'docx': case 'doc': return '📃';
+      case 'pptx': case 'ppt': return '📽';
       default: return '📄';
     }
   };

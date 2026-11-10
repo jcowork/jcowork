@@ -2,7 +2,8 @@
 Docling Document Conversion & Embedding Service
 
 Provides HTTP endpoints for:
-- Converting PDF documents to structured Markdown (with tables and images)
+- Converting PDF / Word / PowerPoint documents to structured Markdown
+  (with tables and images)
 - Generating text embeddings using local sentence-transformers model
 
 Usage:
@@ -123,7 +124,7 @@ class EmbedResponse(BaseModel):
     dimension: int
 
 
-# --- Legacy Office format conversion (.doc -> .docx) ---
+# --- Legacy Office format conversion (.doc -> .docx, .ppt -> .pptx) ---
 
 # OLE2 Compound File magic bytes (genuine Word 97-2003 binary)
 _OLE_MAGIC = b"\xd0\xcf\x11\xe0"
@@ -187,6 +188,66 @@ def convert_legacy_doc_to_docx(src_path: Path) -> Optional[Path]:
     return None
 
 
+def convert_legacy_ppt_to_pptx(src_path: Path) -> Optional[Path]:
+    """Convert a legacy binary .ppt file (PowerPoint 97-2003) to .pptx.
+
+    Docling reads .pptx natively through python-pptx but cannot open the
+    binary format, and macOS textutil has no presentation support, so
+    LibreOffice is the only converter. Returns the converted path, or None
+    when LibreOffice is missing / the conversion failed.
+    """
+    soffice = _find_soffice()
+    if soffice is None:
+        return None
+
+    out_dir = Path(tempfile.mkdtemp(prefix="docling_ppt_conv_"))
+    out_path = out_dir / (src_path.stem + ".pptx")
+    try:
+        subprocess.run(
+            [soffice, "--headless", "--convert-to", "pptx",
+             "--outdir", str(out_dir), str(src_path)],
+            check=True,
+            capture_output=True,
+            timeout=180,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        print(f"LibreOffice .ppt conversion failed: {e}")
+        return None
+    return out_path if out_path.exists() else None
+
+
+def export_presentation_markdown(doc) -> str:
+    """Export a slide deck with one `---` separated section per slide.
+
+    Docling's generic Markdown export concatenates every slide into one
+    running text, which makes decks hard to read. Grouping items by slide
+    provenance restores the deck's page structure; pictures stay as
+    ``<!-- image -->`` placeholders for the image pass of /convert.
+    """
+    parts: List[str] = []
+    current_page: Optional[int] = None
+    for item, _level in doc.iterate_items():
+        prov = getattr(item, "prov", None)
+        page = prov[0].page_no if prov else None
+        if current_page is not None and page is not None and page != current_page:
+            parts.append("---")
+        if page is not None:
+            current_page = page
+
+        kind = type(item).__name__
+        if kind == "TableItem":
+            text = item.export_to_markdown(doc=doc)
+        elif kind == "PictureItem":
+            text = "<!-- image -->"
+        else:
+            text = (getattr(item, "text", "") or "").strip()
+            if text and kind == "ListItem":
+                text = f"- {text}"
+        if text:
+            parts.append(text)
+    return "\n\n".join(parts)
+
+
 @app.get("/health")
 async def health():
     """Health check endpoint."""
@@ -202,7 +263,7 @@ async def health():
 @app.post("/convert", response_model=ConvertResponse)
 async def convert_document(file: UploadFile = File(...)):
     """
-    Convert a PDF (or DOCX) document to structured Markdown.
+    Convert a PDF, Word or PowerPoint document to structured Markdown.
     
     Returns:
     - markdown: Full markdown content
@@ -217,35 +278,43 @@ async def convert_document(file: UploadFile = File(...)):
     content = await file.read()
     
     # Create a temporary file for docling to process
-    suffix = Path(file.filename or "document.pdf").suffix.lower()
-    if suffix not in [".pdf", ".docx", ".doc"]:
+    original_suffix = Path(file.filename or "document.pdf").suffix.lower()
+    suffix = original_suffix
+    if suffix not in [".pdf", ".docx", ".doc", ".pptx", ".ppt"]:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix}")
     
-    # Legacy binary .doc (Word 97-2003): Docling needs LibreOffice for this
-    # format, so pre-convert to .docx ourselves (LibreOffice or macOS textutil)
-    # before handing the file to Docling.
+    # Legacy binary Office formats (Word 97-2003 .doc, PowerPoint 97-2003 .ppt)
+    # are not readable by Docling's OOXML backends, so pre-convert them first.
+    # Word can fall back to macOS textutil; PowerPoint needs LibreOffice.
     converted_path: Optional[Path] = None
-    if suffix == ".doc" and content[:4] == _OLE_MAGIC:
-        with tempfile.NamedTemporaryFile(suffix=".doc", delete=False) as tmp:
+    if suffix in (".doc", ".ppt") and content[:4] == _OLE_MAGIC:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
             tmp.write(content)
             legacy_path = Path(tmp.name)
         try:
-            conversion = await run_in_threadpool(convert_legacy_doc_to_docx, legacy_path)
+            conversion = await run_in_threadpool(
+                convert_legacy_ppt_to_pptx if suffix == ".ppt" else convert_legacy_doc_to_docx,
+                legacy_path,
+            )
         finally:
             legacy_path.unlink(missing_ok=True)
         if conversion is None:
+            target = ".pptx" if suffix == ".ppt" else ".docx"
             raise HTTPException(
                 status_code=501,
                 detail=(
-                    "Legacy .doc conversion requires LibreOffice (not installed). "
-                    "Install LibreOffice, or save the file as .docx and re-upload."
+                    f"Legacy {suffix} conversion requires LibreOffice (not installed). "
+                    f"Install LibreOffice, or save the file as {target} and re-upload."
                 ),
             )
         converted_path = conversion
         tmp_path = str(conversion)
-        suffix = ".docx"
+        suffix = ".pptx" if original_suffix == ".ppt" else ".docx"
     else:
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        # A .ppt that is really OOXML (a renamed .pptx) must reach python-pptx
+        # with the right suffix, otherwise Docling's format sniffing bails out.
+        tmp_suffix = ".pptx" if suffix == ".ppt" else suffix
+        with tempfile.NamedTemporaryFile(suffix=tmp_suffix, delete=False) as tmp:
             tmp.write(content)
             tmp_path = tmp.name
     
@@ -259,8 +328,11 @@ async def convert_document(file: UploadFile = File(...)):
         doc_assets_dir = ASSETS_DIR / doc_hash
         doc_assets_dir.mkdir(parents=True, exist_ok=True)
         
-        # Export to markdown
-        markdown = result.document.export_to_markdown()
+        # Export to markdown (presentations are grouped one section per slide)
+        if original_suffix in (".pptx", ".ppt"):
+            markdown = export_presentation_markdown(result.document)
+        else:
+            markdown = result.document.export_to_markdown()
         
         # Extract tables (pass doc for proper export to avoid deprecation warning)
         tables = []
@@ -315,30 +387,25 @@ async def convert_document(file: UploadFile = File(...)):
             
             markdown = re.sub(r'<!--\s*image\s*-->', replace_image_placeholder, markdown, flags=re.IGNORECASE)
         
-        # Post-process: remove page numbers that Docling inserts into the markdown.
-        # These appear as standalone lines (e.g., "4") or embedded in text (e.g., "像 4 火").
-        # Strategy:
-        #   1. Remove lines that contain ONLY a number (standalone page numbers)
-        #   2. Remove numbers embedded between Chinese characters where they break up text
-        #      Pattern: Chinese_char + space(s) + digit(s) + space(s) + Chinese_char
-        #      This catches cases like "像 4 火" -> "像火", "变成 4 4 了" -> "变成了"
-        #      But preserves legitimate uses like "第4课", "17 猫", "(1)" etc.
-        
-        # Step 1: Remove standalone number lines
-        markdown = re.sub(r'^\s*\d+\s*$', '', markdown, flags=re.MULTILINE)
-        
-        # Step 2: Remove numbers embedded between Chinese characters
-        # Match: CJK char + whitespace + one or more (digits + whitespace) + (CJK char or CJK punctuation)
-        # This handles single page numbers ("像 4 火") and consecutive ones ("变成 4 4 了", "盼望着 4 4 4 ，")
-        # But preserves legitimate uses like "第4课", "17 猫", "(1)" etc.
-        markdown = re.sub(
-            r'([\u4e00-\u9fff])\s+((?:\d+\s+)+)([\u4e00-\u9fff\u3001\u3002\uff0c\uff1b\uff1a\uff01\uff1f\u201c\u201d\u2018\u2019\u300a\u300b\uff08\uff09])',
-            r'\1\3',
-            markdown
-        )
-        
-        # Clean up any resulting double/triple spaces from the removal
-        markdown = re.sub(r' {2,}', ' ', markdown)
+        # PDF page-noise cleanup. Docling sprinkles bare page numbers into PDF
+        # markdown (standalone lines, or digits wedged between Chinese
+        # characters). Decks and Word files must keep numbers that are real
+        # content (e.g. a slide whose body is just "2024"), so PDFs only.
+        if original_suffix == ".pdf":
+            # Step 1: drop lines that contain ONLY a page number
+            markdown = re.sub(r'^\s*\d+\s*$', '', markdown, flags=re.MULTILINE)
+
+            # Step 2: drop numbers wedged between Chinese characters
+            # ("像 4 火" -> "像火", "变成 4 4 了" -> "变成了") while keeping
+            # legitimate uses like "第4课", "17 猫", "(1)".
+            markdown = re.sub(
+                r'([\u4e00-\u9fff])\s+((?:\d+\s+)+)([\u4e00-\u9fff\u3001\u3002\uff0c\uff1b\uff1a\uff01\uff1f\u201c\u201d\u2018\u2019\u300a\u300b\uff08\uff09])',
+                r'\1\3',
+                markdown
+            )
+
+            # Collapse the double/triple spaces the removals leave behind
+            markdown = re.sub(r' {2,}', ' ', markdown)
         
         print(f"Extracted {len(images)} images from document, doc_hash={doc_hash}")
         
