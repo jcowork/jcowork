@@ -461,6 +461,9 @@ pub fn build_router(state: AppState) -> Router {
         // carrying the is_public flag.
         .route("/api/public-users/{user_id}/documents/content", get(public_users::get_public_document_content))
         .route("/api/public-users/{user_id}/documents/download", get(public_users::download_public_document))
+        // Long-form AI summary of a public document, requested when a feed
+        // card is opened (cached per document after the first generation).
+        .route("/api/public-users/{user_id}/documents/summary", get(feed::get_public_document_summary))
         // Public AI feed, readable without an account: signed-out visitors
         // see the public accounts' task results and public documents. The
         // handlers gate on the owner carrying the is_public flag.
@@ -506,6 +509,7 @@ pub fn build_router(state: AppState) -> Router {
         // Aggregated "AI feed" (mobile AI头条 tab)
         .route("/api/feed", get(feed::get_own_feed))
         .route("/api/feed/results/{result_id}", get(feed::get_feed_result))
+        .route("/api/feed/documents/summary", get(feed::get_own_document_summary))
         .route("/api/providers", get(providers::list_providers))
         .route("/api/providers/entries", get(providers::list_provider_entries))
         .route("/api/providers", post(providers::save_providers))

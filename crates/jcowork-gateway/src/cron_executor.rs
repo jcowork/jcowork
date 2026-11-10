@@ -547,9 +547,10 @@ async fn execute_cron_task(
     cron_scheduler.store_task_result(task_result).await;
 
     // Successful runs get an AI teaser for the feed card; failed outputs keep
-    // the raw error text, which already says what went wrong.
+    // the raw error text, which already says what went wrong. Reuse the model
+    // this run used — its key is known to work.
     if status == "success" {
-        summary.ensure_task_summary(Arc::clone(cron_scheduler), &result_id);
+        summary.ensure_task_summary(Arc::clone(cron_scheduler), &result_id, Some(model));
     }
 
     Ok(())

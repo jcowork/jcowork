@@ -387,8 +387,12 @@ async fn main() {
     };
 
     let llm_router = Arc::new(RwLock::new(llm_router));
+    // Shared with the summary service so feed summaries run on the model the
+    // user actually chats with, not the deployment default.
+    let user_settings = Arc::new(jcowork_storage::UserSettingsStore::new(pool.clone()));
     let summary = Arc::new(jcowork_gateway::summary::SummaryService::new(
         llm_router.clone(),
+        user_settings.clone(),
         config.default_model.clone(),
     ));
 
@@ -411,7 +415,7 @@ async fn main() {
         feishu_client_cache,
         lark_cli: lark_cli.clone(),
         feishu_bot: Arc::new(jcowork_gateway::feishu_bot::FeishuBotManager::new()),
-        user_settings: Arc::new(jcowork_storage::UserSettingsStore::new(pool)),
+        user_settings,
         sms,
         mail: Arc::new(RwLock::new(mail)),
         data_dir: data_dir.clone(),

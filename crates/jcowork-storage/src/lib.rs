@@ -9,6 +9,7 @@ pub mod embedding_client;
 pub mod excel_db;
 pub mod feishu_store;
 pub mod file_store;
+pub mod html_text;
 pub mod migration;
 pub mod user_settings;
 pub mod user_store;
@@ -26,4 +27,4 @@ pub use docling_manager::{DoclingManager, DoclingStatus, PreWarmStatus, SetupSta
 pub use file_store::FileStore;
 pub use user_store::{UserStore, sms_only_password_hash};
 pub use vector_index::VectorIndex;
-pub use workspace_index::{WorkspaceIndex, ScoredChunk, DocChunkRow, locate_offset};
+pub use workspace_index::{WorkspaceIndex, ScoredChunk, DocChunkRow, DetailSummarySource, locate_offset};

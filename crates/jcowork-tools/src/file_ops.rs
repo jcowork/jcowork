@@ -115,6 +115,17 @@ impl Tool for FileWriteTool {
         let content = parsed["content"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'content'"))?;
         let store = FileStore::new(&ctx.workspace_root);
         store.write_file(path, content).await?;
+
+        // Index the new content so document search and the AI feed see it
+        // immediately — the feed only reads indexed documents.
+        if let Some(data_dir) = compute_data_dir(&ctx.workspace_root) {
+            if let Ok(index) = jcowork_storage::WorkspaceIndex::cached(&data_dir, &ctx.user_id).await {
+                if let Err(e) = index.add_document(path, &ctx.workspace_root).await {
+                    tracing::warn!(file = %path, err = %e, "Failed to index written file");
+                }
+            }
+        }
+
         Ok(format!("Written to {}", path))
     }
 }
@@ -234,6 +245,16 @@ impl Tool for FileCopyTool {
         let to = parsed["to"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'to'"))?;
         let store = FileStore::new(&ctx.workspace_root);
         store.copy_file(from, to).await?;
+
+        // The copy is a new workspace document, so index it too.
+        if let Some(data_dir) = compute_data_dir(&ctx.workspace_root) {
+            if let Ok(index) = jcowork_storage::WorkspaceIndex::cached(&data_dir, &ctx.user_id).await {
+                if let Err(e) = index.add_document(to, &ctx.workspace_root).await {
+                    tracing::warn!(file = %to, err = %e, "Failed to index copied file");
+                }
+            }
+        }
+
         Ok(format!("Copied {} to {}", from, to))
     }
 }
@@ -361,9 +382,13 @@ mod tests {
     use super::*;
 
     fn make_ctx(dir: &std::path::Path) -> ToolContext {
+        // Mirror the production layout (`{data_dir}/{user_id}/workspace`) so
+        // index databases created by write/copy stay inside the tempdir.
+        let workspace_root = dir.join("data").join("test-user").join("workspace");
+        std::fs::create_dir_all(&workspace_root).unwrap();
         ToolContext {
             user_id: "test-user".to_string(),
-            workspace_root: dir.to_string_lossy().to_string(),
+            workspace_root: workspace_root.to_string_lossy().to_string(),
             mentioned_public_users: Vec::new(),
             model: None,
         }

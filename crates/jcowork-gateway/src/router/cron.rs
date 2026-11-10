@@ -396,7 +396,9 @@ pub(crate) async fn store_cron_job_result(
     let is_success = result.status == "success";
     state.cron_scheduler.store_task_result(result).await;
     if is_success {
-        state.summary.ensure_task_summary(state.cron_scheduler.clone(), &result_id);
+        state
+            .summary
+            .ensure_task_summary(state.cron_scheduler.clone(), &result_id, None);
     }
     (StatusCode::OK, Json(serde_json::json!({"status": "stored"})))
 }

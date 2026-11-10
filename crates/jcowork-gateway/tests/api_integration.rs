@@ -217,8 +217,10 @@ impl TestApp {
         // Create mock LLM router
         let mock_provider = Arc::new(MockLlmProvider::new());
         let llm_router = Arc::new(RwLock::new(LlmRouter::from_mock(mock_provider)));
+        let user_settings = Arc::new(jcowork_storage::UserSettingsStore::new(pool.clone()));
         let summary = Arc::new(SummaryService::new(
             llm_router.clone(),
+            user_settings.clone(),
             "mock:test-model".to_string(),
         ));
 
@@ -266,7 +268,7 @@ impl TestApp {
             feishu_client_cache: Arc::new(dashmap::DashMap::new()),
             lark_cli: jcowork_feishu::lark_cli::LarkCliRunner::new(data_dir.clone()),
             feishu_bot: Arc::new(jcowork_gateway::feishu_bot::FeishuBotManager::new()),
-            user_settings: Arc::new(jcowork_storage::UserSettingsStore::new(pool.clone())),
+            user_settings,
             sms,
             mail: Arc::new(RwLock::new(mail)),
             data_dir: data_dir.clone(),
@@ -2945,8 +2947,10 @@ async fn test_feed_task_summary_generated_via_write_hook() {
     // The raw excerpt stays a truncation of the original output.
     assert!(excerpt.contains("AI Daily"));
 
-    // Guards: a short output and a failed run never get a summary — the card
-    // keeps showing the raw text, which already tells the story.
+    // Guards: a short output never gets a summary — the card keeps showing
+    // the raw text, which already tells the story. Failed runs are hidden
+    // from the feed entirely (success_only), so the error result below must
+    // not add a third card.
     store_result(&app, &a_token, &job_id, "short output", "success").await;
     store_result(
         &app,
@@ -2959,12 +2963,16 @@ async fn test_feed_task_summary_generated_via_write_hook() {
 
     let feed = get_feed_json(&app, &a_token).await;
     let items = feed["items"].as_array().unwrap();
-    assert_eq!(items.len(), 3, "feed: {:?}", feed);
+    assert_eq!(items.len(), 2, "failed runs must stay out of the feed: {:?}", feed);
     for item in items {
-        let status = item["status"].as_str().unwrap();
-        let summary = item["summary"].as_str().unwrap();
-        if status == "error" || item["excerpt"].as_str().unwrap() == "short output" {
-            assert_eq!(summary, "", "guard case must stay unsummarized: {:?}", item);
+        assert_eq!(item["status"], json!("success"), "feed: {:?}", item);
+        if item["excerpt"].as_str().unwrap() == "short output" {
+            assert_eq!(
+                item["summary"],
+                json!(""),
+                "short output must stay unsummarized: {:?}",
+                item
+            );
         }
     }
 }
@@ -3032,6 +3040,173 @@ async fn test_feed_doc_summary_backfilled_on_read() {
             assert!(item["snippet"].as_str().unwrap().contains("Quarterly report"));
         }
     }
+}
+
+#[tokio::test]
+async fn test_feed_document_detail_summary_generated_and_cached() {
+    let app = TestApp::new().await;
+    let (a_id, a_token) = app.provision_user().await;
+
+    let ws = format!("{}/{}/workspace", app.data_dir, a_id);
+    std::fs::create_dir_all(&ws).unwrap();
+    let body = format!("# Quarterly report\n\n{}", "Revenue grew in every segment. ".repeat(20));
+    std::fs::write(format!("{}/report.md", ws), &body).unwrap();
+    std::fs::write(format!("{}/empty.md", ws), "   ").unwrap();
+    let index = jcowork_storage::WorkspaceIndex::cached(&app.data_dir, &a_id)
+        .await
+        .unwrap();
+    index.add_document("report.md", &ws).await.unwrap();
+    index.add_document("empty.md", &ws).await.unwrap();
+
+    // Opening the document asks the model for a core-content summary.
+    let res = app
+        .make_request_with_token(
+            Some(&a_token),
+            "GET",
+            "/api/feed/documents/summary?path=report.md",
+            None,
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let summary: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(summary["summary"], json!(MOCK_SUMMARY));
+
+    // The result is stored on the document, so later opens skip the model.
+    let stored = index
+        .get_detail_summary_source("report.md", false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.detail_summary, MOCK_SUMMARY);
+
+    // A document without extractable text is rejected, not summarized.
+    let res = app
+        .make_request_with_token(
+            Some(&a_token),
+            "GET",
+            "/api/feed/documents/summary?path=empty.md",
+            None,
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Unknown paths are a plain 404.
+    let res = app
+        .make_request_with_token(
+            Some(&a_token),
+            "GET",
+            "/api/feed/documents/summary?path=missing.md",
+            None,
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_feed_indexes_documents_created_outside_the_app() {
+    let app = TestApp::new().await;
+    let (a_id, a_token) = app.provision_user().await;
+
+    // A document generated straight on disk (a shell script, for example)
+    // never passes an indexing endpoint. The first feed read must pick it up
+    // so it is not silently missing from AI头条.
+    let ws = format!("{}/{}/workspace", app.data_dir, a_id);
+    std::fs::create_dir_all(format!("{}/docs", ws)).unwrap();
+    std::fs::write(
+        format!("{}/docs/fresh.html", ws),
+        "<html><body><h1>Fresh report</h1><p>New content</p></body></html>",
+    )
+    .unwrap();
+
+    let feed = get_feed_json(&app, &a_token).await;
+    let docs: Vec<&serde_json::Value> = feed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["type"] == json!("document"))
+        .collect();
+    assert!(
+        docs.iter().any(|d| d["filename"] == json!("fresh.html")),
+        "newly created document should appear in the feed, got: {:?}",
+        feed
+    );
+
+    // The feed read indexed the file, so its detail content is available.
+    let res = app
+        .make_request_with_token(
+            Some(&a_token),
+            "GET",
+            "/api/workspace/index/content?path=docs%2Ffresh.html",
+            None,
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_public_document_detail_summary_gating() {
+    let app = TestApp::new().await;
+    let (a_id, a_token) = app.provision_user().await;
+
+    let ws = format!("{}/{}/workspace", app.data_dir, a_id);
+    std::fs::create_dir_all(&ws).unwrap();
+    let body = format!("# Shared\n\n{}", "Public body text. ".repeat(20));
+    std::fs::write(format!("{}/share.md", ws), &body).unwrap();
+    let index = jcowork_storage::WorkspaceIndex::cached(&app.data_dir, &a_id)
+        .await
+        .unwrap();
+    index.add_document("share.md", &ws).await.unwrap();
+
+    let summary_url = format!("/api/public-users/{}/documents/summary?path=share.md", a_id);
+
+    // Private account: the anonymous endpoint does not reveal anything.
+    let res = app
+        .make_request_with_token(None, "GET", &summary_url, None)
+        .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // Public account, private document: still hidden.
+    let admin_token = app.seed_and_login_admin().await;
+    let res = app
+        .make_request_with_token(
+            Some(&admin_token),
+            "POST",
+            &format!("/api/admin/users/{}/public", a_id),
+            Some(json!({ "is_public": true })),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app
+        .make_request_with_token(None, "GET", &summary_url, None)
+        .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // Public document: readable without any token, and cached on first read.
+    let res = app
+        .make_request_with_token(
+            Some(&a_token),
+            "PUT",
+            "/api/workspace/index/public",
+            Some(json!({ "path": "share.md", "is_public": true })),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app
+        .make_request_with_token(None, "GET", &summary_url, None)
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(body["summary"], json!(MOCK_SUMMARY));
+    let stored = index
+        .get_detail_summary_source("share.md", true)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.detail_summary, MOCK_SUMMARY);
 }
 
 #[tokio::test]

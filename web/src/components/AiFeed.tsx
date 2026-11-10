@@ -152,6 +152,13 @@ export default function AiFeed({ accounts, activeToken, publicUsers, onLogin }: 
   const [docLoading, setDocLoading] = useState(false);
   const [docError, setDocError] = useState('');
 
+  // ── Document AI summary state ──
+  const [docSummary, setDocSummary] = useState('');
+  const [docSummaryLoading, setDocSummaryLoading] = useState(false);
+  const [docSummaryError, setDocSummaryError] = useState('');
+  /** Identifies the latest summary request so stale responses are dropped. */
+  const summaryReqRef = useRef(0);
+
   const fetchPage = useCallback(async (source: FeedSource): Promise<void> => {
     try {
       const res = await fetch(`${source.endpoint}?offset=${source.nextOffset}&limit=${PAGE}`, {
@@ -272,6 +279,31 @@ export default function AiFeed({ accounts, activeToken, publicUsers, onLogin }: 
   const allDone = sourceStats.allDone;
   const initialLoading = busy && entries.length === 0;
 
+  // ── Detail: AI core-content summary (generated once per document) ──
+  const loadDocSummary = async (entry: FeedEntry) => {
+    if (entry.item.type !== 'document') return;
+    const reqId = ++summaryReqRef.current;
+    setDocSummaryLoading(true);
+    setDocSummaryError('');
+    const url = entry.source.isLocal
+      ? `/api/feed/documents/summary?path=${encodeURIComponent(entry.item.file_path)}`
+      : `/api/public-users/${entry.source.userId}/documents/summary?path=${encodeURIComponent(entry.item.file_path)}`;
+    try {
+      const res = await fetch(url, {
+        headers: entry.source.token ? { Authorization: `Bearer ${entry.source.token}` } : undefined,
+      });
+      if (!res.ok) {
+        throw new Error(res.status === 422 ? t('aiSummaryNoText') : t('aiSummaryFailed'));
+      }
+      const data = await res.json().catch(() => ({}));
+      if (summaryReqRef.current === reqId) setDocSummary(data.summary || '');
+    } catch (e) {
+      if (summaryReqRef.current === reqId) setDocSummaryError(String((e as Error).message || e));
+    } finally {
+      if (summaryReqRef.current === reqId) setDocSummaryLoading(false);
+    }
+  };
+
   // ── Detail: task result (full output) ──
   const openDetail = (entry: FeedEntry) => {
     setDetail(entry);
@@ -280,6 +312,10 @@ export default function AiFeed({ accounts, activeToken, publicUsers, onLogin }: 
     setDocContent('');
     setDocNextOffset(null);
     setDocError('');
+    setDocSummary('');
+    setDocSummaryError('');
+    setDocSummaryLoading(false);
+    summaryReqRef.current++; // drop any response still in flight
     if (entry.item.type === 'task') {
       setTaskDetailLoading(true);
       // Local accounts read their own result; public sources use the
@@ -304,6 +340,7 @@ export default function AiFeed({ accounts, activeToken, publicUsers, onLogin }: 
         .catch((e) => setTaskDetailError(String(e.message || e)))
         .finally(() => setTaskDetailLoading(false));
     } else {
+      void loadDocSummary(entry);
       void loadDocPage(entry, 0);
     }
   };
@@ -440,6 +477,41 @@ export default function AiFeed({ accounts, activeToken, publicUsers, onLogin }: 
       </div>
     );
   };
+
+  // AI core-content summary shown above a document's content. The backend
+  // generates it on first open and caches it per document.
+  const docSummaryPanel = detail?.item.type === 'document' && (
+    <div
+      style={{
+        marginBottom: 12, padding: '10px 12px', flexShrink: 0,
+        background: '#132033', border: '1px solid #243b5c', borderRadius: 8,
+        maxHeight: detailIsHtml() ? 220 : undefined, overflowY: 'auto',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: '#8ab4f8' }}>✨ {t('aiSummary')}</span>
+        <div style={{ flex: 1 }} />
+        {docSummaryError && !docSummaryLoading && (
+          <button
+            onClick={() => detail && void loadDocSummary(detail)}
+            style={{
+              padding: '1px 8px', borderRadius: 4, border: '1px solid #3b5478',
+              background: 'transparent', color: '#8ab4f8', cursor: 'pointer', fontSize: 11,
+            }}
+          >
+            {t('aiSummaryRetry')}
+          </button>
+        )}
+      </div>
+      {docSummaryError ? (
+        <div style={{ fontSize: 12, color: '#e57373', lineHeight: 1.5 }}>{docSummaryError}</div>
+      ) : docSummary ? (
+        <ResultMarkdown content={docSummary} />
+      ) : (
+        <div style={{ fontSize: 12, color: '#7d8da3' }}>{t('aiSummaryLoading')}</div>
+      )}
+    </div>
+  );
 
   const detailHeader = detail && (
     <div style={{
@@ -609,6 +681,7 @@ export default function AiFeed({ accounts, activeToken, publicUsers, onLogin }: 
               <div style={detailIsHtml()
                 ? { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', padding: '8px 8px 0' }
                 : { padding: '16px 16px 32px' }}>
+                {docSummaryPanel}
                 {docLoading && docContent === '' ? (
                   <div style={{ color: '#666', padding: 40, textAlign: 'center', fontSize: 13 }}>{t('loading')}</div>
                 ) : docError ? (

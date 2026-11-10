@@ -212,7 +212,16 @@ pub(crate) async fn save_workspace_file(
     let store = FileStore::new(&workspace_root);
 
     match store.write_file(&body.path, &body.content).await {
-        Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "ok": true, "path": body.path }))).into_response(),
+        Ok(_) => {
+            // Index the saved content so a document created in the editor is
+            // searchable and shows up in the AI feed right away.
+            if let Ok(index) = WorkspaceIndex::cached(&state.data_dir, &auth_user.user_id).await {
+                if let Err(e) = index.add_document(&body.path, &workspace_root).await {
+                    tracing::warn!(file = %body.path, err = %e, "Failed to index saved file");
+                }
+            }
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true, "path": body.path }))).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": format!("Failed to save file: {}", e) })),

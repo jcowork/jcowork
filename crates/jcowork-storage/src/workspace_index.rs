@@ -16,6 +16,7 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::doc_chunker::{DocChunk, chunk_markdown};
+use crate::html_text::html_to_plain_text;
 use crate::embedding_client::{EmbeddingClient, bytes_to_embedding, embedding_to_bytes};
 use crate::vector_index::VectorIndex;
 
@@ -30,6 +31,12 @@ const MAX_INDEX_CONTENT_LEN: usize = 2_000_000;
 const FEED_DOC_EXTENSIONS: &[&str] = &[
     "html", "htm", "md", "markdown", "doc", "docx", "ppt", "pptx", "pdf",
 ];
+
+/// Feed-eligible text documents that can be indexed cheaply from a read
+/// path. Binary formats (PDF/Office) stay out of this list because their
+/// Docling parsing is far too slow for a feed request; they are indexed by
+/// upload and by the manual re-index endpoint instead.
+const PLAIN_TEXT_FEED_EXTENSIONS: &[&str] = &["html", "htm", "md", "markdown"];
 
 /// SQL predicate matching `documents.filename` against [`FEED_DOC_EXTENSIONS`].
 fn feed_doc_extension_filter() -> String {
@@ -214,6 +221,13 @@ impl WorkspaceIndex {
 
         // Add summary column if it doesn't exist (AI teaser for the feed).
         sqlx::query("ALTER TABLE documents ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
+            .execute(pool)
+            .await
+            .ok(); // Ignore error if column already exists
+
+        // Add detail_summary column if it doesn't exist (long-form AI summary
+        // shown above the document when it is opened from the feed).
+        sqlx::query("ALTER TABLE documents ADD COLUMN detail_summary TEXT NOT NULL DEFAULT ''")
             .execute(pool)
             .await
             .ok(); // Ignore error if column already exists
@@ -489,7 +503,9 @@ impl WorkspaceIndex {
                 doc_hash = ?7,
                 indexed_at = ?8,
                 summary = CASE WHEN excluded.content_text IS NOT documents.content_text
-                               THEN '' ELSE documents.summary END
+                               THEN '' ELSE documents.summary END,
+                detail_summary = CASE WHEN excluded.content_text IS NOT documents.content_text
+                                      THEN '' ELSE documents.detail_summary END
             "#,
         )
         .bind(file_path)
@@ -741,6 +757,25 @@ impl WorkspaceIndex {
         })
     }
 
+    /// Indexed content converted to readable plain text. HTML markup is
+    /// stripped (the stored text stays raw for the HTML preview); other
+    /// formats are returned unchanged. None when the file is not indexed.
+    pub async fn get_plain_text(&self, file_path: &str) -> Result<Option<String>> {
+        let row: Option<(String, String)> = sqlx::query_as(
+            "SELECT content_type, content_text FROM documents WHERE file_path = ?1",
+        )
+        .bind(file_path)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(content_type, text)| {
+            if content_type == "html" {
+                html_to_plain_text(&text)
+            } else {
+                text
+            }
+        }))
+    }
+
     /// Get the full indexed content of a document by its file path.
     /// Returns None if the file is not indexed.
     pub async fn get_content(&self, file_path: &str) -> Result<Option<String>> {
@@ -756,12 +791,12 @@ impl WorkspaceIndex {
 
     /// Overwrite the indexed content text of a document — the parsed preview
     /// (e.g. a user-edited PDF extraction). FTS stays in sync via the
-    /// `documents_fts_update` trigger; the teaser summary is cleared because
-    /// it is stale once the content changed, and chunks are rebuilt so vector
-    /// search matches the edited text.
+    /// `documents_fts_update` trigger; both AI summaries are cleared because
+    /// they are stale once the content changed, and chunks are rebuilt so
+    /// vector search matches the edited text.
     pub async fn update_content(&self, file_path: &str, content: &str) -> Result<()> {
         let updated = sqlx::query(
-            "UPDATE documents SET content_text = ?2, summary = '' WHERE file_path = ?1"
+            "UPDATE documents SET content_text = ?2, summary = '', detail_summary = '' WHERE file_path = ?1"
         )
         .bind(file_path)
         .bind(content)
@@ -980,7 +1015,7 @@ impl WorkspaceIndex {
         let sql = format!(
             r#"
             SELECT file_path, dir_path, filename, content_type, size, indexed_at,
-                   substr(content_text, 1, 200) as snippet, summary, is_public
+                   substr(content_text, 1, 20000) as snippet, summary, is_public
             FROM documents
             WHERE {}
             ORDER BY indexed_at DESC, id DESC
@@ -1003,7 +1038,7 @@ impl WorkspaceIndex {
         let sql = format!(
             r#"
             SELECT file_path, dir_path, filename, content_type, size, indexed_at,
-                   substr(content_text, 1, 200) as snippet, summary, is_public
+                   substr(content_text, 1, 20000) as snippet, summary, is_public
             FROM documents
             WHERE is_public = 1 AND ({})
             ORDER BY indexed_at DESC, id DESC
@@ -1020,6 +1055,58 @@ impl WorkspaceIndex {
         Ok(docs.into_iter().map(FeedDocument::from).collect())
     }
 
+    /// Index feed-eligible text documents that were created on disk without
+    /// going through an indexing endpoint — a report generated by a shell
+    /// script, a file dropped into the workspace, and so on. Only missing
+    /// rows are added, and at most `limit` per call so a large backlog cannot
+    /// stall a feed request. Returns the number of rows created.
+    pub async fn sync_missing_feed_docs(&self, workspace_root: &str, limit: usize) -> Result<usize> {
+        if limit == 0 {
+            return Ok(0);
+        }
+        // A brand-new account has no workspace directory yet.
+        let has_workspace = tokio::fs::metadata(workspace_root)
+            .await
+            .map(|m| m.is_dir())
+            .unwrap_or(false);
+        if !has_workspace {
+            return Ok(0);
+        }
+        let store = crate::file_store::FileStore::new(workspace_root);
+        let files = store.list_dir_recursive(".").await?;
+
+        let mut indexed = 0usize;
+        for file in files {
+            if indexed >= limit {
+                break;
+            }
+            let filename = file.rsplit('/').next().unwrap_or(&file).to_lowercase();
+            let eligible = PLAIN_TEXT_FEED_EXTENSIONS
+                .iter()
+                .any(|ext| filename.ends_with(&format!(".{}", ext)));
+            if !eligible {
+                continue;
+            }
+
+            let exists = sqlx::query_as::<_, (i64,)>(
+                "SELECT 1 FROM documents WHERE file_path = ?1",
+            )
+            .bind(&file)
+            .fetch_optional(&self.pool)
+            .await?
+            .is_some();
+            if exists {
+                continue;
+            }
+
+            match self.add_document(&file, workspace_root).await {
+                Ok(()) => indexed += 1,
+                Err(e) => warn!(file = %file, err = %e, "Failed to index new feed document"),
+            }
+        }
+        Ok(indexed)
+    }
+
     /// Persist the AI teaser summary of one indexed document.
     pub async fn set_document_summary(&self, file_path: &str, summary: &str) -> Result<()> {
         sqlx::query("UPDATE documents SET summary = ?2 WHERE file_path = ?1")
@@ -1028,6 +1115,56 @@ impl WorkspaceIndex {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Persist the long-form AI summary shown above a document in the feed.
+    pub async fn set_document_detail_summary(&self, file_path: &str, summary: &str) -> Result<()> {
+        sqlx::query("UPDATE documents SET detail_summary = ?2 WHERE file_path = ?1")
+            .bind(file_path)
+            .bind(summary)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// The stored long-form summary plus content samples, read together
+    /// when generating one. `public_only` restricts the lookup to documents
+    /// their owner marked public (feed visitors).
+    ///
+    /// The head and tail are capped so a long document still fits in one
+    /// prompt while its opening (thesis) and ending (conclusions) reach the
+    /// model; `total_len` tells the caller whether anything was omitted.
+    pub async fn get_detail_summary_source(
+        &self,
+        file_path: &str,
+        public_only: bool,
+    ) -> Result<Option<DetailSummarySource>> {
+        let sql = if public_only {
+            r#"
+            SELECT detail_summary, filename, length(content_text) as total_len,
+                   length(substr(content_text, 1, 6000)) as head_len,
+                   substr(content_text, 1, 6000) as head,
+                   CASE WHEN length(content_text) > 6000
+                        THEN substr(content_text, -3000) ELSE '' END as tail
+            FROM documents
+            WHERE file_path = ?1 AND is_public = 1
+            "#
+        } else {
+            r#"
+            SELECT detail_summary, filename, length(content_text) as total_len,
+                   length(substr(content_text, 1, 6000)) as head_len,
+                   substr(content_text, 1, 6000) as head,
+                   CASE WHEN length(content_text) > 6000
+                        THEN substr(content_text, -3000) ELSE '' END as tail
+            FROM documents
+            WHERE file_path = ?1
+            "#
+        };
+        let row: Option<DetailSummarySource> = sqlx::query_as(sql)
+            .bind(file_path)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row)
     }
 
     /// The stored summary plus a head of the content text (for summary
@@ -1767,6 +1904,16 @@ struct FeedDocumentRow {
 
 impl From<FeedDocumentRow> for FeedDocument {
     fn from(r: FeedDocumentRow) -> Self {
+        // HTML is indexed as-is (the detail view renders it in an iframe),
+        // so the card snippet must drop the markup before display.
+        let snippet = if r.content_type == "html" {
+            html_to_plain_text(&r.snippet)
+                .chars()
+                .take(200)
+                .collect()
+        } else {
+            r.snippet
+        };
         FeedDocument {
             file_path: r.file_path,
             dir_path: r.dir_path,
@@ -1774,7 +1921,7 @@ impl From<FeedDocumentRow> for FeedDocument {
             content_type: r.content_type,
             size: r.size,
             indexed_at: r.indexed_at,
-            snippet: r.snippet,
+            snippet,
             summary: r.summary,
             is_public: r.is_public,
         }
@@ -1787,6 +1934,23 @@ impl From<FeedDocumentRow> for FeedDocument {
 pub struct SummarySource {
     pub summary: String,
     pub head: String,
+}
+
+/// Stored long-form summary plus the material needed to write one, read
+/// together when a document is opened in the feed.
+#[derive(Debug, sqlx::FromRow)]
+pub struct DetailSummarySource {
+    /// Long-form summary; empty until generated.
+    pub detail_summary: String,
+    pub filename: String,
+    /// Character length of the full indexed content text.
+    pub total_len: i64,
+    /// Character length of `head` (tells whether the content was truncated).
+    pub head_len: i64,
+    /// Opening of the content text (SQL-truncated).
+    pub head: String,
+    /// Closing of the content text, so conclusions are not missed.
+    pub tail: String,
 }
 
 /// Row type for doc_chunks queries.
@@ -2245,5 +2409,68 @@ mod tests {
         index.set_public("public.md", false).await.unwrap();
         assert!(index.search_chunks_public("sharing", 5).await.unwrap().is_empty());
         assert!(index.fts_chunk_search_public("sharing", 5).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_sync_missing_feed_docs_indexes_new_text_documents() {
+        let (index, dir) = setup_test_index().await;
+        let workspace = dir.path().join("workspace");
+        tokio::fs::create_dir_all(workspace.join("docs")).await.unwrap();
+        tokio::fs::write(workspace.join("docs/fresh.html"), "<h1>Fresh</h1>")
+            .await
+            .unwrap();
+        tokio::fs::write(workspace.join("notes.md"), "# Notes\n\nbody")
+            .await
+            .unwrap();
+        tokio::fs::write(workspace.join("script.py"), "print(1)")
+            .await
+            .unwrap();
+
+        let ws = workspace.to_string_lossy().to_string();
+        assert_eq!(index.sync_missing_feed_docs(&ws, 10).await.unwrap(), 2);
+
+        let recent = index.list_recent(10, 0).await.unwrap();
+        let names: Vec<&str> = recent.iter().map(|d| d.filename.as_str()).collect();
+        assert!(names.contains(&"fresh.html"));
+        assert!(names.contains(&"notes.md"));
+        assert!(!names.contains(&"script.py"), "scripts stay out of the feed");
+
+        // Already indexed files are skipped on the next pass.
+        assert_eq!(index.sync_missing_feed_docs(&ws, 10).await.unwrap(), 0);
+
+        // The cap bounds how many new documents one feed read will index.
+        tokio::fs::write(workspace.join("a.html"), "<h1>A</h1>").await.unwrap();
+        tokio::fs::write(workspace.join("b.html"), "<h1>B</h1>").await.unwrap();
+        assert_eq!(index.sync_missing_feed_docs(&ws, 1).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_html_feed_snippet_and_plain_text_drop_markup() {
+        let (index, dir) = setup_test_index().await;
+        let workspace = dir.path().join("workspace");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        let html = "<!DOCTYPE html><html><head><style>:root{--ink:#1c1f23}</style>\
+<script>var x = 1;</script></head><body><h1>智能座舱方案</h1>\
+<p>核心结论：内存 32G &amp; 算力 20 TOPS。</p></body></html>";
+        tokio::fs::write(workspace.join("report.html"), html)
+            .await
+            .unwrap();
+
+        let ws = workspace.to_string_lossy().to_string();
+        index.add_document("report.html", &ws).await.unwrap();
+
+        // The raw markup is preserved: the feed's HTML detail renders it.
+        let raw = index.get_content("report.html").await.unwrap().unwrap();
+        assert!(raw.contains("<style>"));
+
+        // Snippets and summary prompts get readable text instead.
+        let plain = index.get_plain_text("report.html").await.unwrap().unwrap();
+        assert!(plain.contains("核心结论：内存 32G & 算力 20 TOPS。"));
+        assert!(!plain.contains('<'), "markup must be stripped: {}", plain);
+
+        let recent = index.list_recent(10, 0).await.unwrap();
+        assert_eq!(recent.len(), 1);
+        assert!(recent[0].snippet.contains("智能座舱方案"));
+        assert!(!recent[0].snippet.contains('<'), "snippet: {}", recent[0].snippet);
     }
 }
