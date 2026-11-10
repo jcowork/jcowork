@@ -430,6 +430,9 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
           const validModel = validProvider.models.find(m => m.id === initialModel);
           if (validModel) {
             setSelectedModel(initialModel);
+            // Keep the server copy current: the Feishu bot runs turns without
+            // this page, and older browsers only saved the choice locally.
+            saveModel(initialProvider, initialModel);
           } else if (validProvider.models.length > 0) {
             setSelectedModel(validProvider.models[0].id);
             saveModel(initialProvider, validProvider.models[0].id);

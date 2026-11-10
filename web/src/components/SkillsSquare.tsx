@@ -32,7 +32,7 @@ export default function SkillsSquare({ userId, token }: SkillsSquareProps) {
 
       {/* Single scrolling page: skills on top, connectors below */}
       <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
-        <SkillsList token={token} onCountChange={handleCountChange} />
+        <SkillsList token={token} userId={userId} onCountChange={handleCountChange} />
 
         {/* Connectors section */}
         <div style={{

@@ -45,15 +45,30 @@ interface FeishuConfig {
   has_secret?: boolean;
   connection?: FeishuConnection;
   lark_cli?: FeishuCli;
-  /** "provider:model" the bot runs with (the Settings selection). */
+  /** Effective model "provider:model" for bot turns (selection or default). */
   model?: string | null;
+  /** Explicit per-user choice; empty means the deployment default applies. */
+  selected_model?: string | null;
+}
+
+/** Subset of `GET /api/providers` used by the model picker. */
+interface ProviderModelInfo {
+  id: string;
+  name?: string;
+}
+
+interface ProviderInfo {
+  id: string;
+  name: string;
+  models: ProviderModelInfo[];
 }
 
 /** Example third-party skill shown in the import dialog. */
 const EXAMPLE_SKILL_URL = 'https://github.com/simonlin1212/a-stock-data';
 
-export default function SkillsList({ token, onCountChange }: {
+export default function SkillsList({ token, userId, onCountChange }: {
   token: string;
+  userId: string;
   onCountChange?: (enabled: number, total: number) => void;
 }) {
   const t = useT();
@@ -162,6 +177,12 @@ export default function SkillsList({ token, onCountChange }: {
   const [feishuInstalling, setFeishuInstalling] = useState(false);
   const [feishuNotice, setFeishuNotice] = useState<{ ok: boolean; text: string } | null>(null);
   const [feishuPolling, setFeishuPolling] = useState(false);
+  const [feishuProviders, setFeishuProviders] = useState<ProviderInfo[]>([]);
+  const [feishuModelSel, setFeishuModelSel] = useState('');
+  const [feishuModelSaving, setFeishuModelSaving] = useState(false);
+  // One-time push of the browser's pre-persistence Settings choice.
+  const feishuModelSynced = useRef(false);
+  const feishuModelSavingRef = useRef(false);
   // The app id is only seeded once, so polling cannot overwrite typing.
   const feishuAppIdInit = useRef(false);
   const prevFeishuEnabled = useRef<boolean | null>(null);
@@ -174,6 +195,11 @@ export default function SkillsList({ token, onCountChange }: {
       if (!res.ok) return null;
       const cfg: FeishuConfig = await res.json();
       setFeishuCfg(cfg);
+      // Keep the picker current, but never while a save is in flight (a poll
+      // would momentarily revert the optimistic value).
+      if (!feishuModelSavingRef.current) {
+        setFeishuModelSel(cfg.selected_model || cfg.model || '');
+      }
       if (!feishuAppIdInit.current) {
         feishuAppIdInit.current = true;
         setFeishuAppId(cfg.app_id || '');
@@ -194,6 +220,42 @@ export default function SkillsList({ token, onCountChange }: {
   useEffect(() => {
     void loadFeishuConfig();
   }, [loadFeishuConfig]);
+
+  // Model choices come from the same provider registry as Settings.
+  useEffect(() => {
+    fetch('/api/providers', { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => (r.ok ? (r.json() as Promise<{ providers: ProviderInfo[] }>) : null))
+      .then(data => {
+        if (data?.providers) setFeishuProviders(data.providers);
+      })
+      .catch(() => {});
+  }, [token]);
+
+  // Before server-side persistence existed, Settings kept the model only in
+  // localStorage. Push that choice once so bot turns stop using the default.
+  useEffect(() => {
+    if (!feishuCfg || feishuCfg.selected_model || feishuModelSynced.current) return;
+    const raw = localStorage.getItem(`jcowork_model_${userId}`);
+    if (!raw) return;
+    let provider = '';
+    let model = '';
+    try {
+      const parsed = JSON.parse(raw);
+      provider = parsed.provider || '';
+      model = parsed.model || '';
+    } catch {
+      // ignore malformed values
+    }
+    if (!provider || !model) return;
+    feishuModelSynced.current = true;
+    void fetch('/api/settings/model', {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: `${provider}:${model}` }),
+    })
+      .then(() => loadFeishuConfig())
+      .catch(() => {});
+  }, [feishuCfg, token, userId, loadFeishuConfig]);
 
   useEffect(() => {
     if (!feishuPolling) return;
@@ -275,6 +337,42 @@ export default function SkillsList({ token, onCountChange }: {
     }
   };
 
+  const saveFeishuModel = async (value: string) => {
+    if (!value || feishuModelSaving) return;
+    setFeishuModelSel(value);
+    setFeishuModelSaving(true);
+    feishuModelSavingRef.current = true;
+    setFeishuNotice(null);
+    try {
+      const res = await fetch('/api/settings/model', {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: value }),
+      });
+      const data: { error?: string } = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setFeishuNotice({ ok: false, text: data.error || t('networkError') });
+        return;
+      }
+      // Keep Settings in step: it reads the same localStorage entry first.
+      const colon = value.indexOf(':');
+      if (colon > 0) {
+        localStorage.setItem(
+          `jcowork_model_${userId}`,
+          JSON.stringify({ provider: value.slice(0, colon), model: value.slice(colon + 1) }),
+        );
+      }
+      setFeishuNotice({ ok: true, text: t('feishuModelUpdated') });
+    } catch {
+      setFeishuNotice({ ok: false, text: t('networkError') });
+    } finally {
+      feishuModelSavingRef.current = false;
+      setFeishuModelSaving(false);
+      // Reflect the persisted value (or roll back on failure).
+      await loadFeishuConfig();
+    }
+  };
+
   const botState = feishuCfg?.connection?.state ?? 'stopped';
   const botError = feishuCfg?.connection?.last_error || '';
   const botColor = botState === 'connected' ? '#3fb950'
@@ -293,6 +391,12 @@ export default function SkillsList({ token, onCountChange }: {
     : cliState === 'installing' ? t('feishuCliInstalling')
     : cliState === 'failed' ? t('feishuCliFailed')
     : t('feishuCliMissing');
+
+  const feishuModelOptions = feishuProviders.flatMap(p =>
+    p.models.map(m => ({ value: `${p.id}:${m.id}`, label: `${p.name} · ${m.name || m.id}` })),
+  );
+  const feishuModelValue = feishuModelSel || feishuCfg?.model || '';
+  const feishuModelKnown = feishuModelOptions.some(o => o.value === feishuModelValue);
 
   const enabledCount = skills.filter(s => s.enabled).length;
 
@@ -676,9 +780,32 @@ export default function SkillsList({ token, onCountChange }: {
                         )}
                       </div>
 
-                      <div style={{ fontSize: 11, color: '#6e7681' }}>
-                        {t('feishuModelLabel')}:{' '}
-                        <code style={{ color: '#8b949e' }}>{feishuCfg?.model || '-'}</code>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#6e7681', minWidth: 0 }}>
+                        <span style={{ flexShrink: 0 }}>{t('feishuModelLabel')}</span>
+                        <select
+                          value={feishuModelValue}
+                          onChange={e => void saveFeishuModel(e.target.value)}
+                          disabled={feishuModelSaving || feishuProviders.length === 0}
+                          title={feishuModelValue}
+                          style={{
+                            flex: 1,
+                            minWidth: 0,
+                            background: '#0d1117',
+                            color: '#c9d1d9',
+                            border: '1px solid #30363d',
+                            borderRadius: 6,
+                            padding: '4px 6px',
+                            fontSize: 11,
+                            cursor: feishuModelSaving ? 'wait' : 'pointer',
+                          }}
+                        >
+                          {!feishuModelKnown && feishuModelValue && (
+                            <option value={feishuModelValue}>{feishuModelValue}</option>
+                          )}
+                          {feishuModelOptions.map(o => (
+                            <option key={o.value} value={o.value}>{o.label}</option>
+                          ))}
+                        </select>
                       </div>
 
                       <input

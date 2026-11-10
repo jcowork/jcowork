@@ -459,12 +459,14 @@ pub(crate) async fn get_skill_config(
             .flatten();
         let connection = state.feishu_bot.status(&auth_user.user_id).await;
         let lark_cli = state.lark_cli.refresh().await;
-        let model = state
+        let selected_model = state
             .user_settings
             .get_model(&auth_user.user_id)
             .await
             .ok()
-            .flatten()
+            .flatten();
+        let model = selected_model
+            .clone()
             .unwrap_or_else(|| state.default_model.clone());
         let (app_id, app_secret_masked) = match &entry {
             Some(cfg) => (cfg.app_id.clone(), super::mask_secret(&cfg.app_secret)),
@@ -480,6 +482,7 @@ pub(crate) async fn get_skill_config(
                 "connection": connection,
                 "lark_cli": lark_cli,
                 "model": model,
+                "selected_model": selected_model,
             })),
         );
     }

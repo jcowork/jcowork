@@ -32,6 +32,11 @@ const MAX_BACKOFF_SECS: u64 = 60;
 /// uses a freshly minted token.
 const RECYCLE_AFTER: Duration = Duration::from_secs(60 * 60);
 
+/// `event consume` stays silent once it is listening, so "the process is
+/// still alive after this grace period" is the signal that the stream is up.
+/// Attaching to the bus and opening the WebSocket takes well under a second.
+const CONNECT_GRACE: Duration = Duration::from_secs(3);
+
 /// Processed message ids remembered for deduplication (Feishu may redeliver).
 const SEEN_CAPACITY: usize = 500;
 
@@ -267,7 +272,10 @@ async fn run_bot(
             .current_dir(&state.data_dir)
             .envs(env.iter().map(|(k, v)| (k.clone(), v.clone())))
             .kill_on_drop(true)
-            .stdin(std::process::Stdio::null())
+            // `event consume` treats stdin EOF as a request to exit; /dev/null
+            // makes it quit in the same second it connects. Keep a piped
+            // handle we never write to so the consumer stays subscribed.
+            .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
@@ -289,6 +297,16 @@ async fn run_bot(
             }
         };
 
+        // The previous attempt (if any) may have left an error banner on
+        // screen; as soon as the process is up we are connecting again.
+        set_status(
+            &status,
+            "connecting",
+            Some("正在建立飞书长连接…".to_string()),
+            None,
+        )
+        .await;
+
         // Drain stderr into a small ring so the pipe never fills up and the
         // last lines are available when the process fails.
         let stderr_tail = Arc::new(Mutex::new(VecDeque::<String>::new()));
@@ -298,7 +316,7 @@ async fn run_bot(
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     let mut tail = tail.lock().await;
-                    if tail.len() >= 20 {
+                    if tail.len() >= 40 {
                         tail.pop_front();
                     }
                     tail.push_back(line);
@@ -315,6 +333,10 @@ async fn run_bot(
         };
         let mut lines = BufReader::new(stdout).lines();
         let mut connected = false;
+        // Success is silent: the first event line or surviving the grace
+        // period both mean the consumer is attached to a live stream.
+        let connect_grace = tokio::time::sleep(CONNECT_GRACE);
+        tokio::pin!(connect_grace);
         let recycle = tokio::time::sleep(RECYCLE_AFTER);
         tokio::pin!(recycle);
 
@@ -326,6 +348,17 @@ async fn run_bot(
                         set_status(&status, "stopped", Some("已断开".to_string()), None).await;
                         return;
                     }
+                }
+                _ = &mut connect_grace, if !connected => {
+                    connected = true;
+                    backoff = INITIAL_BACKOFF_SECS;
+                    set_status(
+                        &status,
+                        "connected",
+                        Some("已连接，等待飞书消息".to_string()),
+                        None,
+                    )
+                    .await;
                 }
                 _ = &mut recycle, if connected => {
                     tracing::info!(app_id = %app_id, "Recycling Feishu event stream to refresh the tenant token");
@@ -414,11 +447,7 @@ async fn run_bot(
 
         let detail = {
             let tail = stderr_tail.lock().await;
-            tail.iter()
-                .rev()
-                .find(|l| !l.trim().is_empty())
-                .cloned()
-                .unwrap_or_else(|| "飞书长连接已断开".to_string())
+            summarize_stderr(&tail).unwrap_or_else(|| "飞书长连接已断开".to_string())
         };
         set_status(
             &status,
@@ -448,10 +477,73 @@ async fn set_status(
     }
 }
 
+/// Turn the CLI's stderr tail into a one-line reason.
+///
+/// Failures end with a pretty-printed JSON error block whose final line is
+/// just `}`, so the raw last line is useless. Extract `error.message` (and
+/// the hint when present) instead.
+fn summarize_stderr(lines: &VecDeque<String>) -> Option<String> {
+    for (i, line) in lines.iter().enumerate() {
+        if !line.trim_start().starts_with('{') {
+            continue;
+        }
+        let joined = lines
+            .iter()
+            .skip(i)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&joined) else {
+            continue;
+        };
+        if let Some(message) = value.pointer("/error/message").and_then(|m| m.as_str()) {
+            return Some(match value.pointer("/error/hint").and_then(|h| h.as_str()) {
+                Some(hint) => format!("{message}（{hint}）"),
+                None => message.to_string(),
+            });
+        }
+    }
+    lines.iter().rev().find(|l| !l.trim().is_empty()).cloned()
+}
+
 /// Sleep for `secs`, returning `true` when the connection was asked to stop.
 async fn sleep_or_stopped(stop_rx: &mut watch::Receiver<bool>, secs: u64) -> bool {
     tokio::select! {
         _ = tokio::time::sleep(Duration::from_secs(secs)) => *stop_rx.borrow(),
         changed = stop_rx.changed() => changed.is_err() || *stop_rx.borrow(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lines(items: &[&str]) -> VecDeque<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn summarize_stderr_extracts_json_error() {
+        let tail = lines(&[
+            "[event] consuming as cli_x",
+            "{",
+            "  \"ok\": false,",
+            "  \"error\": {",
+            "    \"type\": \"validation\",",
+            "    \"message\": \"another event bus is already connected\",",
+            "    \"hint\": \"stop the other host\"",
+            "  }",
+            "}",
+        ]);
+        assert_eq!(
+            summarize_stderr(&tail).as_deref(),
+            Some("another event bus is already connected（stop the other host）")
+        );
+    }
+
+    #[test]
+    fn summarize_stderr_falls_back_to_last_line() {
+        let tail = lines(&["first", "", "last line"]);
+        assert_eq!(summarize_stderr(&tail).as_deref(), Some("last line"));
     }
 }
