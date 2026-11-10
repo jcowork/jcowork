@@ -142,8 +142,10 @@ impl LarkCliRunner {
         let Some(path) = self.resolve_binary() else {
             let mut st = self.status.lock().await;
             // A running install has no binary yet; keep reporting progress so
-            // UI polls do not flip the state back to "missing".
-            if st.state == "installing" {
+            // UI polls do not flip the state back to "missing". A recorded
+            // failure keeps its error for the skill card instead of silently
+            // looking uninstalled again; retrying goes through `install()`.
+            if st.state == "installing" || st.state == "failed" {
                 return st.clone();
             }
             let next = LarkCliStatus {
@@ -174,7 +176,7 @@ impl LarkCliRunner {
                 state: "failed".to_string(),
                 path: Some(path.to_string_lossy().to_string()),
                 version: None,
-                error: Some(e.to_string()),
+                error: Some(format!("{e:#}")),
             },
         };
         *self.status.lock().await = next.clone();
@@ -217,7 +219,7 @@ impl LarkCliRunner {
                 state: "failed".to_string(),
                 path: None,
                 version: None,
-                error: Some(e.to_string()),
+                error: Some(format!("{e:#}")),
             },
         };
         *self.status.lock().await = next.clone();
@@ -228,6 +230,14 @@ impl LarkCliRunner {
         let npm = find_npm().context(
             "未找到 npm：请先安装 Node.js（https://nodejs.org），再重新安装 lark-cli",
         )?;
+        // A desktop app launched from Finder gets a minimal PATH
+        // (`/usr/bin:/bin:...`). npm is a `#!/usr/bin/env node` script, so
+        // spawning it otherwise fails with "env: node: No such file or
+        // directory" even though npm itself was found via search_dirs().
+        let node = find_node().context(
+            "未找到 node：请先安装 Node.js（https://nodejs.org），再重新安装 lark-cli",
+        )?;
+        let path_env = install_path(&npm, &node);
         let prefix = self.managed_prefix();
         tokio::fs::create_dir_all(&prefix).await?;
         let cache = prefix.join(".npm-cache");
@@ -246,6 +256,7 @@ impl LarkCliRunner {
             .arg("--cache")
             .arg(&cache)
             .arg(format!("{}@latest", LARK_CLI_PACKAGE))
+            .env("PATH", &path_env)
             .env("npm_config_cache", &cache)
             .kill_on_drop(true)
             .stdout(std::process::Stdio::piped())
@@ -388,6 +399,31 @@ fn find_npm() -> Option<PathBuf> {
     find_in_dirs(&search_dirs(), if cfg!(windows) { "npm.cmd" } else { "npm" })
 }
 
+fn find_node() -> Option<PathBuf> {
+    if let Ok(explicit) = std::env::var("JCWORK_NODE_BIN") {
+        let p = PathBuf::from(explicit);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    find_in_dirs(&search_dirs(), if cfg!(windows) { "node.exe" } else { "node" })
+}
+
+/// PATH for the npm child process: the npm and node directories first, then
+/// the inherited PATH so npm lifecycle scripts keep working.
+fn install_path(npm: &Path, node: &Path) -> std::ffi::OsString {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for dir in [npm.parent(), node.parent()].into_iter().flatten() {
+        if !dirs.iter().any(|d| d == dir) {
+            dirs.push(dir.to_path_buf());
+        }
+    }
+    if let Some(existing) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&existing));
+    }
+    std::env::join_paths(dirs).unwrap_or_default()
+}
+
 async fn probe_version(bin: &Path) -> Result<String> {
     let mut cmd = tokio::process::Command::new(bin);
     cmd.arg("--version")
@@ -468,6 +504,29 @@ mod tests {
         assert_eq!(get("LARKSUITE_CLI_STRICT_MODE"), "bot");
         assert_eq!(get("LARKSUITE_CLI_DEFAULT_AS"), "bot");
         assert_eq!(get("LARKSUITE_CLI_CONFIG_DIR"), "/tmp/larkcfg");
+    }
+
+    #[test]
+    fn test_install_path_puts_tool_dirs_first() {
+        let path = install_path(
+            Path::new("/tmp/jcowork-npm/bin/npm"),
+            Path::new("/tmp/jcowork-node/bin/node"),
+        );
+        let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+        assert_eq!(dirs.first(), Some(&PathBuf::from("/tmp/jcowork-npm/bin")));
+        assert_eq!(dirs.get(1), Some(&PathBuf::from("/tmp/jcowork-node/bin")));
+    }
+
+    #[test]
+    fn test_install_path_dedupes_shared_dir() {
+        let path = install_path(
+            Path::new("/tmp/jcowork-shared/npm"),
+            Path::new("/tmp/jcowork-shared/node"),
+        );
+        let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+        assert_eq!(dirs.first(), Some(&PathBuf::from("/tmp/jcowork-shared")));
+        // node lives in the same dir as npm: no duplicate entry is added.
+        assert_ne!(dirs.get(1), Some(&PathBuf::from("/tmp/jcowork-shared")));
     }
 
     #[test]
