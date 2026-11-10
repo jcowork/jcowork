@@ -102,7 +102,12 @@ async fn build_feed(
     let offset = offset.max(0);
     let fetch = offset + limit;
 
-    let tasks = state.cron_scheduler.list_user_task_results(user_id, fetch, 0).await;
+    // AI头条 hides failed executions — a red "失败" card carries no content
+    // worth reading. Filtering in SQL keeps the merged offset pagination exact.
+    let tasks = state
+        .cron_scheduler
+        .list_user_task_results(user_id, fetch, 0, true)
+        .await;
     let index = WorkspaceIndex::cached(&state.data_dir, user_id).await?;
     let docs = if public_docs_only {
         index.list_public_recent(fetch, 0).await?

@@ -160,9 +160,11 @@ impl CronStore for CronJobStore {
         user_id: &str,
         limit: i64,
         offset: i64,
+        success_only: bool,
     ) -> Result<Vec<UserTaskResultEntry>> {
         // output is truncated in SQL: the aggregated feed only shows a summary
-        // card, so shipping full task outputs would be pure waste.
+        // card, so shipping full task outputs would be pure waste. Failed runs
+        // are filtered here (not in the builder) so offset paging stays exact.
         let rows: Vec<(
             String,
             String,
@@ -180,6 +182,7 @@ impl CronStore for CronJobStore {
             FROM cron_task_results r
             LEFT JOIN cron_jobs j ON j.id = r.cron_job_id
             WHERE r.user_id = ?1
+              AND (?4 = 0 OR r.status = 'success')
             ORDER BY r.executed_at DESC
             LIMIT ?2 OFFSET ?3
             "#,
@@ -187,6 +190,7 @@ impl CronStore for CronJobStore {
         .bind(user_id)
         .bind(limit)
         .bind(offset)
+        .bind(if success_only { 1 } else { 0 })
         .fetch_all(&self.pool)
         .await?;
         Ok(rows

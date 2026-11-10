@@ -205,11 +205,14 @@ pub trait CronStore: Send + Sync {
     async fn delete_results(&self, cron_job_id: &str) -> Result<()>;
     /// Newest execution results of one user across all their jobs,
     /// joined with job name/prompt, ordered by executed_at DESC.
+    /// `success_only` drops failed executions in SQL so offset pagination
+    /// stays exact (the AI feed hides failed runs).
     async fn list_user_results(
         &self,
         user_id: &str,
         limit: i64,
         offset: i64,
+        success_only: bool,
     ) -> Result<Vec<UserTaskResultEntry>>;
     /// One execution result by id (any user), joined with job name/prompt.
     async fn get_result(&self, result_id: &str) -> Result<Option<UserTaskResultEntry>>;
@@ -603,14 +606,16 @@ impl CronScheduler {
 
     /// Newest execution results of one user across all their jobs (feed API).
     /// Reads straight from persistence so it stays correct across restarts.
+    /// `success_only` keeps failed executions out of the stream.
     pub async fn list_user_task_results(
         &self,
         user_id: &str,
         limit: i64,
         offset: i64,
+        success_only: bool,
     ) -> Vec<UserTaskResultEntry> {
         match &self.store {
-            Some(store) => match store.list_user_results(user_id, limit, offset).await {
+            Some(store) => match store.list_user_results(user_id, limit, offset, success_only).await {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(error = %e, user_id = %user_id, "Failed to load user task results");
