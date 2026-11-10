@@ -332,6 +332,39 @@ When creating an HTML document, follow this structure:
 - The shell runs in the workspace root directory."##,
     },
     BuiltinSkill {
+        id: "builtin:feishu",
+        name: "飞书",
+        description: "连接飞书机器人（长连接），在飞书里收发消息；并通过官方 lark-cli 操作飞书文档、表格、日程等。",
+        hidden: false,
+        content: r#"## Skill: 飞书 — Feishu Bot & Document Operations
+
+启用本技能后，宿主会保持一条飞书机器人的常连接：用户在飞书里私聊机器人（或在群里 @机器人）时，消息会自动送入本会话，你的回复会直接发回对应的飞书消息。需要主动操作飞书（读写文档、表格、发消息、查日程等）时，使用 `lark_cli` 工具调用官方 lark-cli。
+
+### lark_cli 工具
+- 参数 `args`：字符串数组，按顺序传给 lark-cli（不要在数组里重复写 `lark-cli`）。
+- 凭证已由宿主注入（App ID / App Secret + tenant access token，身份固定为 bot）。**不要**再传 `--as`，也不要调用 `config` / `auth` / `event` / `update` 子命令。
+- 工作目录是用户工作区，参数中的 `@文件路径`（如 `--content @notes.md`）会读取工作区文件，适合长文档。
+- 参数不确定时先用 `["<domain>", "--help"]` 或 `["schema", "<service.resource.method>"]` 查看，不要臆造参数。
+
+### 常用命令示例
+- 创建文档：`["docs", "+create", "--title", "标题", "--doc-format", "markdown", "--content", "@notes.md"]`
+- 读取文档：`["docs", "+fetch", "--doc", "<文档链接或 token>", "--doc-format", "markdown"]`
+- 搜索文档：`["docs", "+search", "--query", "关键词"]`
+- 更新文档：`["docs", "+update", ...]`（先用 `--help` 确认参数）
+- 发消息：`["im", "+messages-send", "--chat-id", "oc_xxx", "--text", "..."]`
+- 表格：`["sheets", ...]`；多维表格：`["base", ...]`；云空间文件：`["drive", ...]`；日程：`["calendar", "+agenda"]`；任务：`["task", ...]`
+
+### 规则
+- 写操作（创建 / 更新 / 发送 / 删除）前先向用户确认对象和内容；`--help` 标注 high-risk-write 的命令必须得到用户明确同意并带 `--yes`。
+- 与用户对话时直接给出文档链接或 token，方便对方打开。
+- 工具输出可能被截断：内容很长时先把文档 fetch 到工作区文件，再用 file_read 分段读取。
+
+### 飞书消息场景
+- 收到的消息已包含在用户消息里；直接回答即可，无需再调用 `im +messages-send` 回复当前会话（宿主会自动回发）。
+- 需要主动通知其他人或其它群时，才使用 `im +messages-send`。
+- 群聊里只有被 @ 的消息才会处理；不要假设能看到群里的其它消息。"#,
+    },
+    BuiltinSkill {
         id: "builtin:excel_data",
         name: "Excel数据分析",
         description: "查询和分析已上传的 Excel 文件：上传后自动解析为带索引的 SQLite 数据库，对话中可直接对其增删改查。",

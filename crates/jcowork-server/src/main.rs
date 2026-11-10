@@ -154,8 +154,21 @@ async fn main() -> Result<()> {
     let log_writer = Arc::new(LogWriter::new(log_dir.into()).await?);
     info!("Log writer initialized");
 
+    // Feishu skill plumbing: per-user app configs, the shared client cache
+    // (tenant-token cache), and the official CLI runner.
+    let feishu_config_store = Arc::new(FeishuConfigStore::new(pool.clone()));
+    let feishu_client_cache = Arc::new(dashmap::DashMap::new());
+    let lark_cli = jcowork_feishu::lark_cli::LarkCliRunner::new(data_dir.clone());
+
     // Initialize tool registry
-    let tool_registry = jcowork_gateway::ws::build_tool_registry(cron_scheduler.clone(), memory_manager.clone(), log_writer.clone());
+    let tool_registry = jcowork_gateway::ws::build_tool_registry(
+        cron_scheduler.clone(),
+        memory_manager.clone(),
+        log_writer.clone(),
+        lark_cli.clone(),
+        feishu_config_store.clone(),
+        feishu_client_cache.clone(),
+    );
 
     // Initialize connector manager (user-managed API/MCP tool integrations).
     // Enabled connector tools are synced into the registry's dynamic area.
@@ -202,8 +215,11 @@ async fn main() -> Result<()> {
         app_settings: Arc::new(AppSettingsStore::new(pool.clone())),
         captcha: Arc::new(router::CaptchaService::new()),
         summary,
-        feishu_config_store: Arc::new(FeishuConfigStore::new(pool)),
-        feishu_client_cache: Arc::new(dashmap::DashMap::new()),
+        feishu_config_store,
+        feishu_client_cache,
+        lark_cli: lark_cli.clone(),
+        feishu_bot: Arc::new(jcowork_gateway::feishu_bot::FeishuBotManager::new()),
+        user_settings: Arc::new(jcowork_storage::UserSettingsStore::new(pool)),
         sms,
         mail: Arc::new(RwLock::new(mail)),
         data_dir: data_dir.clone(),
@@ -212,6 +228,17 @@ async fn main() -> Result<()> {
     // An admin-configured mail channel (stored by /api/admin/mail) wins over
     // the environment on every restart.
     router::apply_stored_mail_config(&state).await;
+
+    // Probe the Feishu CLI and reopen bot connections for accounts that had
+    // the Feishu skill enabled before this restart. Spawned so a slow probe
+    // (or a missing CLI) never delays the HTTP server.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            state.lark_cli.refresh().await;
+            state.feishu_bot.restore(&state).await;
+        });
+    }
 
     // Build router
     let app = router::build_router(state.clone())

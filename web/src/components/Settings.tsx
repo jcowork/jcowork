@@ -59,16 +59,6 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
   const [showProviderManager, setShowProviderManager] = useState(false);
   const [loadError, setLoadError] = useState('');
 
-  // Feishu config state
-  const [feishuAppId, setFeishuAppId] = useState('');
-  const [feishuAppSecret, setFeishuAppSecret] = useState('');
-  const [feishuVerificationToken, setFeishuVerificationToken] = useState('');
-  const [feishuEncryptKey, setFeishuEncryptKey] = useState('');
-  const [feishuConfigured, setFeishuConfigured] = useState(false);
-  const [feishuLoading, setFeishuLoading] = useState(true);
-  const [feishuSaving, setFeishuSaving] = useState(false);
-  const [feishuStatus, setFeishuStatus] = useState<'idle' | 'saved' | 'deleted' | 'error'>('idle');
-
   // Admin mail-channel state (section renders for admins only)
   const [isAdmin, setIsAdmin] = useState(false);
   const [mailCfg, setMailCfg] = useState<MailConfigDto | null>(null);
@@ -100,9 +90,19 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
 
   const MODEL_KEY = `jcowork_model_${userId}`;
 
-  // Save model selection to localStorage whenever it changes
+  // Save the selection locally (instant UI) and server-side so backend-started
+  // conversations — the Feishu bot — use the same model.
   const saveModel = (provider: string, model: string) => {
     localStorage.setItem(MODEL_KEY, JSON.stringify({ provider, model }));
+    if (!model) return;
+    void fetch('/api/settings/model', {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ model: `${provider}:${model}` }),
+    }).catch(() => {});
   };
 
   useEffect(() => {
@@ -118,24 +118,6 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
         setIdentityLoading(false);
       })
       .catch(() => setIdentityLoading(false));
-  }, []);
-
-  useEffect(() => {
-    fetch('/api/feishu/config', {
-      headers: { 'Authorization': `Bearer ${token}` },
-    })
-      .then(r => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
-      .then((data: { app_id: string; verification_token: string; encrypt_key: string; is_configured: boolean }) => {
-        setFeishuAppId(data.app_id || '');
-        setFeishuVerificationToken(data.verification_token || '');
-        setFeishuEncryptKey(data.encrypt_key || '');
-        setFeishuConfigured(data.is_configured);
-        setFeishuLoading(false);
-      })
-      .catch(() => setFeishuLoading(false));
   }, []);
 
   const saveAgentIdentity = () => {
@@ -159,60 +141,6 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
       })
       .catch(() => setIdentityStatus('error'))
       .finally(() => setIdentitySaving(false));
-  };
-
-  const saveFeishuConfig = () => {
-    setFeishuSaving(true);
-    setFeishuStatus('idle');
-    fetch('/api/feishu/config', {
-      method: 'PUT',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        app_id: feishuAppId,
-        app_secret: feishuAppSecret,
-        verification_token: feishuVerificationToken,
-        encrypt_key: feishuEncryptKey || undefined,
-      }),
-    })
-      .then(r => {
-        if (!r.ok) return r.json().then(e => { throw new Error(e.error || `HTTP ${r.status}`); });
-        return r.json();
-      })
-      .then(() => {
-        setFeishuConfigured(true);
-        setFeishuAppSecret(''); // Clear secret after save
-        setFeishuStatus('saved');
-        setTimeout(() => setFeishuStatus('idle'), 2000);
-      })
-      .catch(() => setFeishuStatus('error'))
-      .finally(() => setFeishuSaving(false));
-  };
-
-  const deleteFeishuConfig = () => {
-    setFeishuSaving(true);
-    setFeishuStatus('idle');
-    fetch('/api/feishu/config', {
-      method: 'DELETE',
-      headers: { 'Authorization': `Bearer ${token}` },
-    })
-      .then(r => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
-      .then(() => {
-        setFeishuAppId('');
-        setFeishuAppSecret('');
-        setFeishuVerificationToken('');
-        setFeishuEncryptKey('');
-        setFeishuConfigured(false);
-        setFeishuStatus('deleted');
-        setTimeout(() => setFeishuStatus('idle'), 2000);
-      })
-      .catch(() => setFeishuStatus('error'))
-      .finally(() => setFeishuSaving(false));
   };
 
   // --- Account profile ---
@@ -454,19 +382,26 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
   };
 
   useEffect(() => {
-    fetch('/api/providers', {
-      headers: { 'Authorization': `Bearer ${token}` },
-    })
-      .then(r => {
+    const authHeaders = { 'Authorization': `Bearer ${token}` };
+    Promise.all([
+      fetch('/api/providers', { headers: authHeaders }).then(r => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
-      .then((data: { providers: ProviderInfo[]; default_model: string }) => {
+        return r.json() as Promise<{ providers: ProviderInfo[]; default_model: string }>;
+      }),
+      // The server-side copy is what backend conversations (the Feishu bot) use.
+      fetch('/api/settings', { headers: authHeaders })
+        .then(r => (r.ok ? r.json() as Promise<{ model: string | null }> : null))
+        .catch(() => null),
+    ])
+      .then(([data, settings]) => {
         const providers = data.providers;
         const serverDefault = data.default_model || ''; // e.g. "moonshot:kimi-k2.6"
+        const serverModel = settings?.model || '';
         setProviders(providers);
         setLoading(false);
-        // Auto-select from localStorage or server default
+        // Auto-select: localStorage, then the saved server-side choice, then the
+        // server default. Keeping the server in sync matters because the Feishu
+        // bot runs agent turns without a browser.
         const saved = localStorage.getItem(MODEL_KEY);
         let initialProvider = '';
         let initialModel = '';
@@ -476,6 +411,11 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
             initialProvider = parsed.provider || '';
             initialModel = parsed.model || '';
           } catch {}
+        }
+        if (!initialProvider && serverModel.includes(':')) {
+          const colonIdx = serverModel.indexOf(':');
+          initialProvider = serverModel.slice(0, colonIdx);
+          initialModel = serverModel.slice(colonIdx + 1);
         }
         // If no saved preference, use server default
         if (!initialProvider && serverDefault.includes(':')) {
@@ -919,108 +859,6 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
         )}
       </div>
 
-      {/* Feishu Integration Section */}
-      <div style={{ ...cardStyle, marginTop: 16 }}>
-        <h3 style={{ fontSize: 16, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 20 }}>🐤</span> {t('feishuIntegration')}
-          {feishuConfigured && (
-            <span style={{ ...tagStyle, background: '#23863622', color: '#3fb950' }}>{t('connected')}</span>
-          )}
-        </h3>
-        <div style={{ color: '#888', fontSize: 13, lineHeight: 1.6, marginBottom: 12 }}>
-          {t('feishuDesc')}
-        </div>
-        {feishuLoading ? (
-          <div style={{ color: '#888', fontSize: 13 }}>{t('loading')}</div>
-        ) : (
-          <>
-            <div style={{ marginBottom: 12 }}>
-              <label style={labelStyle}>App ID</label>
-              <input
-                value={feishuAppId}
-                onChange={e => setFeishuAppId(e.target.value)}
-                placeholder="cli_xxxxx"
-                style={{
-                  width: '100%', padding: '10px 12px', borderRadius: 8,
-                  border: '1px solid #444', background: '#1a1a1a', color: '#eee',
-                  fontSize: 13, outline: 'none', boxSizing: 'border-box',
-                }}
-              />
-            </div>
-            <div style={{ marginBottom: 12 }}>
-              <label style={labelStyle}>App Secret</label>
-              <input
-                type="password"
-                value={feishuAppSecret}
-                onChange={e => setFeishuAppSecret(e.target.value)}
-                placeholder={feishuConfigured ? t('keepCurrent') : t('enterSecret')}
-                style={{
-                  width: '100%', padding: '10px 12px', borderRadius: 8,
-                  border: '1px solid #444', background: '#1a1a1a', color: '#eee',
-                  fontSize: 13, outline: 'none', boxSizing: 'border-box',
-                }}
-              />
-            </div>
-            <div style={{ marginBottom: 12 }}>
-              <label style={labelStyle}>Verification Token</label>
-              <input
-                value={feishuVerificationToken}
-                onChange={e => setFeishuVerificationToken(e.target.value)}
-                placeholder={t('tokenFromFeishu')}
-                style={{
-                  width: '100%', padding: '10px 12px', borderRadius: 8,
-                  border: '1px solid #444', background: '#1a1a1a', color: '#eee',
-                  fontSize: 13, outline: 'none', boxSizing: 'border-box',
-                }}
-              />
-            </div>
-            <div style={{ marginBottom: 16 }}>
-              <label style={labelStyle}>{t('encryptKey')} ({t('optional')})</label>
-              <input
-                value={feishuEncryptKey}
-                onChange={e => setFeishuEncryptKey(e.target.value)}
-                placeholder={t('optional')}
-                style={{
-                  width: '100%', padding: '10px 12px', borderRadius: 8,
-                  border: '1px solid #444', background: '#1a1a1a', color: '#eee',
-                  fontSize: 13, outline: 'none', boxSizing: 'border-box',
-                }}
-              />
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <button
-                onClick={saveFeishuConfig}
-                disabled={feishuSaving || !feishuAppId || (!feishuAppSecret && !feishuConfigured)}
-                style={{
-                  padding: '8px 20px', borderRadius: 8, border: 'none',
-                  background: (feishuSaving || !feishuAppId || (!feishuAppSecret && !feishuConfigured)) ? '#333' : '#1f6feb',
-                  color: '#fff', cursor: (feishuSaving || !feishuAppId || (!feishuAppSecret && !feishuConfigured)) ? 'not-allowed' : 'pointer',
-                  fontSize: 14, fontWeight: 500,
-                }}
-              >
-                {feishuSaving ? t('saving') : t('saveFeishu')}
-              </button>
-              {feishuConfigured && (
-                <button
-                  onClick={deleteFeishuConfig}
-                  disabled={feishuSaving}
-                  style={{
-                    padding: '8px 16px', borderRadius: 8, border: '1px solid #f87171',
-                    background: 'transparent', color: '#f87171', cursor: feishuSaving ? 'not-allowed' : 'pointer',
-                    fontSize: 14,
-                  }}
-                >
-                  {t('deleteFeishu')}
-                </button>
-              )}
-              {feishuStatus === 'saved' && <span style={{ color: '#3fb950', fontSize: 13 }}>{t('saved')}</span>}
-              {feishuStatus === 'deleted' && <span style={{ color: '#f87171', fontSize: 13 }}>{t('deleted')}</span>}
-              {feishuStatus === 'error' && <span style={{ color: '#f87171', fontSize: 13 }}>{t('failedToSave')}</span>}
-            </div>
-          </>
-        )}
-      </div>
-
       {/* Mail Channel Section (admin only) */}
       {isAdmin && (
         <div style={{ ...cardStyle, marginTop: 16 }}>
@@ -1240,7 +1078,7 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
           <span style={{ fontSize: 20 }}>🧠</span> {t('memory')}
         </h3>
         <div style={{ color: '#888', fontSize: 13, lineHeight: 1.6 }}>
-          {t('feishuMemoryDesc')}
+          {t('memoryDesc')}
         </div>
       </div>
 
@@ -1250,7 +1088,7 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
           <span style={{ fontSize: 20 }}>⚡</span> {t('skills')}
         </h3>
         <div style={{ color: '#888', fontSize: 13, lineHeight: 1.6 }}>
-          {t('feishuSkillsDesc')}
+          {t('skillsDesc')}
         </div>
       </div>
     </div>

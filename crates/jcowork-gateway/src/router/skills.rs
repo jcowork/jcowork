@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use super::{AppState, AuthUser, SkillInfo};
+use jcowork_feishu::lark_cli::FEISHU_SKILL_ID;
 use jcowork_skills::builtin_skills;
 use jcowork_skills::models::Skill;
 
@@ -159,6 +160,29 @@ pub(crate) async fn toggle_skill(
 ) -> impl IntoResponse {
     match set_skill_enabled(&state, &auth_user.user_id, &skill_id, req.enabled).await {
         Ok(_) => {
+            // The Feishu skill owns the bot's long connection and the CLI.
+            // Enabling it installs lark-cli in the background and starts the
+            // connection; disabling stops the connection.
+            if skill_id == FEISHU_SKILL_ID {
+                let state = state.clone();
+                let user_id = auth_user.user_id.clone();
+                let enabled = req.enabled;
+                tokio::spawn(async move {
+                    if enabled {
+                        let runner = state.lark_cli.clone();
+                        if runner.resolve_binary().is_none() {
+                            let status = runner.install().await;
+                            tracing::info!(
+                                user_id = %user_id,
+                                state = %status.state,
+                                error = ?status.error,
+                                "lark-cli auto-install finished"
+                            );
+                        }
+                    }
+                    state.feishu_bot.sync_with_skill(&state, &user_id).await;
+                });
+            }
             let status = if req.enabled { "enabled" } else { "disabled" };
             (StatusCode::OK, Json(serde_json::json!({ "status": status })))
         }
@@ -418,11 +442,48 @@ fn skill_config_category(skill_id: &str) -> String {
 }
 
 /// GET /api/skills/{id}/config — returns the skill's config (e.g. selected VL model).
+///
+/// The Feishu skill returns its bot configuration instead: app credentials
+/// (secret masked), the long-connection state and the CLI install state.
 pub(crate) async fn get_skill_config(
     State(state): State<AppState>,
     axum::Extension(auth_user): axum::Extension<AuthUser>,
     Path(skill_id): Path<String>,
 ) -> impl IntoResponse {
+    if skill_id == FEISHU_SKILL_ID {
+        let entry = state
+            .feishu_config_store
+            .get_by_user(&auth_user.user_id)
+            .await
+            .ok()
+            .flatten();
+        let connection = state.feishu_bot.status(&auth_user.user_id).await;
+        let lark_cli = state.lark_cli.refresh().await;
+        let model = state
+            .user_settings
+            .get_model(&auth_user.user_id)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| state.default_model.clone());
+        let (app_id, app_secret_masked) = match &entry {
+            Some(cfg) => (cfg.app_id.clone(), super::mask_secret(&cfg.app_secret)),
+            None => (String::new(), String::new()),
+        };
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "kind": "feishu",
+                "app_id": app_id,
+                "app_secret_masked": app_secret_masked,
+                "has_secret": entry.as_ref().map(|c| !c.app_secret.is_empty()).unwrap_or(false),
+                "connection": connection,
+                "lark_cli": lark_cli,
+                "model": model,
+            })),
+        );
+    }
+
     let vl_model = state
         .memory_manager
         .recall_all(&auth_user.user_id)
@@ -437,7 +498,13 @@ pub(crate) async fn get_skill_config(
 #[derive(Debug, Deserialize)]
 pub(crate) struct SaveSkillConfigRequest {
     /// "provider:model" string, or null/empty to clear the selection.
+    #[serde(default)]
     vl_model: Option<String>,
+    /// Feishu skill only: app credentials.
+    #[serde(default)]
+    app_id: Option<String>,
+    #[serde(default)]
+    app_secret: Option<String>,
 }
 
 /// PUT /api/skills/{id}/config — save or clear the skill's config.
@@ -446,7 +513,11 @@ pub(crate) async fn save_skill_config(
     axum::Extension(auth_user): axum::Extension<AuthUser>,
     Path(skill_id): Path<String>,
     Json(req): Json<SaveSkillConfigRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    if skill_id == FEISHU_SKILL_ID {
+        return save_feishu_config(&state, &auth_user.user_id, req).await;
+    }
+
     let category = skill_config_category(&skill_id);
 
     // Replace any existing config entry for this skill
@@ -458,9 +529,104 @@ pub(crate) async fn save_skill_config(
 
     match req.vl_model.filter(|m| !m.is_empty()) {
         Some(model) => match state.memory_manager.save(&auth_user.user_id, &model, &category).await {
-            Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "status": "saved" }))),
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))),
+            Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "status": "saved" }))).into_response(),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
         },
-        None => (StatusCode::OK, Json(serde_json::json!({ "status": "cleared" }))),
+        None => (StatusCode::OK, Json(serde_json::json!({ "status": "cleared" }))).into_response(),
     }
+}
+
+/// Save the Feishu app credentials and (re)start the long connection.
+///
+/// An empty secret keeps the stored one for the same app id, so the UI can
+/// save other changes without retyping a secret it never sees again.
+async fn save_feishu_config(
+    state: &AppState,
+    user_id: &str,
+    req: SaveSkillConfigRequest,
+) -> Response {
+    let app_id = req.app_id.as_deref().map(str::trim).unwrap_or_default();
+    if app_id.is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "App ID 不能为空");
+    }
+
+    // Long connections do not use the webhook token/key, but keep whatever
+    // was stored before so an existing callback setup keeps working.
+    let existing = state
+        .feishu_config_store
+        .get_by_user(user_id)
+        .await
+        .ok()
+        .flatten();
+    let (verification_token, encrypt_key) = match &existing {
+        Some(cfg) => (cfg.verification_token.clone(), cfg.encrypt_key.clone()),
+        None => (String::new(), String::new()),
+    };
+
+    let typed_secret = req.app_secret.as_deref().map(str::trim).unwrap_or_default();
+    let app_secret = if !typed_secret.is_empty() {
+        typed_secret.to_string()
+    } else {
+        existing
+            .as_ref()
+            .filter(|cfg| cfg.app_id == app_id)
+            .map(|cfg| cfg.app_secret.clone())
+            .unwrap_or_default()
+    };
+    if app_secret.is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "App Secret 不能为空");
+    }
+
+    if let Err(e) = state
+        .feishu_config_store
+        .upsert(user_id, app_id, &app_secret, &verification_token, &encrypt_key)
+        .await
+    {
+        return err_json(StatusCode::BAD_REQUEST, e.to_string());
+    }
+
+    // The old client (and its cached token) belongs to the previous secret.
+    state.feishu_client_cache.remove(app_id);
+    if let Some(old) = existing {
+        state.feishu_client_cache.remove(&old.app_id);
+    }
+
+    // Restart the connection with the new credentials when the skill is on.
+    state.feishu_bot.sync_with_skill(state, user_id).await;
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "status": "saved" })),
+    )
+        .into_response()
+}
+
+/// POST /api/skills/{id}/install-cli — install lark-cli into the app data dir.
+///
+/// The download is ~50 MB, so the request returns immediately; the UI polls
+/// `GET /api/skills/{id}/config` and watches `lark_cli.state`.
+pub(crate) async fn install_skill_cli(
+    State(state): State<AppState>,
+    axum::Extension(_auth_user): axum::Extension<AuthUser>,
+    Path(skill_id): Path<String>,
+) -> Response {
+    if skill_id != FEISHU_SKILL_ID {
+        return err_json(StatusCode::BAD_REQUEST, "该技能不需要 lark-cli");
+    }
+    if state.lark_cli.resolve_binary().is_some() {
+        let status = state.lark_cli.refresh().await;
+        return (StatusCode::OK, Json(serde_json::json!({ "status": "installed", "lark_cli": status })))
+            .into_response();
+    }
+
+    let runner = state.lark_cli.clone();
+    tokio::spawn(async move {
+        let status = runner.install().await;
+        tracing::info!(state = %status.state, version = ?status.version, error = ?status.error, "lark-cli install finished");
+    });
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "status": "installing" })),
+    )
+        .into_response()
 }

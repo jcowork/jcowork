@@ -105,6 +105,9 @@ pub fn build_tool_registry(
     scheduler: Arc<CronScheduler>,
     memory_manager: Arc<MemoryManager>,
     log_writer: Arc<LogWriter>,
+    lark_cli: jcowork_feishu::lark_cli::LarkCliRunner,
+    feishu_config_store: Arc<jcowork_storage::FeishuConfigStore>,
+    feishu_client_cache: Arc<dashmap::DashMap<String, Arc<jcowork_feishu::client::FeishuClient>>>,
 ) -> Arc<ToolRegistry> {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(ReminderAddTool { scheduler: scheduler.clone() }));
@@ -136,6 +139,12 @@ pub fn build_tool_registry(
     registry.register(Arc::new(PublicDocContentTool));
     registry.register(Arc::new(ExcelDbTool));
     registry.register(Arc::new(ShellTool::new(120)));
+    // Bound to the Feishu skill (see `filter_tools_by_skill`).
+    registry.register(Arc::new(crate::lark_cli_tool::LarkCliTool::new(
+        lark_cli,
+        feishu_config_store,
+        feishu_client_cache,
+    )));
     Arc::new(registry)
 }
 

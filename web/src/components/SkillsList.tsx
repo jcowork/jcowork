@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useT } from '../i18n';
 
 export interface SkillEntry {
@@ -17,6 +17,37 @@ export interface SkillEntry {
 type FilterTab = 'all' | 'builtin' | 'user' | 'thirdparty';
 
 const IMAGE_TO_HTML_ID = 'builtin:image_to_html';
+
+/** Built-in skill that owns the Feishu bot long connection and lark-cli. */
+const FEISHU_SKILL_ID = 'builtin:feishu';
+
+/** `GET /api/skills/builtin:feishu/config` payload. */
+interface FeishuConnection {
+  /** "stopped" | "connecting" | "connected" | "error" */
+  state: string;
+  detail?: string | null;
+  last_error?: string | null;
+  app_id?: string | null;
+  since?: string | null;
+}
+
+interface FeishuCli {
+  /** "installed" | "installing" | "missing" | "failed" */
+  state: string;
+  version?: string | null;
+  path?: string | null;
+  error?: string | null;
+}
+
+interface FeishuConfig {
+  app_id?: string;
+  app_secret_masked?: string;
+  has_secret?: boolean;
+  connection?: FeishuConnection;
+  lark_cli?: FeishuCli;
+  /** "provider:model" the bot runs with (the Settings selection). */
+  model?: string | null;
+}
 
 /** Example third-party skill shown in the import dialog. */
 const EXAMPLE_SKILL_URL = 'https://github.com/simonlin1212/a-stock-data';
@@ -122,6 +153,146 @@ export default function SkillsList({ token, onCountChange }: {
       // ignore
     }
   };
+
+  // ── Feishu skill: credentials, long connection and lark-cli ──
+  const [feishuCfg, setFeishuCfg] = useState<FeishuConfig | null>(null);
+  const [feishuAppId, setFeishuAppId] = useState('');
+  const [feishuSecret, setFeishuSecret] = useState('');
+  const [feishuSaving, setFeishuSaving] = useState(false);
+  const [feishuInstalling, setFeishuInstalling] = useState(false);
+  const [feishuNotice, setFeishuNotice] = useState<{ ok: boolean; text: string } | null>(null);
+  const [feishuPolling, setFeishuPolling] = useState(false);
+  // The app id is only seeded once, so polling cannot overwrite typing.
+  const feishuAppIdInit = useRef(false);
+  const prevFeishuEnabled = useRef<boolean | null>(null);
+
+  const loadFeishuConfig = useCallback(async (): Promise<FeishuConfig | null> => {
+    try {
+      const res = await fetch(`/api/skills/${encodeURIComponent(FEISHU_SKILL_ID)}/config`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return null;
+      const cfg: FeishuConfig = await res.json();
+      setFeishuCfg(cfg);
+      if (!feishuAppIdInit.current) {
+        feishuAppIdInit.current = true;
+        setFeishuAppId(cfg.app_id || '');
+      }
+      return cfg;
+    } catch {
+      return null;
+    }
+  }, [token]);
+
+  // Backend-driven transitions (installing → installed → connecting →
+  // connected) are polled for a bounded window after each action.
+  const pollFeishu = useCallback((windowMs = 180_000) => {
+    setFeishuPolling(true);
+    window.setTimeout(() => setFeishuPolling(false), windowMs);
+  }, []);
+
+  useEffect(() => {
+    void loadFeishuConfig();
+  }, [loadFeishuConfig]);
+
+  useEffect(() => {
+    if (!feishuPolling) return;
+    const timer = window.setInterval(() => { void loadFeishuConfig(); }, 3000);
+    return () => window.clearInterval(timer);
+  }, [feishuPolling, loadFeishuConfig]);
+
+  // Refresh the state whenever the card is opened.
+  useEffect(() => {
+    if (expandedId === FEISHU_SKILL_ID) void loadFeishuConfig();
+  }, [expandedId, loadFeishuConfig]);
+
+  // Enabling the skill installs the CLI and opens the connection server-side.
+  const feishuEnabled = skills.some(s => s.id === FEISHU_SKILL_ID && s.enabled);
+  useEffect(() => {
+    const prev = prevFeishuEnabled.current;
+    prevFeishuEnabled.current = feishuEnabled;
+    if (prev === false && feishuEnabled) {
+      pollFeishu(600_000);
+      void loadFeishuConfig();
+    }
+  }, [feishuEnabled, pollFeishu, loadFeishuConfig]);
+
+  const saveFeishuConfig = async () => {
+    if (feishuSaving) return;
+    const appId = feishuAppId.trim();
+    const secret = feishuSecret.trim();
+    if (!appId || (!secret && !feishuCfg?.has_secret)) {
+      setFeishuNotice({ ok: false, text: t('feishuNeedCreds') });
+      return;
+    }
+    setFeishuSaving(true);
+    setFeishuNotice(null);
+    try {
+      const res = await fetch(`/api/skills/${encodeURIComponent(FEISHU_SKILL_ID)}/config`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ app_id: appId, app_secret: secret || null }),
+      });
+      const data: { error?: string } = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setFeishuNotice({ ok: false, text: data.error || t('failedToSave') });
+        return;
+      }
+      setFeishuSecret('');
+      setFeishuNotice({ ok: true, text: t('feishuSaved') });
+      pollFeishu();
+      await loadFeishuConfig();
+    } catch {
+      setFeishuNotice({ ok: false, text: t('networkError') });
+    } finally {
+      setFeishuSaving(false);
+    }
+  };
+
+  const installLarkCli = async () => {
+    setFeishuInstalling(true);
+    setFeishuNotice(null);
+    try {
+      const res = await fetch(`/api/skills/${encodeURIComponent(FEISHU_SKILL_ID)}/install-cli`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data: { error?: string } = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setFeishuNotice({ ok: false, text: data.error || t('networkError') });
+        return;
+      }
+      // The download is ~50 MB; keep polling until the state settles.
+      pollFeishu(600_000);
+      await loadFeishuConfig();
+    } catch {
+      setFeishuNotice({ ok: false, text: t('networkError') });
+    } finally {
+      setFeishuInstalling(false);
+    }
+  };
+
+  const botState = feishuCfg?.connection?.state ?? 'stopped';
+  const botError = feishuCfg?.connection?.last_error || '';
+  const botColor = botState === 'connected' ? '#3fb950'
+    : botState === 'connecting' ? '#d29922'
+    : botState === 'error' ? '#f85149'
+    : '#6e7681';
+  const botText = botState === 'connected' ? t('feishuConnected')
+    : botState === 'connecting' ? t('feishuConnecting')
+    : botState === 'error' ? t('feishuConnError')
+    : t('feishuStopped');
+
+  const cliState = feishuCfg?.lark_cli?.state ?? 'missing';
+  const cliBusy = cliState === 'installing' || feishuInstalling;
+  const cliVersion = feishuCfg?.lark_cli?.version;
+  const cliText = cliState === 'installed' ? (cliVersion ? `v${cliVersion}` : '✓')
+    : cliState === 'installing' ? t('feishuCliInstalling')
+    : cliState === 'failed' ? t('feishuCliFailed')
+    : t('feishuCliMissing');
 
   const enabledCount = skills.filter(s => s.enabled).length;
 
@@ -469,6 +640,121 @@ export default function SkillsList({ token, onCountChange }: {
                           <span>{vlModels.length === 0 ? t('vlModelNone') : t('vlModelRequired')}</span>
                         </div>
                       )}
+                    </div>
+                  )}
+
+                  {/* Feishu bot: credentials, long connection and lark-cli */}
+                  {skill.id === FEISHU_SKILL_ID && (
+                    <div
+                      onClick={e => e.stopPropagation()}
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 8,
+                        paddingTop: 10,
+                        borderTop: '1px solid #21262d',
+                      }}
+                    >
+                      {/* Long-connection state */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, minWidth: 0 }}>
+                        <span style={{
+                          width: 8,
+                          height: 8,
+                          borderRadius: 4,
+                          background: botColor,
+                          flexShrink: 0,
+                          boxShadow: botState === 'connected' ? `0 0 6px ${botColor}` : 'none',
+                        }} />
+                        <span style={{ color: botColor, fontWeight: 500, flexShrink: 0 }}>{botText}</span>
+                        {botState === 'error' && botError && (
+                          <span
+                            title={botError}
+                            style={{ color: '#6e7681', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                          >
+                            {botError}
+                          </span>
+                        )}
+                      </div>
+
+                      <div style={{ fontSize: 11, color: '#6e7681' }}>
+                        {t('feishuModelLabel')}:{' '}
+                        <code style={{ color: '#8b949e' }}>{feishuCfg?.model || '-'}</code>
+                      </div>
+
+                      <input
+                        value={feishuAppId}
+                        onChange={e => { setFeishuAppId(e.target.value); setFeishuNotice(null); }}
+                        placeholder="App ID (cli_xxx)"
+                        spellCheck={false}
+                        style={importInputStyle}
+                      />
+                      <input
+                        type="password"
+                        value={feishuSecret}
+                        onChange={e => { setFeishuSecret(e.target.value); setFeishuNotice(null); }}
+                        placeholder={feishuCfg?.has_secret ? t('feishuKeepSecret') : t('appSecret')}
+                        style={importInputStyle}
+                      />
+
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <button
+                          onClick={saveFeishuConfig}
+                          disabled={feishuSaving}
+                          style={{
+                            padding: '5px 14px',
+                            borderRadius: 6,
+                            border: 'none',
+                            background: feishuSaving ? '#1f6feb88' : '#1f6feb',
+                            color: '#fff',
+                            cursor: feishuSaving ? 'wait' : 'pointer',
+                            fontSize: 12,
+                            fontWeight: 500,
+                          }}
+                        >
+                          {feishuSaving ? t('saving') : t('save')}
+                        </button>
+                        <span style={{
+                          fontSize: 11,
+                          color: cliState === 'failed' ? '#f85149' : '#8b949e',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 4,
+                        }}>
+                          lark-cli · {cliText}
+                        </span>
+                        {(cliState === 'missing' || cliState === 'failed') && (
+                          <button
+                            onClick={installLarkCli}
+                            disabled={cliBusy}
+                            style={{
+                              padding: '4px 10px',
+                              borderRadius: 6,
+                              border: '1px solid #30363d',
+                              background: 'transparent',
+                              color: cliBusy ? '#6e7681' : '#58a6ff',
+                              cursor: cliBusy ? 'not-allowed' : 'pointer',
+                              fontSize: 11,
+                            }}
+                          >
+                            {cliBusy ? t('feishuCliInstalling') : t('feishuInstallCli')}
+                          </button>
+                        )}
+                      </div>
+
+                      {feishuNotice && (
+                        <div style={{ fontSize: 11, color: feishuNotice.ok ? '#3fb950' : '#f85149', lineHeight: 1.5 }}>
+                          {feishuNotice.text}
+                        </div>
+                      )}
+                      {cliState === 'failed' && feishuCfg?.lark_cli?.error && (
+                        <div style={{ fontSize: 11, color: '#f85149', wordBreak: 'break-word', lineHeight: 1.5 }}>
+                          {feishuCfg.lark_cli.error}
+                        </div>
+                      )}
+
+                      <div style={{ fontSize: 11, color: '#6e7681', lineHeight: 1.5 }}>
+                        {skill.enabled ? t('feishuHint') : t('feishuDisabledHint')}
+                      </div>
                     </div>
                   )}
 

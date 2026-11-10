@@ -87,6 +87,16 @@ impl FeishuConfigStore {
         Ok(entry)
     }
 
+    /// Every configured app, used at startup to restore long connections.
+    pub async fn list_all(&self) -> Result<Vec<FeishuConfigEntry>> {
+        let entries = sqlx::query_as::<_, FeishuConfigEntry>(
+            "SELECT user_id, app_id, app_secret, verification_token, encrypt_key, created_at, updated_at FROM feishu_configs ORDER BY updated_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(entries)
+    }
+
     /// Delete Feishu config for a user.
     pub async fn delete(&self, user_id: &str) -> Result<()> {
         sqlx::query("DELETE FROM feishu_configs WHERE user_id = ?")

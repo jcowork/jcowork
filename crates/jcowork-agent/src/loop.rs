@@ -756,6 +756,9 @@ pub fn filter_tools_by_skill(
             let skill_required = match t.function.name.as_str() {
                 "web_search" => Some("builtin:web_search"),
                 "excel_db" => Some("builtin:excel_data"),
+                // The Feishu skill owns the bot connection and the official
+                // CLI; without it the CLI tool would have no credentials.
+                "lark_cli" => Some("builtin:feishu"),
                 "file_read"
                 | "file_write"
                 | "file_list"

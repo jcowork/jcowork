@@ -2819,6 +2819,7 @@ dependencies = [
  "dotenvy",
  "jcowork-connectors",
  "jcowork-cron",
+ "jcowork-feishu",
  "jcowork-gateway",
  "jcowork-llm",
  "jcowork-logs",
@@ -2857,6 +2858,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -2974,6 +2976,7 @@ dependencies = [
  "jcowork-agent",
  "jcowork-connectors",
  "jcowork-cron",
+ "jcowork-feishu",
  "jcowork-gateway",
  "jcowork-llm",
  "jcowork-logs",

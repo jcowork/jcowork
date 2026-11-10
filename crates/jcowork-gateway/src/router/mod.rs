@@ -32,6 +32,7 @@ pub(crate) mod memory;
 pub(crate) mod profile;
 pub(crate) mod providers;
 pub(crate) mod public_users;
+pub(crate) mod settings;
 pub(crate) mod skills;
 pub(crate) mod upload;
 pub(crate) mod workspace;
@@ -222,6 +223,12 @@ pub struct AppState {
     pub feishu_config_store: Arc<FeishuConfigStore>,
     /// Cache of FeishuClient instances keyed by app_id.
     pub feishu_client_cache: Arc<DashMap<String, Arc<FeishuClient>>>,
+    /// Official lark-cli installer/runner (owned by the Feishu skill).
+    pub lark_cli: jcowork_feishu::lark_cli::LarkCliRunner,
+    /// Persistent Feishu bot connections, one per user with the skill enabled.
+    pub feishu_bot: Arc<crate::feishu_bot::FeishuBotManager>,
+    /// Per-user backend settings (the model picked in Settings).
+    pub user_settings: Arc<jcowork_storage::UserSettingsStore>,
     /// SMS verification-code login.
     pub sms: SmsRuntime,
     /// Email + password login. Behind an RwLock because
@@ -479,6 +486,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/skills/{id}/toggle", put(skills::toggle_skill))
         .route("/api/skills/{id}/config", get(skills::get_skill_config))
         .route("/api/skills/{id}/config", put(skills::save_skill_config))
+        .route("/api/skills/{id}/install-cli", post(skills::install_skill_cli))
+        .route("/api/settings", get(settings::get_settings))
+        .route("/api/settings/model", put(settings::set_model))
         .route("/api/memory", get(memory::list_memories))
         .route("/api/memory/search", get(memory::search_memories))
         .route("/api/memory/{id}", put(memory::update_memory))

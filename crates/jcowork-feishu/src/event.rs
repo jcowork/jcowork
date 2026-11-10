@@ -114,6 +114,119 @@ fn extract_text_from_content(content: &str) -> Option<String> {
     Some(if cleaned.is_empty() { text.trim().to_string() } else { cleaned.to_string() })
 }
 
+/// One message event emitted by `lark-cli event consume` (NDJSON).
+///
+/// The CLI already flattens the event into a small object (chat_id,
+/// message_id, pre-rendered text content, …), but older builds wrap the raw
+/// Feishu v2 payload instead. [`parse_cli_event`] accepts both shapes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BotEvent {
+    pub message_id: String,
+    pub chat_id: String,
+    pub chat_type: String,
+    pub message_type: String,
+    pub content: String,
+    pub sender_type: Option<String>,
+    pub mentions: Vec<serde_json::Value>,
+}
+
+impl BotEvent {
+    /// Group chats only get an answer when the bot was mentioned — the
+    /// official CLI guide warns against acting on every group message.
+    /// Messages from other bots are ignored so two bots cannot loop.
+    pub fn should_answer(&self) -> bool {
+        if self.sender_type.as_deref() == Some("bot") {
+            return false;
+        }
+        if self.chat_type != "p2p" && self.mentions.is_empty() {
+            return false;
+        }
+        // Only text is actionable: the agent cannot see images or files, and
+        // the CLI's pre-rendered content for those is a placeholder.
+        matches!(self.message_type.as_str(), "text" | "post" | "")
+            && !self.content.trim().is_empty()
+    }
+}
+
+/// Parse one stdout line produced by `lark-cli event consume`.
+///
+/// Returns `None` for non-message bus lines (ready markers, errors, …), so a
+/// caller can feed every line in without filtering first.
+pub fn parse_cli_event(line: &str) -> Option<BotEvent> {
+    let line = line.trim();
+    if !line.starts_with('{') {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+
+    // Skip anything that is clearly not a message event.
+    if let Some(kind) = value.get("type").and_then(|v| v.as_str()) {
+        if kind != "im.message.receive_v1" {
+            return None;
+        }
+    }
+
+    let root = value
+        .get("event")
+        .filter(|v| v.is_object())
+        .or_else(|| value.get("data").filter(|v| v.is_object()))
+        .unwrap_or(&value);
+
+    // Flattened CLI shape keeps message fields on the root; raw Feishu v2
+    // nests them under `message` with the sender beside it.
+    let message = root.get("message").unwrap_or(root);
+
+    let message_id = json_str(message, "message_id")
+        .or_else(|| json_str(message, "id"))?;
+    let chat_id = json_str(message, "chat_id")?;
+    let message_type = json_str(message, "message_type").unwrap_or_default();
+    let content = normalize_content(&json_str(message, "content").unwrap_or_default());
+    let chat_type = json_str(message, "chat_type").unwrap_or_else(|| "p2p".to_string());
+    let sender_type = root
+        .get("sender")
+        .and_then(|s| s.get("sender_type"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| json_str(root, "sender_type"));
+    let mentions = root
+        .get("mentions")
+        .or_else(|| message.get("mentions"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    Some(BotEvent {
+        message_id,
+        chat_id,
+        chat_type,
+        message_type,
+        content,
+        sender_type,
+        mentions,
+    })
+}
+
+fn json_str(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Raw events carry the message content as a JSON string (`{"text":"hi"}`);
+/// the CLI's flattened shape carries plain text already.
+fn normalize_content(content: &str) -> String {
+    let trimmed = content.trim();
+    if trimmed.starts_with('{') {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(text) = parsed.get("text").and_then(|v| v.as_str()) {
+                return text.to_string();
+            }
+        }
+    }
+    content.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +241,54 @@ mod tests {
     fn test_extract_text_with_mention() {
         let content = r#"{"text":"@_user_1 hello world"}"#;
         assert_eq!(extract_text_from_content(content), Some("hello world".to_string()));
+    }
+
+    #[test]
+    fn test_parse_cli_event_flattened() {
+        let line = r#"{"type":"im.message.receive_v1","message_id":"om_1","chat_id":"oc_1","chat_type":"p2p","message_type":"text","content":"你好","sender_type":"user"}"#;
+        let ev = parse_cli_event(line).expect("event");
+        assert_eq!(ev.message_id, "om_1");
+        assert_eq!(ev.chat_id, "oc_1");
+        assert_eq!(ev.content, "你好");
+        assert_eq!(ev.chat_type, "p2p");
+        assert!(ev.should_answer());
+    }
+
+    #[test]
+    fn test_parse_cli_event_raw_v2() {
+        let line = r#"{"schema":"2.0","header":{"event_type":"im.message.receive_v1"},"event":{"sender":{"sender_type":"user"},"message":{"message_id":"om_2","chat_id":"oc_2","chat_type":"group","message_type":"text","content":"{\"text\":\"hi\"}"}}}"#;
+        let ev = parse_cli_event(line).expect("event");
+        assert_eq!(ev.content, "hi");
+        assert_eq!(ev.sender_type.as_deref(), Some("user"));
+        // Group message without a mention is ignored.
+        assert!(!ev.should_answer());
+    }
+
+    #[test]
+    fn test_parse_cli_event_skips_lifecycle_lines() {
+        assert!(parse_cli_event(r#"{"type":"ready","ok":true}"#).is_none());
+        assert!(parse_cli_event("[event] connecting...").is_none());
+    }
+
+    #[test]
+    fn test_should_answer_ignores_bot_and_non_text() {
+        let mut ev = BotEvent {
+            message_id: "om".into(),
+            chat_id: "oc".into(),
+            chat_type: "p2p".into(),
+            message_type: "text".into(),
+            content: "hi".into(),
+            sender_type: Some("user".into()),
+            mentions: vec![],
+        };
+        assert!(ev.should_answer());
+        ev.sender_type = Some("bot".into());
+        assert!(!ev.should_answer());
+        ev.sender_type = Some("user".into());
+        ev.message_type = "image".into();
+        assert!(!ev.should_answer());
+        ev.message_type = "text".into();
+        ev.content = "   ".into();
+        assert!(!ev.should_answer());
     }
 }

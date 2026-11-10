@@ -21,6 +21,7 @@ jcowork-storage = { workspace = true }
 jcowork-llm = { workspace = true }
 jcowork-cron = { workspace = true }
 jcowork-logs = { workspace = true }
+jcowork-feishu = { workspace = true }
 tauri = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

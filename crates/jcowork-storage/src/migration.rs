@@ -261,6 +261,21 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         .execute(pool)
         .await?;
 
+    // Per-user preferences that the backend needs too — the Feishu bot runs
+    // without a browser, so the model chosen in Settings must live here as
+    // well as in localStorage.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS user_settings (
+            user_id TEXT NOT NULL PRIMARY KEY,
+            model TEXT,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     // Deployment-level key/value settings (e.g. the admin-configured mail
     // channel, which overrides the environment on next startup).
     sqlx::query(
