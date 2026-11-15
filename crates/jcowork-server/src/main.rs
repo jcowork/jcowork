@@ -204,6 +204,23 @@ async fn main() -> Result<()> {
         config.default_model.clone(),
     ));
 
+    // Daily RSI (recursive self-improvement) runner for opted-in accounts.
+    // Deployment-level settings are shared so an admin-configured source
+    // directory is visible to the runner and to `GET /api/rsi`.
+    let app_settings = Arc::new(AppSettingsStore::new(pool.clone()));
+    let rsi = Arc::new(jcowork_gateway::rsi::RsiService::new(
+        llm_router.clone(),
+        config.default_model.clone(),
+        tool_registry.clone(),
+        log_writer.clone(),
+        data_dir.clone(),
+        user_store.clone(),
+        user_settings.clone(),
+        Arc::new(jcowork_storage::RsiStore::new(pool.clone())),
+        cron_scheduler.clone(),
+        app_settings.clone(),
+    ));
+
     let state = AppState {
         session_manager,
         auth_config,
@@ -216,9 +233,10 @@ async fn main() -> Result<()> {
         connector_manager,
         user_store,
         log_writer,
-        app_settings: Arc::new(AppSettingsStore::new(pool.clone())),
+        app_settings,
         captcha: Arc::new(router::CaptchaService::new()),
         summary,
+        rsi: rsi.clone(),
         feishu_config_store,
         feishu_client_cache,
         lark_cli: lark_cli.clone(),
@@ -262,6 +280,11 @@ async fn main() -> Result<()> {
         state.user_store.clone(),
     );
     info!("Background cron executor spawned");
+
+    // Spawn the RSI scheduler — accounts that turned the nav switch on get
+    // one analysis per local day (default from 03:00).
+    rsi.spawn_scheduler();
+    info!("RSI scheduler spawned");
 
     // Spawn the trash purger — permanently removes account records that have
     // been in the recycle bin for more than TRASH_RETENTION_DAYS days.

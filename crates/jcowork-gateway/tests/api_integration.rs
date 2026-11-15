@@ -226,6 +226,31 @@ impl TestApp {
 
         let user_store_handle = user_store.clone();
 
+        // Cron scheduler shares the test pool, so periodic tasks persist like
+        // the server binaries do.
+        let cron_scheduler = {
+            let mut scheduler = jcowork_cron::CronScheduler::new();
+            scheduler.with_store(Arc::new(jcowork_storage::CronJobStore::new(pool.clone())));
+            Arc::new(scheduler)
+        };
+
+        // RSI service: the toggle endpoints are exercised by tests; no
+        // scheduler loop is spawned in the test harness. The source-directory
+        // setting is shared with the app state, like the binaries do.
+        let app_settings = Arc::new(jcowork_storage::AppSettingsStore::new(pool.clone()));
+        let rsi = Arc::new(jcowork_gateway::rsi::RsiService::new(
+            llm_router.clone(),
+            "mock:test-model".to_string(),
+            tool_registry.clone(),
+            log_writer.clone(),
+            data_dir.clone(),
+            user_store.clone(),
+            user_settings.clone(),
+            Arc::new(jcowork_storage::RsiStore::new(pool.clone())),
+            cron_scheduler.clone(),
+            app_settings.clone(),
+        ));
+
         let capture = CaptureSms::default();
         let sms_sent = capture.sent.clone();
         let sms = router::SmsRuntime::new(
@@ -248,22 +273,17 @@ impl TestApp {
             },
             llm_router,
             default_model: "mock:test-model".to_string(),
-            cron_scheduler: {
-                // Same wiring as the server binary: the scheduler persists
-                // jobs/results through the shared SQLite pool.
-                let mut scheduler = jcowork_cron::CronScheduler::new();
-                scheduler.with_store(Arc::new(jcowork_storage::CronJobStore::new(pool.clone())));
-                Arc::new(scheduler)
-            },
+            cron_scheduler,
             memory_manager,
             skill_manager,
             tool_registry,
             connector_manager,
             user_store,
             log_writer,
-            app_settings: Arc::new(jcowork_storage::AppSettingsStore::new(pool.clone())),
+            app_settings,
             captcha: Arc::new(captcha),
             summary,
+            rsi,
             feishu_config_store,
             feishu_client_cache: Arc::new(dashmap::DashMap::new()),
             lark_cli: jcowork_feishu::lark_cli::LarkCliRunner::new(data_dir.clone()),
@@ -3402,4 +3422,146 @@ async fn test_update_indexed_content_overwrites_parsed_preview() {
     // The raw file on disk is untouched.
     let raw = std::fs::read_to_string(format!("{}/note.md", ws)).unwrap();
     assert_eq!(raw, "# Original content\n");
+}
+
+/// Read a response body as JSON (null when it is not JSON).
+async fn body_of(res: axum::http::Response<Body>) -> serde_json::Value {
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+}
+
+/// Same ancestor walk the RSI service uses for auto-detection, so assertions
+/// track the process cwd instead of a hard-coded path.
+fn expected_source_root() -> Option<String> {
+    let start = std::env::var("JCWORK_PROJECT_ROOT")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())?;
+    start
+        .ancestors()
+        .find(|d| d.join("Cargo.toml").is_file() && d.join("crates").is_dir())
+        .map(|d| d.to_string_lossy().to_string())
+}
+
+/// /api/rsi backs the nav switch: the flag is per account, the scope is
+/// decided by the account role, and report reads are owner-scoped.
+#[tokio::test]
+async fn test_rsi_toggle_and_reports_are_per_account() {
+    let app = TestApp::new().await;
+    let (_a_id, a_token) = app.provision_user().await;
+
+    async fn body_json(res: axum::http::Response<Body>) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    }
+
+    // New accounts start opted out and run with the personal scope.
+    let res = app.make_request_with_token(Some(&a_token), "GET", "/api/rsi", None).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    assert_eq!(body["enabled"], json!(false));
+    assert_eq!(body["role"], json!("user"));
+    assert_eq!(body["running"], json!(false));
+    assert_eq!(body["last_report_at"], json!(null));
+    assert!(body["schedule_hour"].as_u64().unwrap() <= 23);
+    // No source checkout is exposed to a personal run.
+    assert_eq!(body["source_root"], json!(null));
+
+    // Turning the switch on persists...
+    let res = app
+        .make_request_with_token(Some(&a_token), "PUT", "/api/rsi", Some(json!({ "enabled": true })))
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(body_json(res).await["enabled"], json!(true));
+
+    let res = app.make_request_with_token(Some(&a_token), "GET", "/api/rsi", None).await;
+    assert_eq!(body_json(res).await["enabled"], json!(true));
+
+    // ...without leaking into another account's setting.
+    let (_b_id, b_token) = app.provision_user().await;
+    let res = app.make_request_with_token(Some(&b_token), "GET", "/api/rsi", None).await;
+    assert_eq!(body_json(res).await["enabled"], json!(false));
+
+    // History starts empty, and an unknown id is a 404 rather than another
+    // account's report.
+    let res = app.make_request_with_token(Some(&a_token), "GET", "/api/rsi/reports", None).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(body_json(res).await.as_array().map(Vec::len), Some(0));
+
+    let res = app
+        .make_request_with_token(Some(&b_token), "GET", "/api/rsi/reports/does-not-exist", None)
+        .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // The admin account runs the deployment-wide analysis instead, and the
+    // status reports the checkout it may read as `source/`.
+    let admin_token = app.seed_and_login_admin().await;
+    let res = app.make_request_with_token(Some(&admin_token), "GET", "/api/rsi", None).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let admin_body = body_json(res).await;
+    assert_eq!(admin_body["role"], json!("admin"));
+    assert_eq!(admin_body["source_root"], json!(expected_source_root()));
+
+    // Unauthenticated callers are refused by the auth middleware.
+    let res = app.make_request_with_token(None, "GET", "/api/rsi", None).await;
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_rsi_source_directory_is_admin_configurable() {
+    let app = TestApp::new().await;
+    let (_uid, user_token) = app.provision_user().await;
+    let admin_token = app.seed_and_login_admin().await;
+
+    // Personal accounts can neither read nor change the deployment setting.
+    let res = app.make_request_with_token(Some(&user_token), "GET", "/api/rsi/source", None).await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let res = app
+        .make_request_with_token(Some(&user_token), "PUT", "/api/rsi/source", Some(json!({ "path": "/tmp" })))
+        .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    // A missing directory is refused...
+    let res = app
+        .make_request_with_token(
+            Some(&admin_token),
+            "PUT",
+            "/api/rsi/source",
+            Some(json!({ "path": "/definitely/not/a/checkout" })),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // ...and so is a directory that is not a repository root.
+    let checkout = tempfile::tempdir().unwrap();
+    let raw = checkout.path().to_string_lossy().to_string();
+    let res = app
+        .make_request_with_token(Some(&admin_token), "PUT", "/api/rsi/source", Some(json!({ "path": raw })))
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // A real checkout is stored (canonicalized) and reported by the status.
+    std::fs::write(checkout.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+    let canonical = checkout.path().canonicalize().unwrap().to_string_lossy().to_string();
+    let res = app
+        .make_request_with_token(Some(&admin_token), "PUT", "/api/rsi/source", Some(json!({ "path": raw })))
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_of(res).await;
+    assert_eq!(body["source_root"], json!(canonical));
+    assert_eq!(body["source_configured"], json!(canonical));
+
+    let res = app.make_request_with_token(Some(&admin_token), "GET", "/api/rsi", None).await;
+    let status = body_of(res).await;
+    assert_eq!(status["source_root"], json!(canonical));
+    assert_eq!(status["source_configured"], json!(canonical));
+
+    // An empty path clears the override and auto-detection applies again.
+    let res = app
+        .make_request_with_token(Some(&admin_token), "PUT", "/api/rsi/source", Some(json!({ "path": "" })))
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_of(res).await;
+    assert_eq!(body["source_configured"], json!(null));
+    assert_eq!(body["source_root"], json!(expected_source_root()));
 }

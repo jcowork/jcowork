@@ -25,6 +25,10 @@ pub struct ToolParameter {
 pub struct ToolContext {
     pub user_id: String,
     pub workspace_root: String,
+    /// Deployment source checkout, when this run may inspect it (admin RSI).
+    /// Read-only tools resolve paths under the `source/` prefix against this
+    /// root; write tools refuse that prefix, so the checkout cannot change.
+    pub source_root: Option<String>,
     /// Public accounts @mentioned in the current conversation, as
     /// `(user_id, username)` pairs. Empty when no public user was mentioned;
     /// tools that access other users' public data must verify their target

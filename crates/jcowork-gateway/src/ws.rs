@@ -874,6 +874,7 @@ pub async fn ws_handler(
                         let tool_ctx = ToolContext {
                             user_id: user_id.clone(),
                             workspace_root,
+                            source_root: None,
                             mentioned_public_users: mentions,
                             model: Some(model_str.to_string()),
                         };
@@ -1021,6 +1022,7 @@ pub async fn ws_handler(
                                     let tool_ctx = ToolContext {
                                         user_id: user_id.clone(),
                                         workspace_root,
+                                        source_root: None,
                                         mentioned_public_users: Vec::new(),
                                         model: Some(default_model.clone()),
                                     };

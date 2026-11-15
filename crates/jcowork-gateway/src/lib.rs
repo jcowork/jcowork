@@ -7,6 +7,7 @@ pub mod feishu;
 pub mod feishu_bot;
 pub mod lark_cli_tool;
 pub mod router;
+pub mod rsi;
 pub mod session;
 pub mod summary;
 pub mod ws;

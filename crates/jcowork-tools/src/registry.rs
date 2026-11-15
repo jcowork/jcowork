@@ -181,6 +181,7 @@ mod tests {
         ToolContext {
             user_id: "u".to_string(),
             workspace_root: "/tmp".to_string(),
+            source_root: None,
             mentioned_public_users: Vec::new(),
             model: None,
         }
@@ -195,6 +196,7 @@ mod tests {
         let ctx = ToolContext {
             user_id: "u".to_string(),
             workspace_root: "/tmp".to_string(),
+            source_root: None,
             mentioned_public_users: Vec::new(),
             model: None,
         };

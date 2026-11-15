@@ -569,6 +569,7 @@ mod tests {
                 .join("workspace")
                 .to_string_lossy()
                 .to_string(),
+            source_root: None,
             mentioned_public_users: Vec::new(),
             model: None,
         }

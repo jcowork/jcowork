@@ -6,6 +6,7 @@ import Schedule from './components/Schedule';
 import Sidebar from './components/Sidebar';
 import Settings from './components/Settings';
 import SkillsSquare from './components/SkillsSquare';
+import Rsi from './components/Rsi';
 import PublicProfile from './components/PublicProfile';
 import AdminUsers from './components/AdminUsers';
 import AiFeed from './components/AiFeed';
@@ -157,6 +158,9 @@ function AppInner() {
   const [showMemory, setShowMemory] = useState(false);
   const [showSkills, setShowSkills] = useState(false);
   const [showDocuments, setShowDocuments] = useState(false);
+  // RSI (recursive self-improvement) page and the nav switch state it shares.
+  const [showRsi, setShowRsi] = useState(false);
+  const [rsiEnabled, setRsiEnabled] = useState(false);
   // Admin-only user management view (visible only when activeAccount.isAdmin)
   const [showAdminUsers, setShowAdminUsers] = useState(false);
   const [mobileSidebar, setMobileSidebar] = useState(false);
@@ -301,6 +305,19 @@ function AppInner() {
     return () => { cancelled = true; };
   }, [activeAccount?.userId, activeAccount?.token]);
 
+  // RSI opt-in flag for the nav switch. Refetched on account switch so the
+  // switch always mirrors the account that is actually signed in.
+  const activeToken = activeAccount?.token;
+  useEffect(() => {
+    if (!activeToken) return;
+    let cancelled = false;
+    fetch('/api/rsi', { headers: { Authorization: `Bearer ${activeToken}` } })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => { if (!cancelled && data) setRsiEnabled(!!data.enabled); })
+      .catch(() => { if (!cancelled) setRsiEnabled(false); });
+    return () => { cancelled = true; };
+  }, [activeToken]);
+
   // Re-evaluate the 1h history threshold every minute
   useEffect(() => {
     const iv = window.setInterval(() => setTick((v) => v + 1), 60_000);
@@ -309,10 +326,34 @@ function AppInner() {
 
   const switchToChatView = () => {
     setShowSettings(false); setShowSchedule(false); setShowMemory(false);
-    setShowSkills(false); setShowDocuments(false);
+    setShowSkills(false); setShowDocuments(false); setShowRsi(false);
     setViewingPublicUser(null);
     // The chat is a view on top of the AI头条 home, on phone and PC alike.
     setMobileChatOpen(true);
+  };
+
+  // Nav switch handler: flip optimistically, then confirm against the server
+  // (revert on failure so the switch never lies about the stored flag).
+  const handleToggleRsi = async () => {
+    if (!activeAccount) return;
+    const next = !rsiEnabled;
+    setRsiEnabled(next);
+    try {
+      const res = await fetch('/api/rsi', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${activeAccount.token}`,
+        },
+        body: JSON.stringify({ enabled: next }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json().catch(() => null);
+      if (data) setRsiEnabled(!!data.enabled);
+    } catch (err) {
+      console.error('Failed to toggle RSI:', err);
+      setRsiEnabled(!next);
+    }
   };
 
   const handleNewChat = useCallback(() => {
@@ -834,6 +875,7 @@ function AppInner() {
     // Reset tab state on account switch
     setShowSettings(false); setShowSchedule(false); setShowMemory(false);
     setShowSkills(false); setShowDocuments(false);
+    setShowRsi(false);
     setViewingPublicUser(null);
     setShowAdminUsers(false);
     setMobileChatOpen(false);
@@ -1378,7 +1420,7 @@ function AppInner() {
   }
 
   // --- Authenticated view ---
-  const anyDetailOpen = showSettings || showDocuments || showSchedule || showMemory || showSkills || showAdminUsers || viewingPublicUser !== null;
+  const anyDetailOpen = showSettings || showDocuments || showSchedule || showMemory || showSkills || showRsi || showAdminUsers || viewingPublicUser !== null;
   // On narrow screens the tab root (AI头条 / 联系人 / 我的) replaces the
   // chat as the default view; everything else layers on top with a back arrow.
   const mobileRootView = isNarrow && !anyDetailOpen && !mobileChatOpen;
@@ -1391,14 +1433,14 @@ function AppInner() {
   // tab root on phones, the AI头条 home on PC).
   const closeMobileDetail = () => {
     setShowSettings(false); setShowSchedule(false); setShowMemory(false);
-    setShowSkills(false); setShowDocuments(false); setShowAdminUsers(false);
+    setShowSkills(false); setShowDocuments(false); setShowRsi(false); setShowAdminUsers(false);
     setViewingPublicUser(null);
     setMobileChatOpen(false);
   };
 
   const openTabDetail = (open: () => void) => () => {
     setShowSettings(false); setShowSchedule(false); setShowMemory(false);
-    setShowSkills(false); setShowDocuments(false); setShowAdminUsers(false);
+    setShowSkills(false); setShowDocuments(false); setShowRsi(false); setShowAdminUsers(false);
     setViewingPublicUser(null);
     setMobileChatOpen(false);
     open();
@@ -1410,6 +1452,7 @@ function AppInner() {
     : showSettings ? t('navSettings')
     : showMemory ? t('navMemo')
     : showSkills ? t('navSkillsConnectors')
+    : showRsi ? t('navRsi')
     : showDocuments ? t('documents')
     : showSchedule ? t('schedule')
     : showAdminUsers ? t('userManagement')
@@ -1436,18 +1479,21 @@ function AppInner() {
         onOpenPublicUser={(u) => {
           setViewingPublicUser(u);
           setShowSettings(false); setShowSchedule(false); setShowMemory(false);
-          setShowSkills(false); setShowDocuments(false); setShowAdminUsers(false);
+          setShowSkills(false); setShowDocuments(false); setShowRsi(false); setShowAdminUsers(false);
         }}
         isAdmin={activeAccount?.isAdmin}
+        rsiEnabled={rsiEnabled}
+        onToggleRsi={handleToggleRsi}
+        onRsi={() => { setShowRsi(true); setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); setShowAdminUsers(false); setViewingPublicUser(null); }}
         onFeed={() => { closeMobileDetail(); setMobileTab('feed'); }}
-        onChat={() => { setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); setShowAdminUsers(false); setViewingPublicUser(null); setMobileChatOpen(true); }}
-        onDocuments={() => { setShowDocuments(true); setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowAdminUsers(false); setViewingPublicUser(null); }}
-        onSettings={() => { setShowSettings(true); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); setShowAdminUsers(false); setViewingPublicUser(null); }}
-        onSchedule={() => { setShowSchedule(true); setShowSettings(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); setShowAdminUsers(false); setViewingPublicUser(null); }}
-        onMemory={() => { setShowMemory(true); setShowSchedule(false); setShowSettings(false); setShowSkills(false); setShowDocuments(false); setShowAdminUsers(false); setViewingPublicUser(null); }}
-        onSkills={() => { setShowSkills(true); setShowMemory(false); setShowSchedule(false); setShowSettings(false); setShowDocuments(false); setShowAdminUsers(false); setViewingPublicUser(null); }}
-        onAdminUsers={() => { setShowAdminUsers(true); setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); setViewingPublicUser(null); }}
-        currentView={showSettings ? 'settings' : showSchedule ? 'schedule' : showMemory ? 'memory' : showSkills ? 'skills' : showDocuments ? 'documents' : showAdminUsers ? 'admin' : mobileChatOpen ? 'chat' : 'feed'}
+        onChat={() => { setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); setShowRsi(false); setShowAdminUsers(false); setViewingPublicUser(null); setMobileChatOpen(true); }}
+        onDocuments={() => { setShowDocuments(true); setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowRsi(false); setShowAdminUsers(false); setViewingPublicUser(null); }}
+        onSettings={() => { setShowSettings(true); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); setShowRsi(false); setShowAdminUsers(false); setViewingPublicUser(null); }}
+        onSchedule={() => { setShowSchedule(true); setShowSettings(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); setShowRsi(false); setShowAdminUsers(false); setViewingPublicUser(null); }}
+        onMemory={() => { setShowMemory(true); setShowSchedule(false); setShowSettings(false); setShowSkills(false); setShowDocuments(false); setShowRsi(false); setShowAdminUsers(false); setViewingPublicUser(null); }}
+        onSkills={() => { setShowSkills(true); setShowMemory(false); setShowSchedule(false); setShowSettings(false); setShowDocuments(false); setShowRsi(false); setShowAdminUsers(false); setViewingPublicUser(null); }}
+        onAdminUsers={() => { setShowAdminUsers(true); setShowSettings(false); setShowSchedule(false); setShowMemory(false); setShowSkills(false); setShowDocuments(false); setShowRsi(false); setViewingPublicUser(null); }}
+        currentView={showSettings ? 'settings' : showSchedule ? 'schedule' : showMemory ? 'memory' : showSkills ? 'skills' : showRsi ? 'rsi' : showDocuments ? 'documents' : showAdminUsers ? 'admin' : mobileChatOpen ? 'chat' : 'feed'}
         conversations={conversations}
         activeConvId={activeConvId}
         onNewChat={handleNewChat}
@@ -1547,7 +1593,7 @@ function AppInner() {
                   onOpenPublicUser={(u) => {
                     setViewingPublicUser(u);
                     setShowSettings(false); setShowSchedule(false); setShowMemory(false);
-                    setShowSkills(false); setShowDocuments(false); setShowAdminUsers(false);
+                    setShowSkills(false); setShowDocuments(false); setShowRsi(false); setShowAdminUsers(false);
                   }}
                 />
               ) : (
@@ -1576,6 +1622,13 @@ function AppInner() {
             <Memory userId={activeAccount.userId} token={activeAccount.token} />
           ) : showSkills && activeAccount ? (
             <SkillsSquare userId={activeAccount.userId} token={activeAccount.token} />
+          ) : showRsi && activeAccount ? (
+            <Rsi
+              key={activeAccount.userId}
+              token={activeAccount.token}
+              enabled={rsiEnabled}
+              onEnabledChange={setRsiEnabled}
+            />
           ) : showAdminUsers && activeAccount?.isAdmin ? (
             <AdminUsers token={activeAccount.token} />
           ) : null}

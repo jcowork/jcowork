@@ -197,6 +197,7 @@ mod tests {
         ToolContext {
             user_id: "u1".to_string(),
             workspace_root: dir.to_string_lossy().to_string(),
+            source_root: None,
             mentioned_public_users: Vec::new(),
             model: None,
         }

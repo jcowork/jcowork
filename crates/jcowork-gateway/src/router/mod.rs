@@ -32,6 +32,7 @@ pub(crate) mod memory;
 pub(crate) mod profile;
 pub(crate) mod providers;
 pub(crate) mod public_users;
+pub(crate) mod rsi;
 pub(crate) mod settings;
 pub(crate) mod skills;
 pub(crate) mod upload;
@@ -240,6 +241,8 @@ pub struct AppState {
     pub captcha: Arc<captcha::CaptchaService>,
     /// Background AI teaser summaries for the aggregated feed.
     pub summary: Arc<crate::summary::SummaryService>,
+    /// Daily RSI (recursive self-improvement) runs and their history.
+    pub rsi: Arc<crate::rsi::RsiService>,
     /// Data directory for per-user workspaces.
     pub data_dir: String,
 }
@@ -492,6 +495,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/skills/{id}/install-cli", post(skills::install_skill_cli))
         .route("/api/settings", get(settings::get_settings))
         .route("/api/settings/model", put(settings::set_model))
+        // RSI (recursive self-improvement): nav switch, run-now, history
+        .route("/api/rsi", get(rsi::get_status).put(rsi::update_enabled))
+        .route("/api/rsi/source", get(rsi::get_source).put(rsi::update_source))
+        .route("/api/rsi/reports", get(rsi::list_reports))
+        .route("/api/rsi/reports/{id}", get(rsi::get_report))
+        .route("/api/rsi/run", post(rsi::run_now))
         .route("/api/memory", get(memory::list_memories))
         .route("/api/memory/search", get(memory::search_memories))
         .route("/api/memory/{id}", put(memory::update_memory))

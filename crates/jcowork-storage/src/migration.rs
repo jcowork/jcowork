@@ -276,6 +276,44 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // Upgrade path: the RSI toggle is per-account and lives next to the
+    // model choice so both server- and user-initiated runs can read it
+    // without a browser.
+    for col in ["rsi_enabled INTEGER NOT NULL DEFAULT 0"] {
+        if let Err(e) = sqlx::query(&format!("ALTER TABLE user_settings ADD COLUMN {}", col))
+            .execute(pool)
+            .await
+        {
+            // Column already exists — safe to ignore
+            tracing::debug!(error = %e, column = %col, "user_settings column migration skipped");
+        }
+    }
+
+    // RSI (recursive self-improvement) run history. One row per run; the
+    // admin scope proposes project-code improvements, the user scope records
+    // workspace/periodic-plan improvements.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS rsi_reports (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'user',
+            period_start TEXT NOT NULL DEFAULT '',
+            period_end TEXT NOT NULL DEFAULT '',
+            summary TEXT NOT NULL DEFAULT '',
+            output TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'success',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_rsi_reports_user ON rsi_reports(user_id, created_at)")
+        .execute(pool)
+        .await?;
+
     // Deployment-level key/value settings (e.g. the admin-configured mail
     // channel, which overrides the environment on next startup).
     sqlx::query(

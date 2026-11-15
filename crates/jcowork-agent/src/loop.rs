@@ -250,6 +250,7 @@ impl AgentLoop {
             let tool_ctx = ToolContext {
                 user_id: self.config.user_id.clone(),
                 workspace_root: self.config.workspace_root.clone(),
+                source_root: None,
                 mentioned_public_users: Vec::new(),
                 model: Some(self.config.model.clone()),
             };
@@ -1540,6 +1541,7 @@ mod tests {
         ToolContext {
             user_id: "u1".to_string(),
             workspace_root: "/tmp".to_string(),
+            source_root: None,
             mentioned_public_users: Vec::new(),
             model: None,
         }

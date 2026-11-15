@@ -14,6 +14,48 @@ pub struct FileReadTool;
 /// document) cannot flood the model context.
 const READ_MAX_BYTES: usize = 64 * 1024;
 
+/// Tool paths starting with `source/` address the deployment's source
+/// checkout instead of the user workspace. Only read tools honor the prefix,
+/// and only when the run's context carries a source root (admin RSI).
+const SOURCE_PREFIX: &str = "source";
+
+/// Split a `source/...` path into its path inside the checkout. Returns
+/// `None` for ordinary workspace paths.
+fn source_relative(path: &str) -> Option<&str> {
+    if path == SOURCE_PREFIX {
+        Some("")
+    } else {
+        path.strip_prefix("source/")
+    }
+}
+
+/// Store + relative path a read-only tool should use.
+fn read_target(ctx: &ToolContext, path: &str) -> Result<(FileStore, String)> {
+    match source_relative(path) {
+        Some(rel) => {
+            let root = ctx.source_root.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No source checkout is available for this run; read inside the workspace instead of '{path}'."
+                )
+            })?;
+            let rel = if rel.is_empty() { "." } else { rel };
+            Ok((FileStore::new(root), rel.to_string()))
+        }
+        None => Ok((FileStore::new(&ctx.workspace_root), path.to_string())),
+    }
+}
+
+/// The source checkout is reference material only — reject writes into it.
+fn reject_source_write(path: &str) -> Result<()> {
+    if source_relative(path).is_some() {
+        anyhow::bail!(
+            "'{}' is read-only: the source checkout cannot be modified. Write the change (or the proposal) into the workspace instead.",
+            path
+        );
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl Tool for FileReadTool {
     fn name(&self) -> &str { "file_read" }
@@ -37,8 +79,8 @@ impl Tool for FileReadTool {
         let offset = parsed["offset"].as_u64().unwrap_or(1).max(1) as usize;
         let limit = parsed["limit"].as_u64().map(|l| l.max(1) as usize);
 
-        let store = FileStore::new(&ctx.workspace_root);
-        let content = store.read_file(path).await?;
+        let (store, rel) = read_target(ctx, path)?;
+        let content = store.read_file(&rel).await?;
 
         // Fast path: whole small file, no slicing requested — return verbatim.
         if offset == 1 && limit.is_none() && content.len() <= READ_MAX_BYTES {
@@ -113,6 +155,7 @@ impl Tool for FileWriteTool {
         let parsed: serde_json::Value = serde_json::from_str(args)?;
         let path = parsed["path"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
         let content = parsed["content"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'content'"))?;
+        reject_source_write(path)?;
         let store = FileStore::new(&ctx.workspace_root);
         store.write_file(path, content).await?;
 
@@ -148,8 +191,8 @@ impl Tool for FileListTool {
     async fn execute(&self, args: &str, ctx: &ToolContext) -> Result<String> {
         let parsed: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
         let path = parsed["path"].as_str().unwrap_or(".");
-        let store = FileStore::new(&ctx.workspace_root);
-        let entries = store.list_dir_detailed(path).await?;
+        let (store, rel) = read_target(ctx, path)?;
+        let entries = store.list_dir_detailed(&rel).await?;
         Ok(entries.join("\n"))
     }
 }
@@ -173,6 +216,7 @@ impl Tool for FileDeleteTool {
     async fn execute(&self, args: &str, ctx: &ToolContext) -> Result<String> {
         let parsed: serde_json::Value = serde_json::from_str(args)?;
         let path = parsed["path"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
+        reject_source_write(path)?;
         let store = FileStore::new(&ctx.workspace_root);
         store.delete_file(path).await?;
 
@@ -208,6 +252,8 @@ impl Tool for FileMoveTool {
         let parsed: serde_json::Value = serde_json::from_str(args)?;
         let from = parsed["from"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'from'"))?;
         let to = parsed["to"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'to'"))?;
+        reject_source_write(from)?;
+        reject_source_write(to)?;
         let store = FileStore::new(&ctx.workspace_root);
         store.move_path(from, to).await?;
 
@@ -243,6 +289,8 @@ impl Tool for FileCopyTool {
         let parsed: serde_json::Value = serde_json::from_str(args)?;
         let from = parsed["from"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'from'"))?;
         let to = parsed["to"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'to'"))?;
+        reject_source_write(from)?;
+        reject_source_write(to)?;
         let store = FileStore::new(&ctx.workspace_root);
         store.copy_file(from, to).await?;
 
@@ -280,8 +328,8 @@ impl Tool for FileSearchTool {
         let parsed: serde_json::Value = serde_json::from_str(args)?;
         let pattern = parsed["pattern"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'pattern'"))?;
         let path = parsed["path"].as_str().unwrap_or(".");
-        let store = FileStore::new(&ctx.workspace_root);
-        let results = store.search_content(pattern, path).await?;
+        let (store, rel) = read_target(ctx, path)?;
+        let results = store.search_content(pattern, &rel).await?;
         if results.is_empty() {
             Ok("No matches found.".to_string())
         } else {
@@ -309,6 +357,7 @@ impl Tool for DirCreateTool {
     async fn execute(&self, args: &str, ctx: &ToolContext) -> Result<String> {
         let parsed: serde_json::Value = serde_json::from_str(args)?;
         let path = parsed["path"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
+        reject_source_write(path)?;
         let store = FileStore::new(&ctx.workspace_root);
         store.create_dir(path).await?;
         Ok(format!("Created directory {}", path))
@@ -333,8 +382,8 @@ impl Tool for DirListTool {
     async fn execute(&self, args: &str, ctx: &ToolContext) -> Result<String> {
         let parsed: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
         let path = parsed["path"].as_str().unwrap_or(".");
-        let store = FileStore::new(&ctx.workspace_root);
-        let entries = store.list_dir_recursive(path).await?;
+        let (store, rel) = read_target(ctx, path)?;
+        let entries = store.list_dir_recursive(&rel).await?;
         if entries.is_empty() {
             Ok("(empty or not found)".to_string())
         } else {
@@ -362,8 +411,14 @@ impl Tool for FileInfoTool {
     async fn execute(&self, args: &str, ctx: &ToolContext) -> Result<String> {
         let parsed: serde_json::Value = serde_json::from_str(args)?;
         let path = parsed["path"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
-        let store = FileStore::new(&ctx.workspace_root);
-        store.file_info(path).await
+        let (store, rel) = read_target(ctx, path)?;
+        let info = store.file_info(&rel).await?;
+        // Keep the caller's path (including the `source/` prefix) in the reply.
+        if rel == path {
+            Ok(info)
+        } else {
+            Ok(info.replacen(&format!("path: {}", rel), &format!("path: {}", path), 1))
+        }
     }
 }
 
@@ -389,9 +444,62 @@ mod tests {
         ToolContext {
             user_id: "test-user".to_string(),
             workspace_root: workspace_root.to_string_lossy().to_string(),
+            source_root: None,
             mentioned_public_users: Vec::new(),
             model: None,
         }
+    }
+
+    /// Admin-RSI style context: the workspace plus a read-only source checkout.
+    fn make_source_ctx(dir: &std::path::Path) -> (ToolContext, std::path::PathBuf) {
+        let mut ctx = make_ctx(dir);
+        let source = dir.join("checkout");
+        std::fs::create_dir_all(source.join("crates/demo/src")).unwrap();
+        std::fs::write(source.join("crates/demo/src/lib.rs"), "pub fn demo() {}\n").unwrap();
+        ctx.source_root = Some(source.to_string_lossy().to_string());
+        (ctx, source)
+    }
+
+    #[tokio::test]
+    async fn test_source_tree_is_readable_but_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, source) = make_source_ctx(dir.path());
+
+        // Read tools resolve `source/` against the checkout.
+        let content = FileReadTool
+            .execute(r#"{"path":"source/crates/demo/src/lib.rs"}"#, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(content, "pub fn demo() {}\n");
+
+        let listing = FileListTool
+            .execute(r#"{"path":"source/crates/demo/src"}"#, &ctx)
+            .await
+            .unwrap();
+        assert!(listing.contains("lib.rs"));
+
+        let search = FileSearchTool
+            .execute(r#"{"pattern":"demo","path":"source"}"#, &ctx)
+            .await
+            .unwrap();
+        assert!(search.contains("crates/demo/src/lib.rs:1"));
+
+        // Write-side tools refuse the prefix and leave the checkout untouched.
+        let write = FileWriteTool
+            .execute(r#"{"path":"source/crates/demo/src/lib.rs","content":"hacked"}"#, &ctx)
+            .await;
+        assert!(write.is_err(), "writes into the source tree must be rejected");
+        assert_eq!(
+            std::fs::read_to_string(source.join("crates/demo/src/lib.rs")).unwrap(),
+            "pub fn demo() {}\n"
+        );
+
+        // Without a source root the prefix is refused entirely.
+        let plain = make_ctx(dir.path());
+        assert!(FileReadTool
+            .execute(r#"{"path":"source/crates/demo/src/lib.rs"}"#, &plain)
+            .await
+            .is_err());
     }
 
     #[tokio::test]

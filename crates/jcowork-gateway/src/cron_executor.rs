@@ -473,6 +473,7 @@ async fn execute_cron_task(
     let tool_ctx = ToolContext {
         user_id: user_id.to_string(),
         workspace_root,
+        source_root: None,
         mentioned_public_users: Vec::new(),
         model: Some(model.to_string()),
     };

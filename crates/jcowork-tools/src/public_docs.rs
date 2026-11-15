@@ -378,6 +378,7 @@ mod tests {
                 .join("workspace")
                 .to_string_lossy()
                 .to_string(),
+            source_root: None,
             mentioned_public_users: vec![("owner-user".to_string(), "alice".to_string())],
             model: None,
         }

@@ -35,9 +35,13 @@ interface SidebarProps {
   /** True when the active account is a super user — shows the admin nav entry. */
   isAdmin?: boolean;
   onAdminUsers?: () => void;
+  /** RSI daily self-improvement flag for the active account (nav switch). */
+  rsiEnabled?: boolean;
+  onRsi?: () => void;
+  onToggleRsi?: () => void;
 }
 
-export default function Sidebar({ accounts, activeUserId, streamingAccounts, unreadAccounts, onSwitchAccount, onAddAccount, onRemoveAccount, onLogout, onFeed, onChat, onSettings, onSchedule, onMemory, onSkills, onDocuments, currentView, conversations, activeConvId, onNewChat, onSelectConversation, onDeleteConversation, mobileOpen, onClose, publicUsers, viewingPublicUserId, onOpenPublicUser, isAdmin, onAdminUsers }: SidebarProps) {
+export default function Sidebar({ accounts, activeUserId, streamingAccounts, unreadAccounts, onSwitchAccount, onAddAccount, onRemoveAccount, onLogout, onFeed, onChat, onSettings, onSchedule, onMemory, onSkills, onDocuments, currentView, conversations, activeConvId, onNewChat, onSelectConversation, onDeleteConversation, mobileOpen, onClose, publicUsers, viewingPublicUserId, onOpenPublicUser, isAdmin, onAdminUsers, rsiEnabled, onRsi, onToggleRsi }: SidebarProps) {
   const t = useT();
   const [historyOpen, setHistoryOpen] = useState(true);
   // History list shows only the first few chats by default; the rest sit
@@ -90,6 +94,7 @@ export default function Sidebar({ accounts, activeUserId, streamingAccounts, unr
     { key: 'schedule', label: t('schedule') },
     { key: 'memory', label: t('navMemo') },
     { key: 'skills', label: t('navSkillsConnectors') },
+    { key: 'rsi', label: t('navRsi') },
     // Super users get an extra entry for user management
     ...(isAdmin ? [{ key: 'admin', label: t('userManagement') }] : []),
     { key: 'settings', label: t('navSettings') },
@@ -104,11 +109,12 @@ export default function Sidebar({ accounts, activeUserId, streamingAccounts, unr
     schedule: '📋',
     memory: '🧠',
     skills: '🔌',
+    rsi: '🧬',
     admin: '👥',
     settings: '⚙️',
   };
 
-  const navHandlers: Record<string, () => void> = { feed: onFeed, chat: onChat, documents: onDocuments, schedule: onSchedule, memory: onMemory, skills: onSkills, settings: onSettings, admin: onAdminUsers ?? (() => {}) };
+  const navHandlers: Record<string, () => void> = { feed: onFeed, chat: onChat, documents: onDocuments, schedule: onSchedule, memory: onMemory, skills: onSkills, rsi: onRsi ?? (() => {}), settings: onSettings, admin: onAdminUsers ?? (() => {}) };
 
   const handleNav = (key: string) => {
     navHandlers[key]?.();
@@ -355,15 +361,18 @@ export default function Sidebar({ accounts, activeUserId, streamingAccounts, unr
         <div style={{ flex: 1 }}>
           {NAV_ITEMS.map(item => {
             const isChat = item.key === 'chat';
+            const isRsi = item.key === 'rsi';
             if (collapsed) {
               // Icon-only rail: one logo per module, full label as tooltip.
+              // RSI shows a dot so the switch state survives the collapse.
               return (
                 <button
                   key={item.key}
                   onClick={() => handleNav(item.key)}
-                  title={item.label}
+                  title={isRsi ? `${item.label} · ${rsiEnabled ? t('rsiOn') : t('rsiOff')}` : item.label}
                   aria-label={item.label}
                   style={{
+                    position: 'relative',
                     width: '100%',
                     display: 'flex',
                     alignItems: 'center',
@@ -379,6 +388,12 @@ export default function Sidebar({ accounts, activeUserId, streamingAccounts, unr
                   }}
                 >
                   {NAV_ICONS[item.key] ?? '•'}
+                  {isRsi && rsiEnabled && (
+                    <span style={{
+                      position: 'absolute', top: 5, right: 8, width: 6, height: 6,
+                      borderRadius: '50%', background: '#3fb950',
+                    }} />
+                  )}
                 </button>
               );
             }
@@ -435,6 +450,32 @@ export default function Sidebar({ accounts, activeUserId, streamingAccounts, unr
                       }}
                     >
                       +
+                    </button>
+                  )}
+                  {isRsi && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); onToggleRsi?.(); }}
+                      role="switch"
+                      aria-checked={!!rsiEnabled}
+                      aria-label={t('rsiToggleHint')}
+                      title={t('rsiToggleHint')}
+                      style={{
+                        width: 34,
+                        height: 20,
+                        flexShrink: 0,
+                        padding: 2,
+                        borderRadius: 10,
+                        border: 'none',
+                        background: rsiEnabled ? '#2ea043' : '#3a3a3a',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: rsiEnabled ? 'flex-end' : 'flex-start',
+                        transition: 'background 0.15s',
+                        marginBottom: 4,
+                      }}
+                    >
+                      <span style={{ width: 14, height: 14, borderRadius: '50%', background: '#fff', display: 'block' }} />
                     </button>
                   )}
                 </div>
