@@ -9,6 +9,7 @@ pub mod doc_search;
 pub mod excel_db;
 pub mod file_ops;
 pub mod memory;
+pub mod outcome;
 pub mod pdf_parse;
 pub mod public_docs;
 pub mod registry;
@@ -18,4 +19,5 @@ pub mod todo;
 pub mod web_search;
 
 pub use base::Tool;
+pub use outcome::{classify_error, classify_output, kinds, ToolOutcome};
 pub use registry::ToolRegistry;

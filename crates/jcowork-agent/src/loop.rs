@@ -479,6 +479,9 @@ pub async fn run_turn(opts: AgentTurnOptions<'_>) -> AgentTurnResult {
         let mut assistant_content = String::new();
         let mut reasoning_content = String::new();
         let mut current_tool_args: HashMap<String, (String, String, String)> = HashMap::new();
+        // Usage of this single LLM call (for the per-request log) and of the
+        // last call that actually reported tokens (for the turn result).
+        let mut turn_usage: Option<(i32, i32, i32)> = None;
         let mut had_error = false;
 
         loop {
@@ -515,8 +518,14 @@ pub async fn run_turn(opts: AgentTurnOptions<'_>) -> AgentTurnResult {
                     entry.2.push_str(&args_delta);
                 }
                 Ok(StreamChunk::Done(usage)) => {
-                    final_usage =
-                        Some((usage.prompt_tokens, usage.completion_tokens, usage.total_tokens));
+                    // A zero-usage Done is only a terminator (e.g. the [DONE]
+                    // fallback); it must not clobber a reported value.
+                    if usage.has_tokens() {
+                        let reported =
+                            (usage.prompt_tokens, usage.completion_tokens, usage.total_tokens);
+                        turn_usage = Some(reported);
+                        final_usage = Some(reported);
+                    }
                 }
                 Err(e) => {
                     opts.output
@@ -569,7 +578,7 @@ pub async fn run_turn(opts: AgentTurnOptions<'_>) -> AgentTurnResult {
                     &assistant_content,
                     tool_calls.len(),
                     tool_names,
-                    final_usage,
+                    turn_usage,
                 ),
             };
             let lw = lw.clone();
@@ -691,6 +700,14 @@ pub async fn run_turn(opts: AgentTurnOptions<'_>) -> AgentTurnResult {
                 }
             };
 
+            // Several tools report failures as an `Ok` payload ("web_search:
+            // timed out after 60s"), so the text is classified instead of
+            // trusting the `Result` variant — otherwise usage analysis only
+            // sees the tools that happen to return `Err`.
+            let outcome = match &result {
+                Ok(r) => jcowork_tools::outcome::classify_output(&tc.function.name, r),
+                Err(e) => jcowork_tools::outcome::classify_error(&e.to_string()),
+            };
             let result_str = match result {
                 Ok(r) => r,
                 Err(e) => format!("Error: {}", e),
@@ -702,12 +719,15 @@ pub async fn run_turn(opts: AgentTurnOptions<'_>) -> AgentTurnResult {
 
             // Log tool call
             if let Some(ref lw) = opts.log_writer {
-                let tool_log = ToolCallEntry::new(opts.user_id, &tc.function.name)
-                    .into_log_entry_with(
-                        &tc.function.arguments,
-                        &result_str,
-                        tool_duration_ms,
-                    );
+                let mut entry = ToolCallEntry::new(opts.user_id, &tc.function.name);
+                if let Some(kind) = outcome.error_kind {
+                    entry = entry.with_failure(kind);
+                }
+                let tool_log = entry.into_log_entry_with(
+                    &tc.function.arguments,
+                    &result_str,
+                    tool_duration_ms,
+                );
                 let lw = lw.clone();
                 tokio::spawn(async move { lw.write(&tool_log).await });
             }
@@ -1469,6 +1489,7 @@ mod tests {
     struct CollectSink {
         text: String,
         done: bool,
+        done_usage: Option<(i32, i32, i32)>,
         errors: Vec<String>,
     }
 
@@ -1500,9 +1521,10 @@ mod tests {
 
         fn on_done<'a>(
             &'a mut self,
-            _usage: Option<(i32, i32, i32)>,
+            usage: Option<(i32, i32, i32)>,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
             self.done = true;
+            self.done_usage = usage;
             Box::pin(async {})
         }
 
@@ -1558,6 +1580,7 @@ mod tests {
         let mut sink = CollectSink {
             text: String::new(),
             done: false,
+            done_usage: None,
             errors: Vec::new(),
         };
 
@@ -1604,6 +1627,7 @@ mod tests {
         let mut sink = CollectSink {
             text: String::new(),
             done: false,
+            done_usage: None,
             errors: Vec::new(),
         };
 
@@ -1647,5 +1671,106 @@ mod tests {
             last.tool_calls.is_none(),
             "dangling tool_calls must be stripped from history"
         );
+    }
+
+    /// Provider whose later calls stop reporting usage (e.g. a gateway that
+    /// drops the trailing usage chunk), while the first call still does.
+    struct DecliningUsageProvider {
+        calls: std::sync::Mutex<usize>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for DecliningUsageProvider {
+        fn name(&self) -> &str {
+            "declining-usage-mock"
+        }
+
+        async fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[ToolDefinition],
+        ) -> Result<jcowork_llm::provider::ChatResponse> {
+            unreachable!("run_turn only uses chat_stream")
+        }
+
+        async fn chat_stream(
+            &self,
+            _messages: &[ChatMessage],
+            tools: &[ToolDefinition],
+        ) -> Result<jcowork_llm::provider::ChatStream> {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            let usage = if *calls == 1 {
+                Usage { prompt_tokens: 40, completion_tokens: 2, total_tokens: 42 }
+            } else {
+                // Zero-usage Done is only a stream terminator.
+                Usage::default()
+            };
+            let chunks = if !tools.is_empty() {
+                vec![
+                    Ok(StreamChunk::ToolCallDelta(
+                        "call-1".to_string(),
+                        "noop_tool".to_string(),
+                        "{}".to_string(),
+                    )),
+                    Ok(StreamChunk::Done(usage)),
+                ]
+            } else {
+                vec![
+                    Ok(StreamChunk::Delta("DONE".to_string())),
+                    Ok(StreamChunk::Done(usage)),
+                ]
+            };
+            Ok(Box::pin(futures::stream::iter(chunks)))
+        }
+
+        fn context_length(&self) -> usize {
+            8192
+        }
+
+        fn with_model(&self, _model: &str) -> Arc<dyn LlmProvider> {
+            unreachable!("not used by run_turn")
+        }
+    }
+
+    #[tokio::test]
+    async fn run_turn_keeps_reported_usage_when_later_turn_reports_zero() {
+        let provider = Arc::new(DecliningUsageProvider {
+            calls: std::sync::Mutex::new(0),
+        });
+        let tools = vec![tool_def("noop_tool")];
+        let mut history = test_history();
+        let mut sink = CollectSink {
+            text: String::new(),
+            done: false,
+            done_usage: None,
+            errors: Vec::new(),
+        };
+
+        let result = run_turn(AgentTurnOptions {
+            history: &mut history,
+            tools: &tools,
+            provider,
+            tool_registry: Arc::new(ToolRegistry::new()),
+            tool_ctx: &test_tool_ctx(),
+            pre_context: None,
+            max_turns: 2,
+            llm_timeout_secs: 5,
+            stream_timeout_secs: 5,
+            tool_timeout_secs: 5,
+            output: &mut sink,
+            user_id: "u1",
+            model: "mock:test",
+            log_writer: None,
+        })
+        .await;
+
+        assert!(result.completed);
+        assert_eq!(
+            result.usage,
+            Some((40, 2, 42)),
+            "zero-usage Done must not overwrite reported usage"
+        );
+        assert_eq!(sink.done_usage, Some((40, 2, 42)));
     }
 }

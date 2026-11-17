@@ -101,7 +101,37 @@ pub struct UsageAgg {
     pub tools: BTreeMap<String, u64>,
 }
 
+/// Whether one `tool_call` log line is a failure.
+///
+/// Logs written after the structured verdict was introduced carry `ok` and
+/// `error_kind`; older lines only have the payload text, so they are
+/// classified the same way the agent loop classified them at dispatch time.
+fn tool_call_failed(value: &serde_json::Value, tool: &str) -> bool {
+    if let Some(ok) = value.get("ok").and_then(|o| o.as_bool()) {
+        return !ok;
+    }
+    let output = value.get("output").and_then(|o| o.as_str()).unwrap_or("");
+    !jcowork_tools::outcome::classify_output(tool, output).ok
+}
+
 impl UsageAgg {
+    /// Share of tool calls that failed, in percent. `None` when the account
+    /// made no tool calls in the window.
+    pub fn failure_rate(&self) -> Option<f64> {
+        if self.tool_calls == 0 {
+            return None;
+        }
+        Some(self.tool_errors as f64 * 100.0 / self.tool_calls as f64)
+    }
+
+    /// `12.3%` — failure rate formatted for prompts.
+    fn failure_rate_text(&self) -> String {
+        match self.failure_rate() {
+            Some(rate) => format!("{:.1}%", rate),
+            None => "—".to_string(),
+        }
+    }
+
     /// Fold one JSONL log line into the aggregate. Returns false when the
     /// line is not a usage event or falls outside the window, which makes
     /// the parser easy to test line by line.
@@ -134,12 +164,8 @@ impl UsageAgg {
                     .and_then(|t| t.as_str())
                     .unwrap_or("unknown")
                     .to_string();
+                let failed = tool_call_failed(&value, &tool);
                 *self.tools.entry(tool).or_insert(0) += 1;
-                let failed = value
-                    .get("output")
-                    .and_then(|o| o.as_str())
-                    .map(|o| o.starts_with("Error:"))
-                    .unwrap_or(false);
                 if failed {
                     self.tool_errors += 1;
                 }
@@ -267,7 +293,7 @@ fn usage_line(
     let role = if user.is_admin { "admin" } else { "user" };
     let visibility = if user.is_public { "public" } else { "private" };
     format!(
-        "- {} ({} / {}): LLM请求={}, tokens={}, 工具调用={}（失败{}）, 周期任务={}（成功{} / 失败{}）, 主要工具={}",
+        "- {} ({} / {}): LLM请求={}, tokens={}, 工具调用={}（失败{}, 失败率{}）, 周期任务={}（成功{} / 失败{}）, 主要工具={}",
         user.username,
         role,
         visibility,
@@ -275,6 +301,7 @@ fn usage_line(
         agg.total_tokens,
         agg.tool_calls,
         agg.tool_errors,
+        agg.failure_rate_text(),
         plans,
         cron_success,
         cron_error,
@@ -485,7 +512,7 @@ B. 周期计划（定时任务）。
 
 ## 使用数据
 窗口：{since} → {now}（UTC）
-LLM请求={requests}, tokens={tokens}, 工具调用={tool_calls}（失败{tool_errors}）, 主要工具={top_tools}
+LLM请求={requests}, tokens={tokens}, 工具调用={tool_calls}（失败{tool_errors}, 失败率{tool_failure_rate}）, 主要工具={top_tools}
 周期任务执行：成功{cron_success} / 失败{cron_error}
 
 ## 工作目录文件（最多两层）
@@ -511,6 +538,7 @@ LLM请求={requests}, tokens={tokens}, 工具调用={tool_calls}（失败{tool_e
         tokens = usage.total_tokens,
         tool_calls = usage.tool_calls,
         tool_errors = usage.tool_errors,
+        tool_failure_rate = usage.failure_rate_text(),
         top_tools = usage.top_tools(6),
         cron_success = cron_success,
         cron_error = cron_error,
@@ -1064,6 +1092,61 @@ mod tests {
         assert_eq!(agg.tool_errors, 1);
         assert_eq!(agg.tools.get("file_read"), Some(&2));
         assert_eq!(agg.top_tools(5), "file_read(2)");
+    }
+
+    #[test]
+    fn tool_failures_count_from_structured_field_and_legacy_text() {
+        let mut agg = UsageAgg::default();
+        let mut tool = |json: &str| agg.absorb(json, since());
+
+        // New logs: the agent loop persisted the verdict, so it is authoritative
+        // even when the payload does not look like an error.
+        assert!(tool(
+            r#"{"event":"tool_call","timestamp":"2026-11-14T10:00:00.000Z","user_id":"u1","tool":"web_search","ok":false,"error_kind":"timeout","output":"web_search: timed out after 60s"}"#
+        ));
+        assert!(tool(
+            r#"{"event":"tool_call","timestamp":"2026-11-14T10:01:00.000Z","user_id":"u1","tool":"file_read","ok":true,"output":"// error handling notes"}"#
+        ));
+
+        // Legacy logs (no `ok`): the payload text is classified, so the failures
+        // the old `Error:` heuristic missed are now counted.
+        assert!(tool(
+            r#"{"event":"tool_call","timestamp":"2026-11-14T10:02:00.000Z","user_id":"u1","tool":"cron_add","output":"Failed to add cron job: bad schedule"}"#
+        ));
+        assert!(tool(
+            r#"{"event":"tool_call","timestamp":"2026-11-14T10:03:00.000Z","user_id":"u1","tool":"shell","output":"[exit code 1] \n[stderr] ls: not found"}"#
+        ));
+        assert!(tool(
+            r#"{"event":"tool_call","timestamp":"2026-11-14T10:04:00.000Z","user_id":"u1","tool":"file_read","output":"Error: missing file"}"#
+        ));
+        assert!(tool(
+            r#"{"event":"tool_call","timestamp":"2026-11-14T10:05:00.000Z","user_id":"u1","tool":"web_search","output":"Web search results for \"rust\":\n\n1. Rust"}"#
+        ));
+
+        assert_eq!(agg.tool_calls, 6);
+        assert_eq!(agg.tool_errors, 4);
+        assert_eq!(agg.failure_rate(), Some(4.0 * 100.0 / 6.0));
+    }
+
+    #[test]
+    fn usage_line_reports_failure_rate() {
+        let alice = user("alice", false, true);
+        let agg = UsageAgg {
+            tool_calls: 8,
+            tool_errors: 2,
+            ..Default::default()
+        };
+        let line = usage_line(&alice, &agg, 3, 1, 0);
+        assert!(
+            line.contains("工具调用=8（失败2, 失败率25.0%）"),
+            "unexpected line: {}",
+            line
+        );
+
+        // No tool calls in the window: rate is not defined and must not claim 0%.
+        let empty = UsageAgg::default();
+        assert_eq!(empty.failure_rate(), None);
+        assert!(usage_line(&alice, &empty, 0, 0, 0).contains("工具调用=0（失败0, 失败率—）"));
     }
 
     #[test]

@@ -21,6 +21,10 @@ pub struct OpenAiConfig {
     pub context_length: usize,
     /// Provider name override (defaults to "openai").
     pub provider_name: String,
+    /// Ask streaming APIs to report token usage via
+    /// `stream_options.include_usage`. Disable it for gateways that reject
+    /// unknown request fields — such providers then yield zero-token usage.
+    pub include_usage: bool,
 }
 
 impl Default for OpenAiConfig {
@@ -31,6 +35,7 @@ impl Default for OpenAiConfig {
             model: "gpt-4o".to_string(),
             context_length: 128_000,
             provider_name: "openai".to_string(),
+            include_usage: true,
         }
     }
 }
@@ -88,12 +93,36 @@ impl OpenAiProvider {
             "stream": stream,
         });
 
+        // Streaming APIs report token usage only when asked: the last chunk
+        // then carries `usage` alongside an empty `choices` array. Without
+        // this switch every streamed request reports zero tokens.
+        if stream && self.include_usage() {
+            body["stream_options"] = serde_json::json!({ "include_usage": true });
+        }
+
         if !tools.is_empty() {
             body["tools"] = serde_json::json!(tools);
             body["tool_choice"] = serde_json::json!("auto");
         }
 
         body
+    }
+
+    /// Whether streaming usage reporting is enabled for this provider.
+    ///
+    /// `JCWORK_STREAM_USAGE=0` turns it off globally for gateways that reject
+    /// `stream_options`.
+    fn include_usage(&self) -> bool {
+        if !self.config.include_usage {
+            return false;
+        }
+        match std::env::var("JCWORK_STREAM_USAGE") {
+            Ok(v) => !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            ),
+            Err(_) => true,
+        }
     }
 }
 
@@ -146,7 +175,6 @@ struct StreamResponse {
 #[derive(Debug, Deserialize)]
 struct StreamChoice {
     delta: StreamDelta,
-    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -300,6 +328,11 @@ fn parse_sse_stream(
     let mut buffer = String::new();
     let mut tool_call_buffers: std::collections::HashMap<usize, ToolCallBuffer> =
         std::collections::HashMap::new();
+    // Last usage seen in the stream, and whether it was already emitted. A
+    // `Done` is pushed at most once per stream: with `include_usage` the real
+    // usage chases the finish chunk, and a zero fallback must not overwrite it.
+    let mut pending_usage: Option<Usage> = None;
+    let mut usage_emitted = false;
 
     byte_stream.flat_map(move |chunk_result| {
         let mut outputs = Vec::new();
@@ -316,8 +349,13 @@ fn parse_sse_stream(
                         // Support both "data: "(standard) and "data: " (some OpenAI-compatible APIs like GLM)
                         let data_opt = line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:"));
                         if let Some(data) = data_opt {
-                            if data == "[DONE]" {
-                                outputs.push(Ok(StreamChunk::Done(Usage::default())));
+                            if data.trim() == "[DONE]" {
+                                if !usage_emitted {
+                                    usage_emitted = true;
+                                    outputs.push(Ok(StreamChunk::Done(
+                                        pending_usage.take().unwrap_or_default(),
+                                    )));
+                                }
                                 continue;
                             }
 
@@ -369,21 +407,22 @@ fn parse_sse_stream(
                                                 }
                                             }
                                         }
+                                    }
 
-                                        // Finish
-                                        if choice.finish_reason.as_deref() == Some("stop")
-                                            || choice.finish_reason.as_deref() == Some("tool_calls")
-                                        {
-                                            if let Some(usage) = &resp.usage {
-                                                outputs.push(Ok(StreamChunk::Done(Usage {
-                                                    prompt_tokens: usage.prompt_tokens,
-                                                    completion_tokens: usage.completion_tokens,
-                                                    total_tokens: usage.total_tokens,
-                                                })));
-                                            } else {
-                                                outputs.push(Ok(StreamChunk::Done(Usage::default())));
-                                            }
+                                    // Usage is reported in a trailing chunk whose
+                                    // `choices` array is empty, so it must be read
+                                    // outside the loop above to avoid being dropped.
+                                    if let Some(u) = resp.usage {
+                                        let usage = Usage {
+                                            prompt_tokens: u.prompt_tokens,
+                                            completion_tokens: u.completion_tokens,
+                                            total_tokens: u.total_tokens,
+                                        };
+                                        if usage.has_tokens() && !usage_emitted {
+                                            usage_emitted = true;
+                                            outputs.push(Ok(StreamChunk::Done(usage.clone())));
                                         }
+                                        pending_usage = Some(usage);
                                     }
                                 }
                                 Err(e) => {
@@ -409,4 +448,141 @@ fn parse_sse_stream(
 
         futures::stream::iter(outputs)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    fn provider(include_usage: bool) -> OpenAiProvider {
+        OpenAiProvider::new(OpenAiConfig {
+            api_key: "test-key".to_string(),
+            base_url: "http://localhost:1/v1".to_string(),
+            model: "test-model".to_string(),
+            context_length: 8_000,
+            provider_name: "test".to_string(),
+            include_usage,
+        })
+    }
+
+    /// Feed raw SSE payloads (split into arbitrary network chunks) through
+    /// the parser and return the emitted chunks.
+    fn parse_events(payloads: &[&str]) -> Vec<StreamChunk> {
+        let network_chunks: Vec<_> = payloads
+            .iter()
+            .map(|p| Ok::<_, reqwest::Error>(bytes::Bytes::from(p.to_string())))
+            .collect();
+        let stream = parse_sse_stream(futures::stream::iter(network_chunks));
+        futures::executor::block_on(stream.collect::<Vec<_>>())
+            .into_iter()
+            .map(|c| c.expect("stream chunk"))
+            .collect()
+    }
+
+    fn text_of(chunks: &[StreamChunk]) -> String {
+        chunks
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::Delta(d) => Some(d.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn done_usages(chunks: &[StreamChunk]) -> Vec<&Usage> {
+        chunks
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::Done(u) => Some(u),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn streaming_request_asks_for_usage() {
+        let body = provider(true).build_request_body(&[], &[], true);
+        assert_eq!(body["stream"], serde_json::json!(true));
+        assert_eq!(
+            body["stream_options"]["include_usage"],
+            serde_json::json!(true),
+            "streaming requests must opt into usage reporting"
+        );
+    }
+
+    #[test]
+    fn non_streaming_request_has_no_stream_options() {
+        let body = provider(true).build_request_body(&[], &[], false);
+        assert!(body.get("stream_options").is_none());
+    }
+
+    #[test]
+    fn usage_reporting_can_be_disabled_per_provider() {
+        let body = provider(false).build_request_body(&[], &[], true);
+        assert!(
+            body.get("stream_options").is_none(),
+            "providers rejecting stream_options must be able to opt out"
+        );
+    }
+
+    #[test]
+    fn usage_is_read_from_trailing_chunk_without_choices() {
+        let chunks = parse_events(&[
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"He\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"llo\"},\"finish_reason\":null}]}\n\n",
+            // finish chunk: no usage yet
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            // usage-only chunk: empty choices, real usage
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18}}\n\n",
+            "data: [DONE]\n\n",
+        ]);
+
+        assert_eq!(text_of(&chunks), "Hello");
+        let dones = done_usages(&chunks);
+        assert_eq!(dones.len(), 1, "exactly one Done per stream");
+        assert_eq!(dones[0].prompt_tokens, 11);
+        assert_eq!(dones[0].completion_tokens, 7);
+        assert_eq!(dones[0].total_tokens, 18);
+    }
+
+    #[test]
+    fn usage_survives_network_chunk_boundaries() {
+        // The usage chunk is sliced across two physical reads.
+        let chunks = parse_events(&[
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,",
+            "\"completion_tokens\":4,\"total_tokens\":7}}\n\ndata: [DONE]\n\n",
+        ]);
+
+        assert_eq!(text_of(&chunks), "ok");
+        let dones = done_usages(&chunks);
+        assert_eq!(dones.len(), 1);
+        assert_eq!(dones[0].total_tokens, 7);
+    }
+
+    #[test]
+    fn stream_without_usage_still_terminates_with_one_done() {
+        let chunks = parse_events(&[
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ]);
+
+        assert_eq!(text_of(&chunks), "hi");
+        let dones = done_usages(&chunks);
+        assert_eq!(dones.len(), 1);
+        assert!(!dones[0].has_tokens(), "missing usage reports zeros");
+    }
+
+    #[test]
+    fn usage_is_emitted_only_once_when_repeated() {
+        let chunks = parse_events(&[
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":6,\"total_tokens\":11}}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":6,\"total_tokens\":11}}\n\n",
+            "data: [DONE]\n\n",
+        ]);
+
+        assert_eq!(done_usages(&chunks).len(), 1);
+        assert_eq!(done_usages(&chunks)[0].total_tokens, 11);
+    }
 }

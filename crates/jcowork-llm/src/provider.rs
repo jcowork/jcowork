@@ -65,6 +65,17 @@ pub struct Usage {
     pub total_tokens: i32,
 }
 
+impl Usage {
+    /// Whether the provider actually reported token counts.
+    ///
+    /// Streams without usage reporting (or gateways dropping the trailing
+    /// usage chunk) yield all-zero usage, which must never overwrite a value
+    /// that was reported before.
+    pub fn has_tokens(&self) -> bool {
+        self.total_tokens > 0 || self.prompt_tokens > 0 || self.completion_tokens > 0
+    }
+}
+
 /// A streaming chunk from the LLM.
 #[derive(Debug, Clone)]
 pub enum StreamChunk {

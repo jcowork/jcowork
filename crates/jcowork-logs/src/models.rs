@@ -55,6 +55,14 @@ pub enum LogEntry {
         input: String,
         /// Tool execution result.
         output: String,
+        /// Whether the call succeeded (one kind of failure is reported through
+        /// `output` text alone, so readers must not guess from the text when
+        /// this field is present).
+        ok: bool,
+        /// Machine-readable failure kind (e.g. "timeout", "reported");
+        /// absent on success and on logs written before this field existed.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error_kind: Option<String>,
     },
     /// Raw data from external sources (e.g., web search results).
     #[serde(rename = "raw_data")]
@@ -152,13 +160,30 @@ pub fn build_llm_output(
 }
 
 /// Helper struct for building tool call entries.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ToolCallEntry {
     pub user_id: String,
     pub tool: String,
     pub duration_ms: u64,
     pub input: String,
     pub output: String,
+    pub ok: bool,
+    pub error_kind: Option<String>,
+}
+
+impl Default for ToolCallEntry {
+    fn default() -> Self {
+        Self {
+            user_id: String::new(),
+            tool: String::new(),
+            duration_ms: 0,
+            input: String::new(),
+            output: String::new(),
+            // A default-built entry has no known failure to report.
+            ok: true,
+            error_kind: None,
+        }
+    }
 }
 
 impl ToolCallEntry {
@@ -171,6 +196,13 @@ impl ToolCallEntry {
         }
     }
 
+    /// Mark the call as failed with the given error kind.
+    pub fn with_failure(mut self, error_kind: &str) -> Self {
+        self.ok = false;
+        self.error_kind = Some(error_kind.to_string());
+        self
+    }
+
     /// Build the final LogEntry with the given input, output, and duration.
     pub fn into_log_entry_with(self, input: &str, output: &str, duration_ms: u64) -> LogEntry {
         LogEntry::ToolCall {
@@ -180,6 +212,8 @@ impl ToolCallEntry {
             duration_ms,
             input: truncate(input),
             output: truncate(output),
+            ok: self.ok,
+            error_kind: self.error_kind,
         }
     }
 
@@ -192,6 +226,39 @@ impl ToolCallEntry {
             duration_ms: self.duration_ms,
             input: truncate(&self.input),
             output: truncate(&self.output),
+            ok: self.ok,
+            error_kind: self.error_kind,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_tool_call_serializes_structured_verdict() {
+        let entry = ToolCallEntry::new("u1", "web_search")
+            .with_failure("timeout")
+            .into_log_entry_with("{}", "web_search: timed out after 60s", 60_000);
+
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["event"], "tool_call");
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["error_kind"], "timeout");
+        assert_eq!(json["duration_ms"], 60_000);
+    }
+
+    #[test]
+    fn successful_tool_call_keeps_the_old_field_set() {
+        let entry = ToolCallEntry::new("u1", "file_read")
+            .into_log_entry_with("{}", "content", 5);
+
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["ok"], true);
+        assert!(
+            json.get("error_kind").is_none(),
+            "success must not carry a failure kind"
+        );
     }
 }

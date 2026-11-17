@@ -140,6 +140,7 @@ impl LlmRouter {
                 base_url,
                 model: config.default_model.clone(),
                 context_length: config.context_length,
+                include_usage: true,
             };
 
             router.register_openai_compatible(&config.id, openai_config);
@@ -241,6 +242,7 @@ impl LlmRouter {
                 base_url: entry.base_url.clone(),
                 model: entry.default_model.clone(),
                 context_length: entry.context_length,
+                include_usage: true,
             };
 
             router.register_openai_compatible(&entry.id, openai_config);
