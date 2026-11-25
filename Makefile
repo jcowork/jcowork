@@ -1,4 +1,4 @@
-.PHONY: build build-web run test clean check clippy setup setup-python
+.PHONY: build build-web run test clean check clippy setup setup-python setup-voice-lite voice-lite
 
 build:
 	cargo build --workspace
@@ -42,6 +42,13 @@ setup-python:
 
 # On Windows (PowerShell):
 #   powershell -ExecutionPolicy Bypass -File scripts\setup-python.ps1
+
+# Local voice sidecar (sherpa-onnx, pure CPU): offline ASR + TTS backend
+setup-voice-lite:
+	bash scripts/setup-voice-lite.sh
+
+voice-lite:
+	bash scripts/start-voice-lite.sh
 
 # Docker build
 docker:

@@ -1,19 +1,27 @@
 //! Jcowork Voice — full-duplex speech channel clients.
 //!
-//! Wraps the Qwen realtime WebSocket APIs used by the voice call feature:
-//! - Qwen3.8-Omni-Flash-Realtime for streaming ASR (server VAD + transcription)
-//! - Qwen-Audio-3.1-TTS-Plus Realtime for streaming text-to-speech
+//! Two interchangeable backends behind one event contract:
+//! - Cloud: Qwen3.8-Omni-Flash-Realtime (streaming ASR) + Qwen-Audio-3.1-TTS-Plus
+//!   (streaming TTS) over the DashScope WebSocket APIs.
+//! - Local: a sherpa-onnx sidecar (services/voice-lite) for fully offline
+//!   speech-in / speech-out on CPU.
 //!
 //! The agent answer itself is produced by the regular agent loop; this crate
-//! only handles the speech-in / speech-out transports and the sentence
-//! segmentation that feeds the TTS stream.
+//! only handles the speech transports, backend selection with cloud→local
+//! fallback, and the sentence segmentation that feeds the TTS stream.
 
 pub mod config;
+pub mod local_asr;
+pub mod local_tts;
 pub mod omni_asr;
 pub mod segment;
+pub mod session;
 pub mod tts;
 
 pub use config::VoiceConfig;
+pub use local_asr::LocalAsrClient;
+pub use local_tts::LocalTtsClient;
 pub use omni_asr::{AsrEvent, OmniAsrClient};
 pub use segment::SpeechSegmenter;
+pub use session::{AsrSession, TtsSession};
 pub use tts::{TtsClient, TtsEvent};

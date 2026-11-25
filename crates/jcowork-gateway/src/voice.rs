@@ -23,7 +23,7 @@ use jcowork_agent::r#loop::AgentTurnOptions;
 use jcowork_logs::{build_llm_input, build_llm_output, build_voice_stage, LogEntry, LogWriter};
 use jcowork_llm::provider::{LlmProvider, StreamChunk};
 use jcowork_tools::base::ToolContext;
-use jcowork_voice::{AsrEvent, OmniAsrClient, SpeechSegmenter, TtsClient, TtsEvent, VoiceConfig};
+use jcowork_voice::{AsrEvent, AsrSession, SpeechSegmenter, TtsEvent, TtsSession, VoiceConfig};
 
 use crate::router::AppState;
 use crate::session::RunningTask;
@@ -147,11 +147,12 @@ async fn spoken_summary(
     writer.write(&entry).await;
 }
 
-/// Lazily (re)connect the per-reply TTS session.
+/// Lazily (re)connect the per-reply TTS session. `force_local` pins the
+/// reconnect to the local sidecar after a cloud TTS session failed mid-call.
 #[allow(clippy::too_many_arguments)]
 async fn ensure_tts(
     cfg: &VoiceConfig,
-    tts: &mut Option<TtsClient>,
+    tts: &mut Option<TtsSession>,
     tts_rx: &mut Option<mpsc::Receiver<TtsEvent>>,
     sender: &mut WsSender,
     state: &AppState,
@@ -159,19 +160,27 @@ async fn ensure_tts(
     conv: &str,
     epoch: Instant,
     trace: &mut TtsTrace,
+    force_local: bool,
 ) {
     if tts.is_some() {
         return;
     }
     let connect_at = Instant::now();
-    match TtsClient::connect(cfg).await {
-        Ok((client, rx)) => {
+    match TtsSession::connect_with_fallback(cfg, force_local).await {
+        Ok((client, rx, fell_back)) => {
+            let backend = client.backend();
             *tts = Some(client);
             *tts_rx = Some(rx);
             *trace = TtsTrace { connect_at: Some(Instant::now()), ..Default::default() };
             log_stage(state, user_id, conv, epoch, "tts_connect", serde_json::json!({
                 "connect_ms": connect_at.elapsed().as_millis() as u64,
+                "backend": backend,
             }));
+            if fell_back {
+                log_stage(state, user_id, conv, epoch, "backend_fallback", serde_json::json!({
+                    "component": "tts", "from": "cloud", "to": "local",
+                }));
+            }
         }
         Err(e) => {
             log_stage(state, user_id, conv, epoch, "tts_error", serde_json::json!({
@@ -195,7 +204,7 @@ pub async fn voice_ws_handler(ws: WebSocket, user_id: String, conv: String, stat
     if !voice_cfg.is_configured() {
         send_ev(&mut ws_sender, serde_json::json!({
             "type": "error",
-            "message": "语音服务未配置：请在服务端设置 DASHSCOPE_API_KEY 和 JCWORK_VOICE_WORKSPACE_ID",
+            "message": "语音服务未配置：请配置云端 DASHSCOPE_API_KEY + JCWORK_VOICE_WORKSPACE_ID，或启动本地语音服务（scripts/setup-voice-lite.sh）",
         }))
         .await;
         return;
@@ -249,7 +258,7 @@ pub async fn voice_ws_handler(ws: WebSocket, user_id: String, conv: String, stat
     // ── Identity, skills and system prompt (same as the text chat) ──
     let call_epoch = Instant::now();
     log_stage(&state, &user_id, &conv, call_epoch, "session_start", serde_json::json!({
-        "model": model, "history_len": history.len(),
+        "model": model, "history_len": history.len(), "backend": voice_cfg.backend,
     }));
     let mut turn_epoch: Option<Instant> = None;
     let mut turn_seq: u32 = 0;
@@ -276,24 +285,36 @@ pub async fn voice_ws_handler(ws: WebSocket, user_id: String, conv: String, stat
         images: None,
     });
 
-    // ── Upstream ASR session ──
-    let (asr, mut asr_rx) = match OmniAsrClient::connect(&voice_cfg).await {
-        Ok(v) => v,
-        Err(e) => {
-            log_stage(&state, &user_id, &conv, call_epoch, "asr_error", serde_json::json!({
-                "source": "connect", "message": e.to_string(),
-            }));
-            send_ev(&mut ws_sender, serde_json::json!({
-                "type": "error", "message": format!("语音识别连接失败: {}", e),
-            }))
-            .await;
-            return;
-        }
-    };
+    // ── Upstream ASR session (cloud-preferred with automatic local fallback) ──
+    let (mut asr, mut asr_rx, asr_fell_back) =
+        match AsrSession::connect_with_fallback(&voice_cfg).await {
+            Ok(v) => v,
+            Err(e) => {
+                log_stage(&state, &user_id, &conv, call_epoch, "asr_error", serde_json::json!({
+                    "source": "connect", "message": e.to_string(),
+                }));
+                send_ev(&mut ws_sender, serde_json::json!({
+                    "type": "error", "message": format!("语音识别连接失败: {}", e),
+                }))
+                .await;
+                return;
+            }
+        };
+    let mut asr_backend = asr.backend();
+    // Once the call fell back to local, never bounce back to cloud mid-call.
+    let mut asr_fell_back = asr_fell_back;
+    if asr_fell_back {
+        log_stage(&state, &user_id, &conv, call_epoch, "backend_fallback", serde_json::json!({
+            "component": "asr", "from": "cloud", "to": "local", "source": "connect",
+        }));
+    }
 
     let mut live_task_rx: Option<tokio::sync::broadcast::Receiver<String>> = None;
-    let mut tts: Option<TtsClient> = None;
+    let mut tts: Option<TtsSession> = None;
     let mut tts_rx: Option<mpsc::Receiver<TtsEvent>> = None;
+    // Set after a cloud TTS session errors mid-call: subsequent reconnects
+    // go straight to the local sidecar.
+    let mut force_local_tts = false;
     let mut segmenter = SpeechSegmenter::new();
 
     loop {
@@ -318,7 +339,9 @@ pub async fn voice_ws_handler(ws: WebSocket, user_id: String, conv: String, stat
             ev = asr_rx.recv() => {
                 match ev {
                     Some(AsrEvent::Ready) => {
-                        log_stage(&state, &user_id, &conv, call_epoch, "asr_ready", serde_json::json!({}));
+                        log_stage(&state, &user_id, &conv, call_epoch, "asr_ready", serde_json::json!({
+                            "backend": asr_backend,
+                        }));
                         send_ev(&mut ws_sender, serde_json::json!({"type": "voice_ready"})).await;
                     }
                     Some(AsrEvent::SpeechStarted) => {
@@ -492,15 +515,50 @@ pub async fn voice_ws_handler(ws: WebSocket, user_id: String, conv: String, stat
                         task.set_abort_handle(join.abort_handle());
                     }
                     Some(AsrEvent::Error(e)) => {
+                        // A cloud ASR failure mid-call: try the local sidecar
+                        // once before surfacing the error to the caller.
+                        if asr_backend == "cloud" && !asr_fell_back {
+                            let mut lcfg = voice_cfg.clone();
+                            lcfg.backend = "local".to_string();
+                            if let Ok((new_asr, new_rx)) = AsrSession::connect(&lcfg).await {
+                                log_stage(&state, &user_id, &conv, call_epoch, "backend_fallback", serde_json::json!({
+                                    "component": "asr", "from": "cloud", "to": "local",
+                                    "source": "error", "reason": e,
+                                }));
+                                asr = new_asr;
+                                asr_rx = new_rx;
+                                asr_backend = "local";
+                                asr_fell_back = true;
+                                continue;
+                            }
+                        }
                         log_stage(&state, &user_id, &conv, call_epoch, "asr_error", serde_json::json!({
-                            "message": e,
+                            "message": e, "backend": asr_backend,
                         }));
                         send_ev(&mut ws_sender, serde_json::json!({
                             "type": "error", "message": format!("语音识别错误: {}", e),
                         })).await;
                     }
                     Some(AsrEvent::Closed) | None => {
-                        log_stage(&state, &user_id, &conv, call_epoch, "asr_closed", serde_json::json!({}));
+                        // Same fallback on a dropped cloud connection: keep
+                        // the call alive on the local sidecar when possible.
+                        if asr_backend == "cloud" && !asr_fell_back {
+                            let mut lcfg = voice_cfg.clone();
+                            lcfg.backend = "local".to_string();
+                            if let Ok((new_asr, new_rx)) = AsrSession::connect(&lcfg).await {
+                                log_stage(&state, &user_id, &conv, call_epoch, "backend_fallback", serde_json::json!({
+                                    "component": "asr", "from": "cloud", "to": "local", "source": "closed",
+                                }));
+                                asr = new_asr;
+                                asr_rx = new_rx;
+                                asr_backend = "local";
+                                asr_fell_back = true;
+                                continue;
+                            }
+                        }
+                        log_stage(&state, &user_id, &conv, call_epoch, "asr_closed", serde_json::json!({
+                            "backend": asr_backend,
+                        }));
                         send_ev(&mut ws_sender, serde_json::json!({
                             "type": "error", "message": "语音识别连接已断开",
                         })).await;
@@ -535,8 +593,16 @@ pub async fn voice_ws_handler(ws: WebSocket, user_id: String, conv: String, stat
                     }
                     Some(TtsEvent::Error(e)) => {
                         log_stage(&state, &user_id, &conv, call_epoch, "tts_error", serde_json::json!({
-                            "message": e,
+                            "message": e, "backend": tts.as_ref().map(|t| t.backend()),
                         }));
+                        // A broken cloud TTS session pins the rest of the
+                        // call to local; drop it so the next sentence
+                        // reconnects through ensure_tts.
+                        if tts.as_ref().map(|t| t.backend()) == Some("cloud") {
+                            force_local_tts = true;
+                            tts = None;
+                            tts_rx = None;
+                        }
                         send_ev(&mut ws_sender, serde_json::json!({
                             "type": "error", "message": format!("语音合成错误: {}", e),
                         })).await;
@@ -576,7 +642,7 @@ pub async fn voice_ws_handler(ws: WebSocket, user_id: String, conv: String, stat
                             }
                         }
                         for sentence in segmenter.push(&text) {
-                            ensure_tts(&voice_cfg, &mut tts, &mut tts_rx, &mut ws_sender, &state, &user_id, &conv, call_epoch, &mut tts_trace).await;
+                            ensure_tts(&voice_cfg, &mut tts, &mut tts_rx, &mut ws_sender, &state, &user_id, &conv, call_epoch, &mut tts_trace, force_local_tts).await;
                             if let Some(t) = tts.as_ref() {
                                 t.append_text(&sentence);
                             }
@@ -585,7 +651,7 @@ pub async fn voice_ws_handler(ws: WebSocket, user_id: String, conv: String, stat
                     None => {
                         // Rewrite stream finished: flush the tail and close.
                         if let Some(rest) = segmenter.flush() {
-                            ensure_tts(&voice_cfg, &mut tts, &mut tts_rx, &mut ws_sender, &state, &user_id, &conv, call_epoch, &mut tts_trace).await;
+                            ensure_tts(&voice_cfg, &mut tts, &mut tts_rx, &mut ws_sender, &state, &user_id, &conv, call_epoch, &mut tts_trace, force_local_tts).await;
                             if let Some(t) = tts.as_ref() {
                                 t.append_text(&rest);
                             }

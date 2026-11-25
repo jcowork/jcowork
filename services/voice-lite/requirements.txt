@@ -1,0 +1,7 @@
+# Voice-Lite sidecar dependencies (Plan B: pure-CPU local speech).
+# sherpa-onnx bundles ONNX Runtime; no torch/GPU required.
+# Pinned to the version the WS contract was verified against.
+sherpa-onnx==2.0.3
+numpy>=1.24
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0

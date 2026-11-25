@@ -27,6 +27,11 @@ pub(crate) struct UpdateVoiceRequest {
     pub tts_voice: Option<String>,
     pub asr_url: Option<String>,
     pub tts_url: Option<String>,
+    /// "cloud" or "local"; cloud sessions fall back to local automatically.
+    pub backend: Option<String>,
+    pub local_asr_url: Option<String>,
+    pub local_tts_url: Option<String>,
+    pub local_voice: Option<String>,
 }
 
 /// Redacted view of the live configuration — the API key itself never leaves
@@ -40,6 +45,11 @@ fn voice_config_json(config: &VoiceConfig, source: &str) -> serde_json::Value {
         "tts_voice": config.tts_voice,
         "asr_url": config.asr_url,
         "tts_url": config.tts_url,
+        "backend": config.backend,
+        "local_asr_url": config.local_asr_url,
+        "local_tts_url": config.local_tts_url,
+        "local_voice": config.local_voice,
+        "cloud_configured": config.cloud_configured(),
         "enabled": config.is_configured(),
         "source": source,
     })
@@ -105,6 +115,28 @@ pub(crate) async fn update_voice_config(
     if let Some(v) = req.tts_voice {
         if !v.trim().is_empty() {
             config.tts_voice = v.trim().to_string();
+        }
+    }
+    if let Some(v) = req.backend {
+        let v = v.trim().to_ascii_lowercase();
+        if v != "cloud" && v != "local" {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "backend must be cloud or local"})),
+            )
+                .into_response();
+        }
+        config.backend = v;
+    }
+    if let Some(v) = req.local_asr_url {
+        config.local_asr_url = v.trim().to_string();
+    }
+    if let Some(v) = req.local_tts_url {
+        config.local_tts_url = v.trim().to_string();
+    }
+    if let Some(v) = req.local_voice {
+        if !v.trim().is_empty() {
+            config.local_voice = v.trim().to_string();
         }
     }
     // Explicit URL overrides win; otherwise keep the URLs in sync with the

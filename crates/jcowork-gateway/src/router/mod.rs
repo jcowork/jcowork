@@ -886,6 +886,7 @@ async fn voice_config(
     Json(serde_json::json!({
         "enabled": cfg.is_configured(),
         "voice": cfg.tts_voice,
+        "backend": cfg.backend,
     }))
 }
 

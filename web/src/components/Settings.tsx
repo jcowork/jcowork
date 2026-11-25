@@ -48,6 +48,11 @@ interface VoiceConfigDto {
   tts_voice: string;
   asr_url: string;
   tts_url: string;
+  backend: 'cloud' | 'local';
+  local_asr_url: string;
+  local_tts_url: string;
+  local_voice: string;
+  cloud_configured: boolean;
   enabled: boolean;
   source: 'stored' | 'env';
 }
@@ -87,7 +92,7 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
 
   // Admin voice-channel state (section renders for admins only)
   const [voiceCfg, setVoiceCfg] = useState<VoiceConfigDto | null>(null);
-  const [voiceForm, setVoiceForm] = useState({ apiKey: '', workspaceId: '', asrModel: '', ttsModel: '', ttsVoice: '' });
+  const [voiceForm, setVoiceForm] = useState({ apiKey: '', workspaceId: '', asrModel: '', ttsModel: '', ttsVoice: '', backend: 'cloud', localAsrUrl: '', localTtsUrl: '', localVoice: '' });
   const [voiceLoading, setVoiceLoading] = useState(true);
   const [voiceSaving, setVoiceSaving] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState<'idle' | 'saved' | 'error'>('idle');
@@ -285,6 +290,10 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
       asrModel: data.asr_model || '',
       ttsModel: data.tts_model || '',
       ttsVoice: data.tts_voice || '',
+      backend: data.backend || 'cloud',
+      localAsrUrl: data.local_asr_url || '',
+      localTtsUrl: data.local_tts_url || '',
+      localVoice: data.local_voice || '',
     });
   };
 
@@ -302,6 +311,10 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
           asr_model: voiceForm.asrModel.trim(),
           tts_model: voiceForm.ttsModel.trim(),
           tts_voice: voiceForm.ttsVoice.trim(),
+          backend: voiceForm.backend,
+          local_asr_url: voiceForm.localAsrUrl.trim(),
+          local_tts_url: voiceForm.localTtsUrl.trim(),
+          local_voice: voiceForm.localVoice.trim(),
         }),
       });
       const data = await res.json().catch(() => null);
@@ -1180,6 +1193,26 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
                 </div>
               )}
               <div style={{ marginBottom: 12 }}>
+                <label style={labelStyle}>{t('voiceBackend')}</label>
+                <select
+                  value={voiceForm.backend}
+                  onChange={e => { setVoiceForm({ ...voiceForm, backend: e.target.value }); setVoiceError(''); }}
+                  style={{
+                    width: '100%', padding: '10px 12px', borderRadius: 8,
+                    border: '1px solid #444', background: '#1a1a1a', color: '#eee',
+                    fontSize: 13, outline: 'none', boxSizing: 'border-box',
+                  }}
+                >
+                  <option value="cloud">{t('voiceBackendCloud')}</option>
+                  <option value="local">{t('voiceBackendLocal')}</option>
+                </select>
+                <div style={{ color: '#666', fontSize: 12, marginTop: 6 }}>
+                  {voiceForm.backend === 'cloud' ? t('voiceBackendCloudHint') : t('voiceBackendLocalHint')}
+                </div>
+              </div>
+              {voiceForm.backend === 'cloud' ? (
+                <>
+              <div style={{ marginBottom: 12 }}>
                 <label style={labelStyle}>{t('voiceApiKey')}</label>
                 <input
                   type="password"
@@ -1249,6 +1282,50 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
                   }}
                 />
               </div>
+                </>
+              ) : (
+                <>
+              <div style={{ marginBottom: 12 }}>
+                <label style={labelStyle}>{t('voiceLocalAsrUrl')}</label>
+                <input
+                  value={voiceForm.localAsrUrl}
+                  onChange={e => { setVoiceForm({ ...voiceForm, localAsrUrl: e.target.value }); setVoiceError(''); }}
+                  placeholder="ws://127.0.0.1:50061/asr"
+                  style={{
+                    width: '100%', padding: '10px 12px', borderRadius: 8,
+                    border: '1px solid #444', background: '#1a1a1a', color: '#eee',
+                    fontSize: 13, outline: 'none', boxSizing: 'border-box',
+                  }}
+                />
+              </div>
+              <div style={{ marginBottom: 12 }}>
+                <label style={labelStyle}>{t('voiceLocalTtsUrl')}</label>
+                <input
+                  value={voiceForm.localTtsUrl}
+                  onChange={e => { setVoiceForm({ ...voiceForm, localTtsUrl: e.target.value }); setVoiceError(''); }}
+                  placeholder="ws://127.0.0.1:50061/tts"
+                  style={{
+                    width: '100%', padding: '10px 12px', borderRadius: 8,
+                    border: '1px solid #444', background: '#1a1a1a', color: '#eee',
+                    fontSize: 13, outline: 'none', boxSizing: 'border-box',
+                  }}
+                />
+              </div>
+              <div style={{ marginBottom: 16 }}>
+                <label style={labelStyle}>{t('voiceLocalVoice')}</label>
+                <input
+                  value={voiceForm.localVoice}
+                  onChange={e => { setVoiceForm({ ...voiceForm, localVoice: e.target.value }); setVoiceError(''); }}
+                  placeholder="0"
+                  style={{
+                    width: '100%', padding: '10px 12px', borderRadius: 8,
+                    border: '1px solid #444', background: '#1a1a1a', color: '#eee',
+                    fontSize: 13, outline: 'none', boxSizing: 'border-box',
+                  }}
+                />
+              </div>
+                </>
+              )}
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
                 <button
                   onClick={saveVoiceConfig}
