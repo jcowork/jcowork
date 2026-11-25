@@ -12,6 +12,7 @@ import {
 } from '../chatStore';
 import { loadAccounts } from '../accountStore';
 import { useIsNarrow } from '../utils/useIsNarrow';
+import VoiceCall from './VoiceCall';
 
 interface ContextDoc {
   name: string;
@@ -226,6 +227,12 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
   const [attachOpen, setAttachOpen] = useState(false);
   const attachRef = useRef<HTMLDivElement>(null);
 
+  // Voice call overlay + server-side availability (null = not yet fetched)
+  const [voiceOpen, setVoiceOpen] = useState(false);
+  const [voiceEnabled, setVoiceEnabled] = useState<boolean | null>(null);
+  // Mirror of the latest messages for closures that run after hang-up
+  const messagesRef = useRef<Message[]>(messages);
+
   // Reset conversation-scoped state when switching to a different conversation
   // (clicking "+" for a new task chat, or picking a history item). The Chat
   // instance stays mounted per account, so a `conversationId` prop change must
@@ -246,6 +253,7 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
     setShowUrlInput(false);
     setUrlInput('');
     setShowFullHistory(false);
+    setVoiceOpen(false);
   }
 
   const connect = useCallback(() => {
@@ -436,6 +444,16 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
     onStreamingChange?.(userId, streaming);
   }, [userId, streaming]);
 
+  // Voice availability: gate the mic button on the server-side configuration
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/voice/config', { headers: { Authorization: `Bearer ${token}` } })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => { if (!cancelled) setVoiceEnabled(data ? !!data.enabled : false); })
+      .catch(() => { if (!cancelled) setVoiceEnabled(false); });
+    return () => { cancelled = true; };
+  }, [token]);
+
   // Track scroll position while visible; display:none resets scrollTop on hide
   useEffect(() => {
     if (!visible) return;
@@ -485,6 +503,7 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
 
   // Persist messages into the conversation store when they change
   useEffect(() => {
+    messagesRef.current = messages;
     // Don't save streaming or system tool messages
     const toSave = messages.filter((m) => !m.streaming && m.role !== 'system');
     updateConvMessages(userId, conversationId, toSave);
@@ -561,6 +580,72 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
   const stopGeneration = () => {
     if (!streaming) return;
     wsRef.current?.send(JSON.stringify({ type: 'stop' }));
+  };
+
+  // ── Voice call integration ──
+  const openVoice = async () => {
+    // Re-check on click: an admin may have configured the service on the
+    // Settings page since this chat loaded.
+    let enabled = voiceEnabled;
+    try {
+      const res = await fetch('/api/voice/config', { headers: { Authorization: `Bearer ${token}` } });
+      if (res.ok) {
+        const data = await res.json();
+        enabled = !!data.enabled;
+        setVoiceEnabled(enabled);
+      }
+    } catch {}
+    if (enabled === false) {
+      setStatusMsg(t('voiceNotConfigured'));
+      setTimeout(() => setStatusMsg(''), 4000);
+      return;
+    }
+    setVoiceOpen(true);
+  };
+
+  // Voice turns write into the same message list as typed ones, so the
+  // persistence effect and conversation title/history rules apply unchanged.
+  const handleVoiceUser = (text: string) => {
+    setMessages((prev) => [...prev, { role: 'user', content: text, timestamp: Date.now() } as Message]);
+    onConversationsSync?.(userId, touchConversation(userId, conversationId));
+  };
+
+  const handleVoiceDelta = (content: string) => {
+    setMessages((prev) => {
+      const last = prev[prev.length - 1];
+      if (last?.role === 'assistant' && last.streaming) {
+        return [...prev.slice(0, -1), { ...last, content: last.content + content }];
+      }
+      return [...prev, { role: 'assistant', content, timestamp: Date.now(), streaming: true } as Message];
+    });
+  };
+
+  const handleVoiceEnd = () => {
+    setMessages((prev) => {
+      const last = prev[prev.length - 1];
+      if (last?.role === 'assistant' && last.streaming) {
+        return [...prev.slice(0, -1), { ...last, streaming: false }];
+      }
+      return prev;
+    });
+  };
+
+  // After hang-up: push the voice turns into the chat WS context so typed
+  // follow-ups continue the same topic. A reply cut short by hang-up is
+  // included as final text (its streaming flag is only a UI marker).
+  const resyncHistory = () => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const hist = messagesRef.current
+      .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content.trim())
+      .map((m) => ({ role: m.role, content: m.content, kind: m.kind }));
+    ws.send(JSON.stringify({ type: 'load_history', history: hist }));
+  };
+
+  const closeVoice = () => {
+    handleVoiceEnd();
+    setVoiceOpen(false);
+    resyncHistory();
   };
 
   const sendMessage = async () => {
@@ -1165,6 +1250,7 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
                     ['🔗', t('attachLinkMenu'), () => { setUrlInput(''); setShowUrlInput(true); }],
                     ['📷', t('takePhoto'), 'camera'],
                     ['🖼', t('photoLibrary'), 'gallery'],
+                    ['🎙', voiceOpen ? t('voiceHangup') : t('voiceCall'), () => (voiceOpen ? closeVoice() : openVoice())],
                   ] as [string, string, string | (() => void)][]).map(([icon, label, action]) => (
                     <div
                       key={label}
@@ -1401,6 +1487,28 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
             🖼
           </button>
           )}
+
+          {/* Voice call toggle (desktop; mobile lives in the "+" menu) */}
+          {!isNarrow && (
+          <button
+            onClick={voiceOpen ? closeVoice : openVoice}
+            disabled={!connected || (streaming && !voiceOpen)}
+            title={voiceOpen ? t('voiceHangup') : t('voiceCall')}
+            style={{
+              padding: '8px 10px',
+              borderRadius: 8,
+              border: voiceOpen ? '1px solid #e53935' : '1px solid #555',
+              background: voiceOpen ? '#e53935' : '#1a1a1a',
+              color: voiceOpen ? '#fff' : '#aaa',
+              cursor: 'pointer',
+              fontSize: 14,
+              lineHeight: 1,
+              flexShrink: 0,
+            }}
+          >
+            🎙
+          </button>
+          )}
           </div>
 
           {/* Text input + @mention autocomplete */}
@@ -1525,6 +1633,36 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
           )}
         </div>
       </div>
+
+      {/* Full-duplex voice call: floating mute/hang-up controls; the
+          transcript and replies render in the message list above. */}
+      {voiceOpen && (
+        <VoiceCall
+          token={token}
+          conversationId={conversationId}
+          history={messages
+            .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content.trim() && !m.streaming)
+            .map((m) => ({ role: m.role, content: m.content }))}
+          model={(() => {
+            try {
+              const saved = localStorage.getItem(`jcowork_model_${userId}`);
+              if (saved) {
+                const parsed = JSON.parse(saved);
+                if (parsed.provider && parsed.model) return `${parsed.provider}:${parsed.model}`;
+              }
+            } catch {}
+            return undefined;
+          })()}
+          onUserMessage={handleVoiceUser}
+          onAssistantDelta={handleVoiceDelta}
+          onAssistantEnd={handleVoiceEnd}
+          onError={(m) => {
+            setStatusMsg(m === 'MIC_DENIED' ? t('voiceMicDenied') : m);
+            setTimeout(() => setStatusMsg(''), 5000);
+          }}
+          onClose={closeVoice}
+        />
+      )}
     </div>
   );
 }

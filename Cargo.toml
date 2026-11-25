@@ -15,6 +15,7 @@ members = [
     "crates/jcowork-feishu",
     "crates/jcowork-sms",
     "crates/jcowork-mail",
+    "crates/jcowork-voice",
     "crates/jcowork-desktop",
 ]
 
@@ -39,6 +40,7 @@ jcowork-feishu = { path = "crates/jcowork-feishu" }
 jcowork-sms = { path = "crates/jcowork-sms" }
 jcowork-mail = { path = "crates/jcowork-mail" }
 jcowork-logs = { path = "crates/jcowork-logs" }
+jcowork-voice = { path = "crates/jcowork-voice" }
 
 # Email (SMTP) delivery for verification codes
 lettre = { version = "0.11", default-features = false, features = [
@@ -60,6 +62,9 @@ tower = "0.5"
 # Async HTTP client
 reqwest = { version = "0.12", features = ["stream", "json", "multipart"] }
 reqwest-eventsource = "0.6"
+
+# WebSocket client (Qwen realtime voice APIs)
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 
 # Futures
 futures = "0.3"

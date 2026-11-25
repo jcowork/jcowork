@@ -74,6 +74,41 @@ pub enum LogEntry {
         /// The raw data (e.g., search results).
         data: serde_json::Value,
     },
+    /// A full-duplex voice call pipeline milestone (ASR / reply / TTS),
+    /// written by the gateway voice channel for end-to-end latency attribution.
+    #[serde(rename = "voice_stage")]
+    VoiceStage {
+        /// ISO 8601 timestamp of when the stage was observed.
+        timestamp: String,
+        /// User ID that owns the call.
+        user_id: String,
+        /// Conversation ID the call belongs to.
+        conv_id: String,
+        /// Stage name (e.g., "asr_final", "tts_first_audio", "session_end").
+        stage: String,
+        /// Milliseconds since the call WebSocket session started.
+        elapsed_ms: u64,
+        /// Stage-specific payload (transcript, byte counts, durations, errors).
+        data: serde_json::Value,
+    },
+}
+
+/// Builder for a voice pipeline stage entry (timestamp = now).
+pub fn build_voice_stage(
+    user_id: &str,
+    conv_id: &str,
+    stage: &str,
+    elapsed_ms: u64,
+    data: serde_json::Value,
+) -> LogEntry {
+    LogEntry::VoiceStage {
+        timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        user_id: user_id.to_string(),
+        conv_id: conv_id.to_string(),
+        stage: stage.to_string(),
+        elapsed_ms,
+        data,
+    }
 }
 
 /// Summary of LLM input (messages sent to the model).
@@ -235,6 +270,23 @@ impl ToolCallEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn voice_stage_serializes_with_elapsed_and_payload() {
+        let entry = build_voice_stage(
+            "u1",
+            "c1",
+            "tts_first_audio",
+            1234,
+            serde_json::json!({"ttfa_ms": 430, "bytes": 9600}),
+        );
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["event"], "voice_stage");
+        assert_eq!(json["stage"], "tts_first_audio");
+        assert_eq!(json["conv_id"], "c1");
+        assert_eq!(json["elapsed_ms"], 1234);
+        assert_eq!(json["data"]["ttfa_ms"], 430);
+    }
 
     #[test]
     fn failed_tool_call_serializes_structured_verdict() {

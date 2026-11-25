@@ -2828,6 +2828,7 @@ dependencies = [
  "jcowork-skills",
  "jcowork-storage",
  "jcowork-tools",
+ "jcowork-voice",
  "open",
  "shellexpand",
  "sqlx",
@@ -2871,6 +2872,7 @@ dependencies = [
  "argon2",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "captcha-rs",
  "chrono",
  "dashmap",
@@ -2887,6 +2889,7 @@ dependencies = [
  "jcowork-sms",
  "jcowork-storage",
  "jcowork-tools",
+ "jcowork-voice",
  "jsonwebtoken",
  "rand_core 0.6.4",
  "reqwest 0.12.28",
@@ -2984,6 +2987,7 @@ dependencies = [
  "jcowork-skills",
  "jcowork-storage",
  "jcowork-tools",
+ "jcowork-voice",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -3081,6 +3085,21 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "jcowork-voice"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -13,6 +13,16 @@ export default defineConfig({
         changeOrigin: true,
         ws: true,
       },
+      // Voice config is plain HTTP — must match before the WS rule below.
+      '/api/voice/config': {
+        target: process.env.API_TARGET || 'http://localhost:3000',
+        changeOrigin: true,
+      },
+      '/api/voice': {
+        target: process.env.API_TARGET || 'ws://localhost:3000',
+        changeOrigin: true,
+        ws: true,
+      },
       '/api': {
         target: process.env.API_TARGET || 'http://localhost:3000',
         changeOrigin: true,

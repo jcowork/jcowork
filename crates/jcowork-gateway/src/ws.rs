@@ -224,8 +224,9 @@ impl<'a> AgentOutputSink for WsSink<'a> {
 
 /// Task output sink — records every agent event into the RunningTask
 /// (replay log + live broadcast), fully decoupled from any connection.
-struct TaskSink {
-    task: Arc<RunningTask>,
+/// Shared with the voice channel (`crate::voice`).
+pub(crate) struct TaskSink {
+    pub(crate) task: Arc<RunningTask>,
 }
 
 impl AgentOutputSink for TaskSink {

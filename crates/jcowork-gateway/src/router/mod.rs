@@ -18,6 +18,7 @@
 
 pub(crate) mod admin_mail;
 pub(crate) mod admin_users;
+pub(crate) mod admin_voice;
 pub(crate) mod auth_api;
 pub(crate) mod captcha;
 pub(crate) mod code_store;
@@ -243,6 +244,9 @@ pub struct AppState {
     pub summary: Arc<crate::summary::SummaryService>,
     /// Daily RSI (recursive self-improvement) runs and their history.
     pub rsi: Arc<crate::rsi::RsiService>,
+    /// Voice call channel (Qwen Omni ASR + Qwen TTS) configuration. Behind an
+    /// RwLock because `PUT /api/admin/voice` swaps it without a restart.
+    pub voice: Arc<std::sync::RwLock<jcowork_voice::VoiceConfig>>,
     /// Data directory for per-user workspaces.
     pub data_dir: String,
 }
@@ -277,6 +281,30 @@ pub async fn apply_stored_mail_config(state: &AppState) {
             tracing::warn!(error = %e, "Stored mail settings cannot build a channel; keeping the env channel");
         }
     }
+}
+
+/// Replace the env-built voice configuration with the one persisted by
+/// `PUT /api/admin/voice`, if any. Same startup contract as
+/// [`apply_stored_mail_config`]: a missing or unparsable row keeps env.
+pub async fn apply_stored_voice_config(state: &AppState) {
+    let raw = match state.app_settings.get(admin_voice::VOICE_SETTINGS_KEY).await {
+        Ok(Some(raw)) => raw,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(error = %e, "Stored voice settings unreadable; keeping the env config");
+            return;
+        }
+    };
+    let config: jcowork_voice::VoiceConfig = match serde_json::from_str(&raw) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "Stored voice settings unparsable; keeping the env config");
+            return;
+        }
+    };
+    let enabled = config.is_configured();
+    *state.voice.write().expect("voice config lock poisoned") = config;
+    tracing::info!(enabled, "Voice channel reconfigured from stored settings (env no longer applies)");
 }
 
 // --- Request/Response types ---
@@ -564,10 +592,14 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/connectors/{id}/tools", get(connectors::list_connector_tools))
         .route("/api/connectors/{id}/tools/{tool}/toggle", post(connectors::toggle_connector_tool))
         .route("/api/ws", get(ws_upgrade))
+        // Full-duplex voice call channel
+        .route("/api/voice", get(voice_upgrade))
+        .route("/api/voice/config", get(voice_config))
         // Admin (super-user) user management
         .route("/api/admin/users", get(admin_users::list_users))
         .route("/api/admin/mail", get(admin_mail::get_mail_config).put(admin_mail::update_mail_config).delete(admin_mail::delete_mail_config))
         .route("/api/admin/mail/test", post(admin_mail::send_test_mail))
+        .route("/api/admin/voice", get(admin_voice::get_voice_config).put(admin_voice::update_voice_config).delete(admin_voice::delete_voice_config))
         .route("/api/admin/users/{id}/trash", post(admin_users::trash_user))
         .route("/api/admin/users/{id}/restore", post(admin_users::restore_user))
         .route("/api/admin/users/{id}/public", post(admin_users::set_user_public))
@@ -829,6 +861,32 @@ async fn ws_upgrade(
     ws.on_upgrade(move |socket| {
         ws::ws_handler(socket, user_id, conv, state.session_manager, llm_router, default_model, tool_registry, cron_scheduler, log_writer, memory_manager, skill_manager, user_store, data_dir)
     })
+}
+
+async fn voice_upgrade(
+    ws: WebSocketUpgrade,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let user_id = auth_user.user_id;
+    // Same conversation key as the text chat so background tasks interoperate.
+    let conv = params.get("conv").cloned().unwrap_or_default();
+    ws.on_upgrade(move |socket| {
+        crate::voice::voice_ws_handler(socket, user_id, conv, state)
+    })
+}
+
+/// Lets the frontend decide whether the voice call button is usable.
+async fn voice_config(
+    State(state): State<AppState>,
+    _auth: axum::Extension<AuthUser>,
+) -> impl IntoResponse {
+    let cfg = state.voice.read().expect("voice config lock poisoned");
+    Json(serde_json::json!({
+        "enabled": cfg.is_configured(),
+        "voice": cfg.tts_voice,
+    }))
 }
 
 #[cfg(test)]

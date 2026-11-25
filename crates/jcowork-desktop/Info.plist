@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Merged into the generated bundle Info.plist by Tauri (auto-detected next
+     to tauri.conf.json). Without NSMicrophoneUsageDescription macOS TCC
+     denies WKWebView getUserMedia, so voice calls cannot capture the mic. -->
+<plist version="1.0">
+<dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Jcowork 需要访问麦克风以进行全双工语音对话。Jcowork needs microphone access for full-duplex voice calls.</string>
+</dict>
+</plist>

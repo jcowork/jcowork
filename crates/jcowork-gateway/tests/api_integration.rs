@@ -291,6 +291,7 @@ impl TestApp {
             user_settings,
             sms,
             mail: Arc::new(RwLock::new(mail)),
+            voice: Arc::new(RwLock::new(jcowork_voice::VoiceConfig::from_env())),
             data_dir: data_dir.clone(),
         };
 
@@ -2206,6 +2207,95 @@ async fn test_delete_stored_mail_config_rearms_gate() {
         .await;
     assert_eq!(res.status(), StatusCode::FORBIDDEN, "the gate re-arms on the fallback");
     assert_eq!(json_body(res).await["code"], json!("mail_config_required"));
+}
+
+// ── Admin voice channel configuration ──
+
+/// The voice config endpoints never echo the DashScope key; a partial update
+/// keeps it, and changing the workspace re-derives the Omni endpoint URL.
+#[tokio::test]
+async fn test_voice_config_put_merge_and_redaction() {
+    let app = TestApp::new().await;
+    let token = app.seed_and_login_admin().await;
+
+    let res = app
+        .make_request_with_token(
+            Some(&token),
+            "PUT",
+            "/api/admin/voice",
+            Some(json!({"api_key": "sk-voice-test", "workspace_id": "ws-abc"})),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = json_body(res).await;
+    assert!(body.get("api_key").is_none(), "PUT must not echo the API key");
+    assert_eq!(body["api_key_set"], json!(true));
+    assert_eq!(body["enabled"], json!(true));
+    assert_eq!(body["source"], json!("stored"));
+    assert_eq!(
+        body["asr_url"],
+        json!("wss://ws-abc.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime?model=qwen3.8-omni-flash-realtime")
+    );
+
+    // The call button gate sees the stored config immediately.
+    let res = app
+        .make_request_with_token(Some(&token), "GET", "/api/voice/config", None)
+        .await;
+    assert_eq!(json_body(res).await["enabled"], json!(true));
+
+    // Partial update: empty key keeps the stored one; a new workspace must
+    // re-derive the workspace-bound ASR URL.
+    let res = app
+        .make_request_with_token(
+            Some(&token),
+            "PUT",
+            "/api/admin/voice",
+            Some(json!({"api_key": "", "workspace_id": "ws-xyz", "tts_voice": "Cherry"})),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = json_body(res).await;
+    assert_eq!(body["api_key_set"], json!(true), "an empty key must keep the stored one");
+    assert_eq!(body["tts_voice"], json!("Cherry"));
+    assert!(
+        body["asr_url"].as_str().unwrap().starts_with("wss://ws-xyz."),
+        "the ASR URL must follow the new workspace"
+    );
+
+    let res = app
+        .make_request_with_token(Some(&token), "GET", "/api/admin/voice", None)
+        .await;
+    let body = json_body(res).await;
+    assert_eq!(body["workspace_id"], json!("ws-xyz"));
+    assert_eq!(body["source"], json!("stored"));
+}
+
+/// DELETE drops the stored voice config and the environment applies again.
+#[tokio::test]
+async fn test_voice_config_delete_falls_back_to_env() {
+    let app = TestApp::new().await;
+    let token = app.seed_and_login_admin().await;
+
+    let res = app
+        .make_request_with_token(
+            Some(&token),
+            "PUT",
+            "/api/admin/voice",
+            Some(json!({"api_key": "sk-voice-test", "workspace_id": "ws-abc"})),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = app
+        .make_request_with_token(Some(&token), "DELETE", "/api/admin/voice", None)
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(json_body(res).await["source"], json!("env"));
+
+    let res = app
+        .make_request_with_token(Some(&token), "GET", "/api/admin/voice", None)
+        .await;
+    assert_eq!(json_body(res).await["source"], json!("env"));
 }
 
 // ── Admin phone assignment ──

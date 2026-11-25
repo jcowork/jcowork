@@ -39,6 +39,19 @@ interface MailConfigDto {
   source: 'stored' | 'env';
 }
 
+/** Shape of the redacted `/api/admin/voice` response (no API key, ever). */
+interface VoiceConfigDto {
+  api_key_set: boolean;
+  workspace_id: string;
+  asr_model: string;
+  tts_model: string;
+  tts_voice: string;
+  asr_url: string;
+  tts_url: string;
+  enabled: boolean;
+  source: 'stored' | 'env';
+}
+
 interface SettingsProps {
   onClose: () => void;
   userId: string;
@@ -71,6 +84,14 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
   const [mailError, setMailError] = useState('');
   const [testEmail, setTestEmail] = useState('');
   const [testBusy, setTestBusy] = useState(false);
+
+  // Admin voice-channel state (section renders for admins only)
+  const [voiceCfg, setVoiceCfg] = useState<VoiceConfigDto | null>(null);
+  const [voiceForm, setVoiceForm] = useState({ apiKey: '', workspaceId: '', asrModel: '', ttsModel: '', ttsVoice: '' });
+  const [voiceLoading, setVoiceLoading] = useState(true);
+  const [voiceSaving, setVoiceSaving] = useState(false);
+  const [voiceStatus, setVoiceStatus] = useState<'idle' | 'saved' | 'error'>('idle');
+  const [voiceError, setVoiceError] = useState('');
 
   // Account profile (display name + bound phone number / email)
   const [profileName, setProfileName] = useState('');
@@ -253,6 +274,73 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
     setTestBusy(false);
   };
 
+  // --- Admin voice channel ---
+
+  const applyVoiceConfig = (data: VoiceConfigDto) => {
+    setVoiceCfg(data);
+    // Never echo the API key back into the form; empty means "keep".
+    setVoiceForm({
+      apiKey: '',
+      workspaceId: data.workspace_id || '',
+      asrModel: data.asr_model || '',
+      ttsModel: data.tts_model || '',
+      ttsVoice: data.tts_voice || '',
+    });
+  };
+
+  const saveVoiceConfig = async () => {
+    setVoiceSaving(true);
+    setVoiceStatus('idle');
+    setVoiceError('');
+    try {
+      const res = await fetch('/api/admin/voice', {
+        method: 'PUT',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          api_key: voiceForm.apiKey,
+          workspace_id: voiceForm.workspaceId.trim(),
+          asr_model: voiceForm.asrModel.trim(),
+          tts_model: voiceForm.ttsModel.trim(),
+          tts_voice: voiceForm.ttsVoice.trim(),
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data) {
+        applyVoiceConfig(data);
+        setVoiceStatus('saved');
+        setTimeout(() => setVoiceStatus('idle'), 2000);
+      } else {
+        setVoiceError(mapAuthError(t, data?.error || '', data || undefined));
+      }
+    } catch {
+      setVoiceError(t('networkError'));
+    }
+    setVoiceSaving(false);
+  };
+
+  const clearStoredVoiceConfig = async () => {
+    setVoiceSaving(true);
+    setVoiceStatus('idle');
+    setVoiceError('');
+    try {
+      const res = await fetch('/api/admin/voice', {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data) {
+        applyVoiceConfig(data);
+        setVoiceStatus('saved');
+        setTimeout(() => setVoiceStatus('idle'), 2000);
+      } else {
+        setVoiceError(mapAuthError(t, data?.error || '', data || undefined));
+      }
+    } catch {
+      setVoiceError(t('networkError'));
+    }
+    setVoiceSaving(false);
+  };
+
   useEffect(() => {
     fetch('/api/profile', { headers: { 'Authorization': `Bearer ${token}` } })
       .then(r => {
@@ -289,6 +377,22 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
         setMailLoading(false);
       })
       .catch(() => setMailLoading(false));
+  }, [isAdmin, token]);
+
+  // Load the live voice channel configuration (admin only). Same contract as
+  // mail: the key field starts empty and an empty submit keeps the stored one.
+  useEffect(() => {
+    if (!isAdmin) return;
+    fetch('/api/admin/voice', { headers: { 'Authorization': `Bearer ${token}` } })
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((data: VoiceConfigDto) => {
+        applyVoiceConfig(data);
+        setVoiceLoading(false);
+      })
+      .catch(() => setVoiceLoading(false));
   }, [isAdmin, token]);
 
   // Auto-dismiss the success banner
@@ -1036,6 +1140,144 @@ export default function Settings({ onClose, userId, token }: SettingsProps) {
                 >
                   {t('sendTestEmail')}
                 </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Voice Service Section (admin only) */}
+      {isAdmin && (
+        <div style={{ ...cardStyle, marginTop: 16 }}>
+          <h3 style={{ fontSize: 16, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 20 }}>🎙</span> {t('voiceSettingsSection')}
+            {voiceCfg && (
+              <span style={{ ...tagStyle, background: voiceCfg.enabled ? '#23863622' : '#f0883e22', color: voiceCfg.enabled ? '#3fb950' : '#f0883e' }}>
+                {voiceCfg.enabled ? t('voiceEnabledTag') : t('voiceDisabledTag')}
+              </span>
+            )}
+            {voiceCfg && (
+              <span style={{ ...tagStyle, background: '#1f6feb22', color: '#58a6ff' }}>
+                {voiceCfg.source === 'stored' ? t('mailSourceStored') : t('mailSourceEnv')}
+              </span>
+            )}
+          </h3>
+          <div style={{ color: '#888', fontSize: 13, lineHeight: 1.6, marginBottom: 12 }}>
+            {t('voiceSettingsDesc')}
+          </div>
+          {voiceLoading ? (
+            <div style={{ color: '#888', fontSize: 13 }}>{t('loading')}</div>
+          ) : (
+            <>
+              {voiceError && (
+                <div style={{
+                  padding: '8px 12px', marginBottom: 12, borderRadius: 6,
+                  background: '#3a1f1f', border: '1px solid #e5393555', color: '#e57373', fontSize: 12,
+                  display: 'flex', alignItems: 'center', gap: 8,
+                }}>
+                  <span style={{ flex: 1 }}>{voiceError}</span>
+                  <button onClick={() => setVoiceError('')} style={{ background: 'none', border: 'none', color: '#e57373', cursor: 'pointer', fontSize: 13 }}>✕</button>
+                </div>
+              )}
+              <div style={{ marginBottom: 12 }}>
+                <label style={labelStyle}>{t('voiceApiKey')}</label>
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  value={voiceForm.apiKey}
+                  onChange={e => { setVoiceForm({ ...voiceForm, apiKey: e.target.value }); setVoiceError(''); }}
+                  placeholder={voiceCfg?.api_key_set ? t('voiceApiKeyKeep') : t('voiceApiKeyPlaceholder')}
+                  style={{
+                    width: '100%', padding: '10px 12px', borderRadius: 8,
+                    border: '1px solid #444', background: '#1a1a1a', color: '#eee',
+                    fontSize: 13, outline: 'none', boxSizing: 'border-box',
+                  }}
+                />
+              </div>
+              <div style={{ marginBottom: 12 }}>
+                <label style={labelStyle}>{t('voiceWorkspaceId')}</label>
+                <input
+                  value={voiceForm.workspaceId}
+                  onChange={e => { setVoiceForm({ ...voiceForm, workspaceId: e.target.value }); setVoiceError(''); }}
+                  placeholder="llm-xxxxxxxxxxxx"
+                  style={{
+                    width: '100%', padding: '10px 12px', borderRadius: 8,
+                    border: '1px solid #444', background: '#1a1a1a', color: '#eee',
+                    fontSize: 13, outline: 'none', boxSizing: 'border-box',
+                  }}
+                />
+                <div style={{ color: '#666', fontSize: 12, marginTop: 6 }}>{t('voiceWorkspaceIdHint')}</div>
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+                <div style={{ flex: 1 }}>
+                  <label style={labelStyle}>{t('voiceAsrModel')}</label>
+                  <input
+                    value={voiceForm.asrModel}
+                    onChange={e => { setVoiceForm({ ...voiceForm, asrModel: e.target.value }); setVoiceError(''); }}
+                    placeholder="qwen3.8-omni-flash-realtime"
+                    style={{
+                      width: '100%', padding: '10px 12px', borderRadius: 8,
+                      border: '1px solid #444', background: '#1a1a1a', color: '#eee',
+                      fontSize: 13, outline: 'none', boxSizing: 'border-box',
+                    }}
+                  />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label style={labelStyle}>{t('voiceTtsModel')}</label>
+                  <input
+                    value={voiceForm.ttsModel}
+                    onChange={e => { setVoiceForm({ ...voiceForm, ttsModel: e.target.value }); setVoiceError(''); }}
+                    placeholder="qwen-audio-3.1-tts-plus"
+                    style={{
+                      width: '100%', padding: '10px 12px', borderRadius: 8,
+                      border: '1px solid #444', background: '#1a1a1a', color: '#eee',
+                      fontSize: 13, outline: 'none', boxSizing: 'border-box',
+                    }}
+                  />
+                </div>
+              </div>
+              <div style={{ marginBottom: 16 }}>
+                <label style={labelStyle}>{t('voiceTtsVoice')}</label>
+                <input
+                  value={voiceForm.ttsVoice}
+                  onChange={e => { setVoiceForm({ ...voiceForm, ttsVoice: e.target.value }); setVoiceError(''); }}
+                  placeholder="longanqian_v3.1"
+                  style={{
+                    width: '100%', padding: '10px 12px', borderRadius: 8,
+                    border: '1px solid #444', background: '#1a1a1a', color: '#eee',
+                    fontSize: 13, outline: 'none', boxSizing: 'border-box',
+                  }}
+                />
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                <button
+                  onClick={saveVoiceConfig}
+                  disabled={voiceSaving}
+                  style={{
+                    padding: '8px 20px', borderRadius: 8, border: 'none',
+                    background: voiceSaving ? '#333' : '#1f6feb',
+                    color: '#fff', cursor: voiceSaving ? 'not-allowed' : 'pointer',
+                    fontSize: 14, fontWeight: 500,
+                  }}
+                >
+                  {voiceSaving ? t('saving') : t('save')}
+                </button>
+                {voiceCfg?.source === 'stored' && (
+                  <button
+                    onClick={clearStoredVoiceConfig}
+                    disabled={voiceSaving}
+                    title={t('clearStoredVoiceConfigHint')}
+                    style={{
+                      padding: '8px 16px', borderRadius: 8, border: '1px solid #f87171',
+                      background: 'transparent', color: '#f87171', cursor: voiceSaving ? 'not-allowed' : 'pointer',
+                      fontSize: 14,
+                    }}
+                  >
+                    {t('clearStoredVoiceConfig')}
+                  </button>
+                )}
+                {voiceStatus === 'saved' && <span style={{ color: '#3fb950', fontSize: 13 }}>{t('saved')}</span>}
+                {voiceStatus === 'error' && <span style={{ color: '#f87171', fontSize: 13 }}>{t('failedToSave')}</span>}
               </div>
             </>
           )}

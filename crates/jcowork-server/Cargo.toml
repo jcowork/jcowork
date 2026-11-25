@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 jcowork-gateway = { workspace = true }
+jcowork-voice = { workspace = true }
 jcowork-agent = { workspace = true }
 jcowork-memory = { workspace = true }
 jcowork-skills = { workspace = true }
@@ -33,7 +34,7 @@ dashmap = { workspace = true }
 dotenvy = { workspace = true }
 
 [dev-dependencies]
-tokio-tungstenite = { version = "0.26", features = ["native-tls"]}
+tokio-tungstenite = { workspace = true }
 reqwest = { workspace = true }
 tempfile = "3"
 async-trait = { workspace = true }

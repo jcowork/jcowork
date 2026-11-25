@@ -244,12 +244,16 @@ async fn main() -> Result<()> {
         user_settings,
         sms,
         mail: Arc::new(RwLock::new(mail)),
+        voice: Arc::new(RwLock::new(jcowork_voice::VoiceConfig::from_env())),
         data_dir: data_dir.clone(),
     };
 
     // An admin-configured mail channel (stored by /api/admin/mail) wins over
     // the environment on every restart.
     router::apply_stored_mail_config(&state).await;
+
+    // Same for the voice channel: a Settings-page configuration wins over env.
+    router::apply_stored_voice_config(&state).await;
 
     // Probe the Feishu CLI and reopen bot connections for accounts that had
     // the Feishu skill enabled before this restart. Spawned so a slow probe

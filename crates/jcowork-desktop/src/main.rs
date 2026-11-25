@@ -436,6 +436,7 @@ async fn main() {
         user_settings,
         sms,
         mail: Arc::new(RwLock::new(mail)),
+        voice: Arc::new(RwLock::new(jcowork_voice::VoiceConfig::from_env())),
         data_dir: data_dir.clone(),
     };
 
@@ -443,6 +444,10 @@ async fn main() {
     // the environment on every restart — on desktop this is the only way a
     // real SMTP channel exists at all.
     router::apply_stored_mail_config(&state).await;
+
+    // Same for the voice channel — on desktop the Settings page is the only
+    // way to configure it at all (no .env file in the bundle).
+    router::apply_stored_voice_config(&state).await;
 
     // Probe the Feishu CLI and reopen bot connections for accounts that had
     // the Feishu skill enabled before this launch.

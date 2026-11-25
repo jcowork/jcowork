@@ -10,4 +10,5 @@ pub mod router;
 pub mod rsi;
 pub mod session;
 pub mod summary;
+pub mod voice;
 pub mod ws;
