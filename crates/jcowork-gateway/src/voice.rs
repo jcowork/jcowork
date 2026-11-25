@@ -4,9 +4,10 @@
 //! Qwen Omni realtime ASR session; server VAD segments utterances and the
 //! final transcript runs through the regular agent loop (same RunningTask
 //! machinery as the text chat, so "stop" and task occupancy interoperate).
-//! Reply text deltas are forwarded to the client AND sentence-segmented into
-//! the Qwen TTS realtime session, whose PCM audio (24 kHz) streams back as
-//! base64 `tts_audio` events.
+//! Reply text deltas are forwarded to the client verbatim (detailed chat
+//! view), while a separate spoken-summary LLM pass rewrites the finished
+//! reply into concise colloquial speech for the TTS session, whose PCM audio
+//! (24 kHz) streams back as base64 `tts_audio` events.
 //!
 //! Barge-in: `input_audio_buffer.speech_started` aborts the running agent
 //! task, drops the TTS connection and tells the client to flush playback.
@@ -19,7 +20,8 @@ use tokio::sync::mpsc;
 
 use jcowork_agent::r#loop as agent_loop;
 use jcowork_agent::r#loop::AgentTurnOptions;
-use jcowork_logs::build_voice_stage;
+use jcowork_logs::{build_llm_input, build_llm_output, build_voice_stage, LogEntry, LogWriter};
+use jcowork_llm::provider::{LlmProvider, StreamChunk};
 use jcowork_tools::base::ToolContext;
 use jcowork_voice::{AsrEvent, OmniAsrClient, SpeechSegmenter, TtsClient, TtsEvent, VoiceConfig};
 
@@ -56,6 +58,93 @@ struct TtsTrace {
     connect_at: Option<Instant>,
     first_audio_logged: bool,
     bytes: u64,
+}
+
+/// Spoken-channel rewrite instruction: the chat list keeps the full detailed
+/// reply, while TTS speaks a concise, natural colloquial summary of it.
+const SPOKEN_SYSTEM_PROMPT: &str = "你是全双工语音助手的播报改写器。把用户给出的助手回复改写成适合「听」的播报稿：简洁、自然、口语化，1–3 句话、尽量不超过 120 字；保留关键结论、数字与行动建议；不要 Markdown、列表、表格、代码或表情符号；不要新增信息、不要客套开场；使用与回复相同的语言。直接输出播报稿正文。";
+
+/// Rewrite the detailed reply into spoken form and stream it to the voice
+/// loop. On any failure falls back to speaking the detailed reply verbatim
+/// so the caller still hears an answer.
+async fn spoken_summary(
+    provider: std::sync::Arc<dyn LlmProvider>,
+    detailed: String,
+    tx: mpsc::Sender<String>,
+    writer: std::sync::Arc<LogWriter>,
+    user_id: String,
+    conv: String,
+    epoch: Instant,
+    model: String,
+) {
+    let start = Instant::now();
+    let messages = vec![
+        jcowork_llm::provider::ChatMessage {
+            role: "system".to_string(),
+            content: SPOKEN_SYSTEM_PROMPT.to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            images: None,
+        },
+        jcowork_llm::provider::ChatMessage {
+            role: "user".to_string(),
+            content: detailed.clone(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            images: None,
+        },
+    ];
+    let mut spoken = String::new();
+    let mut usage = None;
+    let mut ok = false;
+    if let Ok(Ok(mut stream)) = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        provider.chat_stream(&messages, &[]),
+    )
+    .await
+    {
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(StreamChunk::Delta(t)) => {
+                    spoken.push_str(&t);
+                    if tx.send(t).await.is_err() {
+                        return; // call hung up / barged in
+                    }
+                }
+                Ok(StreamChunk::Done(u)) => {
+                    usage = Some((u.prompt_tokens, u.completion_tokens, u.total_tokens));
+                    ok = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    }
+    if !ok || spoken.trim().is_empty() {
+        let _ = tx.send(detailed.clone()).await;
+        writer
+            .write(&build_voice_stage(
+                &user_id,
+                &conv,
+                "spoken_fallback",
+                epoch.elapsed().as_millis() as u64,
+                serde_json::json!({"completed": ok}),
+            ))
+            .await;
+    }
+    let entry = LogEntry::LlmRequest {
+        timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        user_id,
+        provider: provider.name().to_string(),
+        model,
+        duration_ms: start.elapsed().as_millis() as u64,
+        input: build_llm_input(&[("system", SPOKEN_SYSTEM_PROMPT), ("user", detailed.as_str())]),
+        output: build_llm_output(&spoken, 0, Vec::new(), usage),
+    };
+    writer.write(&entry).await;
 }
 
 /// Lazily (re)connect the per-reply TTS session.
@@ -166,6 +255,13 @@ pub async fn voice_ws_handler(ws: WebSocket, user_id: String, conv: String, stat
     let mut turn_seq: u32 = 0;
     let mut first_text_logged = false;
     let mut tts_trace = TtsTrace::default();
+    // Dual output: chat gets the detailed deltas verbatim (reply_text), TTS
+    // gets a concise colloquial rewrite streamed over spoken_rx.
+    let mut reply_text = String::new();
+    let mut spoken_rx: Option<mpsc::Receiver<String>> = None;
+    let mut spoken_join: Option<tokio::task::JoinHandle<()>> = None;
+    let mut spoken_start_at: Option<Instant> = None;
+    let mut spoken_first_logged = false;
     let custom_identity = agent_loop::load_agent_identity(&state.memory_manager, &user_id).await;
     let (skill_prompt, enabled_skill_ids) =
         agent_loop::build_skill_prompt(&state.memory_manager, &state.skill_manager, &user_id).await;
@@ -239,6 +335,11 @@ pub async fn voice_ws_handler(ws: WebSocket, user_id: String, conv: String, stat
                         }));
                         tts = None;
                         tts_rx = None;
+                        if let Some(j) = spoken_join.take() {
+                            j.abort();
+                        }
+                        spoken_rx = None;
+                        reply_text.clear();
                         segmenter = SpeechSegmenter::new();
                         send_ev(&mut ws_sender, serde_json::json!({"type": "tts_cancel"})).await;
                         send_ev(&mut ws_sender, serde_json::json!({"type": "user_speaking"})).await;
@@ -333,6 +434,11 @@ pub async fn voice_ws_handler(ws: WebSocket, user_id: String, conv: String, stat
                         state.session_manager.set_task(&conv, task.clone());
                         let (task_rx, _snapshot) = task.attach();
                         live_task_rx = Some(task_rx);
+                        if let Some(j) = spoken_join.take() {
+                            j.abort();
+                        }
+                        spoken_rx = None;
+                        reply_text.clear();
                         segmenter = SpeechSegmenter::new();
 
                         let history_snapshot = history.clone();
@@ -451,7 +557,48 @@ pub async fn voice_ws_handler(ws: WebSocket, user_id: String, conv: String, stat
                     }
                 }
             }
-            // ── Agent task events: forward to client + pipe text into TTS ──
+            // ── Spoken-summary stream: the only feed into TTS ──
+            chunk = async {
+                match spoken_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match chunk {
+                    Some(text) => {
+                        if !spoken_first_logged {
+                            spoken_first_logged = true;
+                            if let Some(at) = spoken_start_at {
+                                log_stage(&state, &user_id, &conv, call_epoch, "spoken_first_text", serde_json::json!({
+                                    "seq": turn_seq,
+                                    "spoken_ms": at.elapsed().as_millis() as u64,
+                                }));
+                            }
+                        }
+                        for sentence in segmenter.push(&text) {
+                            ensure_tts(&voice_cfg, &mut tts, &mut tts_rx, &mut ws_sender, &state, &user_id, &conv, call_epoch, &mut tts_trace).await;
+                            if let Some(t) = tts.as_ref() {
+                                t.append_text(&sentence);
+                            }
+                        }
+                    }
+                    None => {
+                        // Rewrite stream finished: flush the tail and close.
+                        if let Some(rest) = segmenter.flush() {
+                            ensure_tts(&voice_cfg, &mut tts, &mut tts_rx, &mut ws_sender, &state, &user_id, &conv, call_epoch, &mut tts_trace).await;
+                            if let Some(t) = tts.as_ref() {
+                                t.append_text(&rest);
+                            }
+                        }
+                        if let Some(t) = tts.as_ref() {
+                            t.finish();
+                        }
+                        spoken_rx = None;
+                        spoken_join = None;
+                    }
+                }
+            }
+            // ── Agent task events: forward to client + collect for rewrite ──
             ev = async {
                 match live_task_rx.as_mut() {
                     Some(rx) => match rx.recv().await {
@@ -488,26 +635,52 @@ pub async fn voice_ws_handler(ws: WebSocket, user_id: String, conv: String, stat
                                     }));
                                 }
                             }
-                            for sentence in segmenter.push(content) {
-                                ensure_tts(&voice_cfg, &mut tts, &mut tts_rx, &mut ws_sender, &state, &user_id, &conv, call_epoch, &mut tts_trace).await;
-                                if let Some(t) = tts.as_ref() {
-                                    t.append_text(&sentence);
-                                }
-                            }
+                            // Chat view only — TTS is fed by the spoken rewrite.
+                            reply_text.push_str(content);
                         }
                         "done" => {
                             log_stage(&state, &user_id, &conv, call_epoch, "turn_done", serde_json::json!({
                                 "seq": turn_seq,
                                 "turn_ms": turn_epoch.map(|te| te.elapsed().as_millis() as u64),
                             }));
-                            if let Some(rest) = segmenter.flush() {
-                                ensure_tts(&voice_cfg, &mut tts, &mut tts_rx, &mut ws_sender, &state, &user_id, &conv, call_epoch, &mut tts_trace).await;
-                                if let Some(t) = tts.as_ref() {
-                                    t.append_text(&rest);
-                                }
+                            let detailed = std::mem::take(&mut reply_text);
+                            if detailed.trim().is_empty() {
+                                continue;
                             }
-                            if let Some(t) = tts.as_ref() {
-                                t.finish();
+                            if let Some(j) = spoken_join.take() {
+                                j.abort();
+                            }
+                            spoken_start_at = Some(Instant::now());
+                            spoken_first_logged = false;
+                            log_stage(&state, &user_id, &conv, call_epoch, "spoken_start", serde_json::json!({
+                                "seq": turn_seq,
+                                "chars": detailed.chars().count(),
+                            }));
+                            let provider = {
+                                let router = state.llm_router.read().unwrap();
+                                router.get_provider(&model)
+                            };
+                            match provider {
+                                Ok(p) => {
+                                    let (tx, rx) = mpsc::channel::<String>(64);
+                                    spoken_rx = Some(rx);
+                                    let writer = state.log_writer.clone();
+                                    let uid = user_id.clone();
+                                    let cv = conv.clone();
+                                    let mdl = model.clone();
+                                    spoken_join = Some(tokio::spawn(spoken_summary(
+                                        p, detailed, tx, writer, uid, cv, call_epoch, mdl,
+                                    )));
+                                }
+                                Err(e) => {
+                                    // No provider: speak the detailed reply verbatim.
+                                    log_stage(&state, &user_id, &conv, call_epoch, "spoken_fallback", serde_json::json!({
+                                        "reason": e.to_string(),
+                                    }));
+                                    let (tx, rx) = mpsc::channel::<String>(8);
+                                    spoken_rx = Some(rx);
+                                    let _ = tx.try_send(detailed);
+                                }
                             }
                         }
                         "stopped" => {
@@ -517,6 +690,11 @@ pub async fn voice_ws_handler(ws: WebSocket, user_id: String, conv: String, stat
                             }));
                             tts = None;
                             tts_rx = None;
+                            if let Some(j) = spoken_join.take() {
+                                j.abort();
+                            }
+                            spoken_rx = None;
+                            reply_text.clear();
                             segmenter = SpeechSegmenter::new();
                             send_ev(&mut ws_sender, serde_json::json!({"type": "tts_cancel"})).await;
                         }
@@ -532,6 +710,120 @@ pub async fn voice_ws_handler(ws: WebSocket, user_id: String, conv: String, stat
     log_stage(&state, &user_id, &conv, call_epoch, "session_end", serde_json::json!({
         "turns": turn_seq,
     }));
+    if let Some(j) = spoken_join.take() {
+        j.abort();
+    }
     drop(asr);
     drop(tts);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jcowork_llm::provider::{ChatResponse, ChatStream, MockLlmProvider, ToolDefinition, Usage};
+
+    struct FailingProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for FailingProvider {
+        fn name(&self) -> &str {
+            "failing"
+        }
+        async fn chat(
+            &self,
+            _: &[jcowork_llm::provider::ChatMessage],
+            _: &[ToolDefinition],
+        ) -> anyhow::Result<ChatResponse> {
+            unreachable!()
+        }
+        async fn chat_stream(
+            &self,
+            _: &[jcowork_llm::provider::ChatMessage],
+            _: &[ToolDefinition],
+        ) -> anyhow::Result<ChatStream> {
+            Err(anyhow::anyhow!("boom"))
+        }
+        fn context_length(&self) -> usize {
+            1000
+        }
+        fn with_model(&self, _: &str) -> std::sync::Arc<dyn LlmProvider> {
+            std::sync::Arc::new(FailingProvider)
+        }
+    }
+
+    /// Completes without emitting any text delta.
+    struct EmptyProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for EmptyProvider {
+        fn name(&self) -> &str {
+            "empty"
+        }
+        async fn chat(
+            &self,
+            _: &[jcowork_llm::provider::ChatMessage],
+            _: &[ToolDefinition],
+        ) -> anyhow::Result<ChatResponse> {
+            unreachable!()
+        }
+        async fn chat_stream(
+            &self,
+            _: &[jcowork_llm::provider::ChatMessage],
+            _: &[ToolDefinition],
+        ) -> anyhow::Result<ChatStream> {
+            Ok(Box::pin(futures::stream::iter(vec![Ok(StreamChunk::Done(Usage {
+                prompt_tokens: 1,
+                completion_tokens: 0,
+                total_tokens: 1,
+            }))])))
+        }
+        fn context_length(&self) -> usize {
+            1000
+        }
+        fn with_model(&self, _: &str) -> std::sync::Arc<dyn LlmProvider> {
+            std::sync::Arc::new(EmptyProvider)
+        }
+    }
+
+    async fn collect_spoken(detailed: &str, provider: std::sync::Arc<dyn LlmProvider>) -> String {
+        let (tx, mut rx) = mpsc::channel(16);
+        let writer = std::sync::Arc::new(LogWriter::new_disabled());
+        tokio::spawn(spoken_summary(
+            provider,
+            detailed.to_string(),
+            tx,
+            writer,
+            "u1".to_string(),
+            "c1".to_string(),
+            Instant::now(),
+            "mock:m".to_string(),
+        ));
+        let mut got = String::new();
+        while let Some(t) = rx.recv().await {
+            got.push_str(&t);
+        }
+        got
+    }
+
+    #[tokio::test]
+    async fn rewrite_streams_spoken_text_not_the_detail() {
+        let got = collect_spoken(
+            "a very long detailed reply",
+            std::sync::Arc::new(MockLlmProvider::new()),
+        )
+        .await;
+        assert_eq!(got, "Mock response for testing.");
+    }
+
+    #[tokio::test]
+    async fn rewrite_failure_falls_back_to_verbatim_detail() {
+        let got = collect_spoken("detailed reply", std::sync::Arc::new(FailingProvider)).await;
+        assert_eq!(got, "detailed reply");
+    }
+
+    #[tokio::test]
+    async fn empty_rewrite_falls_back_to_verbatim_detail() {
+        let got = collect_spoken("detailed reply", std::sync::Arc::new(EmptyProvider)).await;
+        assert_eq!(got, "detailed reply");
+    }
 }
