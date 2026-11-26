@@ -1,7 +1,8 @@
 //! Aggregated "AI feed" endpoints.
 //!
-//! The feed merges, per user, their periodic-task execution results with
-//! their (public-only when viewing someone else) indexed documents, newest
+//! The feed merges, per user, their periodic-task execution results, their
+//! (public-only when viewing someone else) indexed documents and — for the
+//! authenticated own feed only — their RSI improvement reports, newest
 //! first, with offset pagination. The mobile "AI头条" tab fans these
 //! endpoints out across all locally signed-in accounts and public users and
 //! merges the streams client-side.
@@ -62,6 +63,20 @@ pub(crate) enum FeedItem {
         is_public: bool,
         /// RFC3339 UTC (normalized from SQLite's naive format).
         indexed_at: String,
+    },
+    /// One RSI (recursive self-improvement) run. Own feed only: improvement
+    /// proposals are private to their owner, never part of a public feed.
+    Rsi {
+        id: String,
+        /// "admin" or "user" — the improvement scope the run followed.
+        role: String,
+        status: String,
+        /// The run's final reply (<=500 chars), used as the card teaser.
+        summary: String,
+        period_start: String,
+        period_end: String,
+        /// RFC3339 UTC.
+        created_at: String,
     },
 }
 
@@ -131,10 +146,20 @@ async fn build_feed(
     } else {
         index.list_recent(fetch, 0).await?
     };
+    // RSI proposals join only the owner's own feed; failed runs are filtered
+    // in SQL so the fetched window matches the merged offset pagination.
+    let rsi = if public_docs_only {
+        Vec::new()
+    } else {
+        state.rsi.list_success_reports(user_id, fetch).await?
+    };
 
-    let has_more = tasks.len() as i64 >= fetch || docs.len() as i64 >= fetch;
+    let has_more = tasks.len() as i64 >= fetch
+        || docs.len() as i64 >= fetch
+        || rsi.len() as i64 >= fetch;
 
-    let mut merged: Vec<(DateTime<Utc>, FeedItem)> = Vec::with_capacity(tasks.len() + docs.len());
+    let mut merged: Vec<(DateTime<Utc>, FeedItem)> =
+        Vec::with_capacity(tasks.len() + docs.len() + rsi.len());
     for t in tasks {
         let ts = parse_ts(&t.executed_at).unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
         merged.push((
@@ -168,12 +193,31 @@ async fn build_feed(
             },
         ));
     }
-    // Newest first; ties keep tasks ahead of documents (stable sort by type).
+    for r in rsi {
+        let ts = parse_ts(&r.created_at).unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
+        merged.push((
+            ts,
+            FeedItem::Rsi {
+                id: r.id,
+                role: r.role,
+                status: r.status,
+                summary: r.summary,
+                period_start: to_rfc3339_utc(&r.period_start),
+                period_end: to_rfc3339_utc(&r.period_end),
+                created_at: to_rfc3339_utc(&r.created_at),
+            },
+        ));
+    }
+    // Newest first; ties keep tasks ahead of documents ahead of RSI runs.
     merged.sort_by(|a, b| {
         b.0.cmp(&a.0)
             .then_with(|| match (&a.1, &b.1) {
-                (FeedItem::Task { .. }, FeedItem::Document { .. }) => std::cmp::Ordering::Less,
-                (FeedItem::Document { .. }, FeedItem::Task { .. }) => std::cmp::Ordering::Greater,
+                (FeedItem::Task { .. }, FeedItem::Task { .. }) => std::cmp::Ordering::Equal,
+                (FeedItem::Task { .. }, _) => std::cmp::Ordering::Less,
+                (_, FeedItem::Task { .. }) => std::cmp::Ordering::Greater,
+                (FeedItem::Document { .. }, FeedItem::Document { .. }) => std::cmp::Ordering::Equal,
+                (FeedItem::Document { .. }, _) => std::cmp::Ordering::Less,
+                (_, FeedItem::Document { .. }) => std::cmp::Ordering::Greater,
                 _ => std::cmp::Ordering::Equal,
             })
     });

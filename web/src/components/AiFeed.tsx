@@ -38,7 +38,22 @@ interface FeedDocItem {
   indexed_at: string;
 }
 
-type FeedItem = FeedTaskItem | FeedDocItem;
+interface FeedRsiItem {
+  type: 'rsi';
+  id: string;
+  role: string;
+  status: string;
+  /** The run's final reply, used as the card teaser. */
+  summary: string;
+  period_start: string;
+  period_end: string;
+  created_at: string;
+}
+
+type FeedItem = FeedTaskItem | FeedDocItem | FeedRsiItem;
+
+/** Feed category tabs; articles (documents) is the default view. */
+type FeedFilter = 'all' | 'document' | 'task' | 'rsi';
 
 interface FeedSource {
   key: string;
@@ -71,10 +86,13 @@ interface FeedEntry {
 }
 
 const itemTime = (item: FeedItem): number => {
-  const raw = item.type === 'task' ? item.executed_at : item.indexed_at;
-  const t = Date.parse(raw);
+  const t = Date.parse(itemRawTime(item));
   return Number.isNaN(t) ? 0 : t;
 };
+
+/** The update timestamp each category sorts by (newest first). */
+const itemRawTime = (item: FeedItem): string =>
+  item.type === 'task' ? item.executed_at : item.type === 'document' ? item.indexed_at : item.created_at;
 
 /** Collapse markdown noise into a one-paragraph plain-text summary. */
 const plainSummary = (s: string): string =>
@@ -140,6 +158,11 @@ export default function AiFeed({ accounts, activeToken, publicUsers, onLogin }: 
   });
   const [detail, setDetail] = useState<FeedEntry | null>(null);
   const [linkCopied, setLinkCopied] = useState(false);
+  // Category tab; the ref mirrors it so the merge loop counts visible items
+  // without re-creating its callback on every tab switch.
+  const [filter, setFilter] = useState<FeedFilter>('document');
+  const filterRef = useRef<FeedFilter>('document');
+  const listRef = useRef<HTMLDivElement>(null);
 
   // ── Task detail state ──
   const [taskDetail, setTaskDetail] = useState<TaskDetailData | null>(null);
@@ -188,7 +211,7 @@ export default function AiFeed({ accounts, activeToken, publicUsers, onLogin }: 
       setBusy(true);
       try {
         while (true) {
-          if (entriesRef.current.length >= targetRef.current) break;
+          if (visibleCount(entriesRef.current) >= targetRef.current) break;
           const needFetch = sourcesRef.current.filter(
             (s) => s.ptr >= s.items.length && !s.exhausted && !s.error,
           );
@@ -220,7 +243,7 @@ export default function AiFeed({ accounts, activeToken, publicUsers, onLogin }: 
             sourcesRef.current.length > 0 &&
             sourcesRef.current.every((s) => s.exhausted || s.error),
         });
-        if (entriesRef.current.length < targetRef.current) {
+        if (visibleCount(entriesRef.current) < targetRef.current) {
           void ensureCount(targetRef.current);
         }
       }
@@ -275,9 +298,26 @@ export default function AiFeed({ accounts, activeToken, publicUsers, onLogin }: 
     return () => window.clearTimeout(id);
   }, [reload]);
 
+  /** Items of the active category, in merged (update-time) order. */
+  const visibleEntries = entries.filter((e) => filter === 'all' || e.item.type === filter);
+  const visibleCount = (list: FeedEntry[]): number =>
+    list.reduce((n, e) => n + (filterRef.current === 'all' || e.item.type === filterRef.current ? 1 : 0), 0);
+
+  const switchFilter = (f: FeedFilter) => {
+    if (f === filterRef.current) return;
+    setFilter(f);
+    filterRef.current = f;
+    // The merged stream may already hold enough items for another category;
+    // re-arm the target so this category fills the screen too.
+    targetRef.current = 0;
+    // Each category starts from its newest item, not a carried-over scroll spot.
+    if (listRef.current) listRef.current.scrollTop = 0;
+    void ensureCount(INITIAL_TARGET);
+  };
+
   const failedSources = sourceStats.failed;
   const allDone = sourceStats.allDone;
-  const initialLoading = busy && entries.length === 0;
+  const initialLoading = busy && visibleEntries.length === 0;
 
   // ── Detail: AI core-content summary (generated once per document) ──
   const loadDocSummary = async (entry: FeedEntry) => {
@@ -316,13 +356,16 @@ export default function AiFeed({ accounts, activeToken, publicUsers, onLogin }: 
     setDocSummaryError('');
     setDocSummaryLoading(false);
     summaryReqRef.current++; // drop any response still in flight
-    if (entry.item.type === 'task') {
+    if (entry.item.type !== 'document') {
       setTaskDetailLoading(true);
       // Local accounts read their own result; public sources use the
       // signed-out endpoint (which re-checks that the owner is public).
-      const resultUrl = entry.source.isLocal
-        ? `/api/feed/results/${entry.item.id}`
-        : `/api/public-users/${entry.source.userId}/feed/results/${entry.item.id}`;
+      // RSI reports only ever come from local sources (own feed).
+      const resultUrl = entry.item.type === 'rsi'
+        ? `/api/rsi/reports/${entry.item.id}`
+        : entry.source.isLocal
+          ? `/api/feed/results/${entry.item.id}`
+          : `/api/public-users/${entry.source.userId}/feed/results/${entry.item.id}`;
       fetch(resultUrl, {
         headers: entry.source.token ? { Authorization: `Bearer ${entry.source.token}` } : undefined,
       })
@@ -417,12 +460,17 @@ export default function AiFeed({ accounts, activeToken, publicUsers, onLogin }: 
   const renderCard = (entry: FeedEntry, idx: number) => {
     const { item, source } = entry;
     const isTask = item.type === 'task';
-    const time = isTask ? item.executed_at : item.indexed_at;
-    const title = isTask ? item.job_name || item.prompt || t('feedTask') : item.filename;
-    const summary = plainSummary(item.summary || (isTask ? item.excerpt : item.snippet));
+    const isRsi = item.type === 'rsi';
+    const time = itemRawTime(item);
+    const title = isTask
+      ? item.job_name || item.prompt || t('feedTask')
+      : isRsi
+        ? `${t('feedRsi')} · ${item.role === 'admin' ? 'Admin' : 'User'}`
+        : item.filename;
+    const summary = plainSummary(item.summary || (isTask ? item.excerpt : item.type === 'document' ? item.snippet : ''));
     return (
       <div
-        key={`${source.key}:${isTask ? item.id : item.file_path}:${idx}`}
+        key={`${source.key}:${item.type === 'document' ? item.file_path : item.id}:${idx}`}
         className="feed-card"
         onClick={() => openDetail(entry)}
         style={{
@@ -456,7 +504,7 @@ export default function AiFeed({ accounts, activeToken, publicUsers, onLogin }: 
           <span style={{ fontSize: 11, color: '#666', flexShrink: 0 }}>{formatFeedTime(time)}</span>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
-          <span style={{ fontSize: 16, flexShrink: 0, lineHeight: '20px' }}>{isTask ? '📋' : '📄'}</span>
+          <span style={{ fontSize: 16, flexShrink: 0, lineHeight: '20px' }}>{isTask ? '📋' : isRsi ? '🧬' : '📄'}</span>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div className="clamp-1" style={{ fontSize: 14, fontWeight: 600, color: '#e6edf3', lineHeight: 1.4 }}>{title}</div>
             {summary && (
@@ -464,13 +512,13 @@ export default function AiFeed({ accounts, activeToken, publicUsers, onLogin }: 
             )}
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 4, fontSize: 11, color: '#666' }}>
               <span style={{ padding: '0 6px', borderRadius: 4, background: '#262626', color: '#999', fontWeight: 600 }}>
-                {isTask ? t('feedTask') : t('feedDocument')}
+                {isTask ? t('feedTask') : isRsi ? t('feedRsi') : t('feedDocument')}
               </span>
               {isTask ? (
                 item.status !== 'success' && <span style={{ color: '#e57373' }}>{t('failed')}</span>
-              ) : (
+              ) : item.type === 'document' ? (
                 <span>{formatSize(item.size)}</span>
-              )}
+              ) : null}
             </div>
           </div>
         </div>
@@ -529,12 +577,14 @@ export default function AiFeed({ accounts, activeToken, publicUsers, onLogin }: 
         <div className="clamp-1" style={{ fontSize: 14, fontWeight: 600, color: '#e6edf3' }}>
           {detail.item.type === 'task'
             ? detail.item.job_name || detail.item.prompt || t('feedTask')
-            : detail.item.filename}
+            : detail.item.type === 'rsi'
+              ? t('feedRsi')
+              : detail.item.filename}
         </div>
         <div style={{ fontSize: 11, color: '#777', display: 'flex', gap: 6, alignItems: 'center' }}>
           <span>{detail.source.username}</span>
           <span>·</span>
-          <span>{formatFeedTime(detail.item.type === 'task' ? detail.item.executed_at : detail.item.indexed_at)}</span>
+          <span>{formatFeedTime(itemRawTime(detail.item))}</span>
           {detail.item.type === 'task' && detail.item.status !== 'success' && (
             <span style={{ color: '#e57373' }}>{t('failed')}</span>
           )}
@@ -571,7 +621,7 @@ export default function AiFeed({ accounts, activeToken, publicUsers, onLogin }: 
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#111', minWidth: 0 }}>
       {/* Header */}
       <div style={{
-        padding: '10px 14px', borderBottom: '1px solid #222', flexShrink: 0,
+        padding: '10px 14px', flexShrink: 0,
         display: 'flex', alignItems: 'center', gap: 8,
       }}>
         <span style={{ fontSize: 17, fontWeight: 700, color: '#eee' }}>📰 {t('tabFeed')}</span>
@@ -598,6 +648,34 @@ export default function AiFeed({ accounts, activeToken, publicUsers, onLogin }: 
         )}
       </div>
 
+      {/* Category tabs: articles by default, everything update-time ordered */}
+      <div style={{
+        padding: '0 14px 8px', borderBottom: '1px solid #222', flexShrink: 0,
+        display: 'flex', alignItems: 'center', gap: 6, overflowX: 'auto',
+      }}>
+        {([
+          ['all', t('feedFilterAll')],
+          ['document', t('feedFilterArticles')],
+          ['task', t('feedFilterTasks')],
+          ['rsi', t('feedRsi')],
+        ] as [FeedFilter, string][]).map(([key, label]) => (
+          <button
+            key={key}
+            onClick={() => switchFilter(key)}
+            style={{
+              padding: '3px 12px', borderRadius: 999, fontSize: 12, cursor: 'pointer',
+              whiteSpace: 'nowrap', flexShrink: 0,
+              border: `1px solid ${filter === key ? '#1f6feb' : '#333'}`,
+              background: filter === key ? '#1f6feb22' : 'transparent',
+              color: filter === key ? '#58a6ff' : '#999',
+              fontWeight: filter === key ? 600 : 400,
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
       {/* Signed-out banner: the feed only carries public accounts' content */}
       {onLogin && (
         <div style={{ padding: '6px 14px', background: '#1a2433', borderBottom: '1px solid #24303f', fontSize: 12, color: '#8b98a9' }}>
@@ -614,17 +692,18 @@ export default function AiFeed({ accounts, activeToken, publicUsers, onLogin }: 
 
       {/* Card list — scroll container drives incremental loading */}
       <div
+        ref={listRef}
         style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}
         onScroll={(e) => {
           const el = e.currentTarget;
           if (el.scrollTop + el.clientHeight >= el.scrollHeight - 300) {
-            void ensureCount(entriesRef.current.length + PAGE);
+            void ensureCount(visibleCount(entriesRef.current) + PAGE);
           }
         }}
       >
         {initialLoading ? (
           <div style={{ color: '#666', padding: 40, textAlign: 'center', fontSize: 13 }}>{t('loading')}</div>
-        ) : entries.length === 0 ? (
+        ) : visibleEntries.length === 0 ? (
           <div style={{ padding: '60px 24px', textAlign: 'center' }}>
             <div style={{ fontSize: 44, marginBottom: 12 }}>📰</div>
             <div style={{ color: '#777', fontSize: 14 }}>{t('feedEmpty')}</div>
@@ -632,7 +711,7 @@ export default function AiFeed({ accounts, activeToken, publicUsers, onLogin }: 
           </div>
         ) : (
           <>
-            {entries.map(renderCard)}
+            {visibleEntries.map(renderCard)}
             {busy && (
               <div style={{ color: '#666', padding: 14, textAlign: 'center', fontSize: 12 }}>{t('feedLoadingMore')}</div>
             )}
@@ -662,7 +741,7 @@ export default function AiFeed({ accounts, activeToken, publicUsers, onLogin }: 
               }
             }}
           >
-            {detail.item.type === 'task' ? (
+            {detail.item.type !== 'document' ? (
               taskDetailLoading ? (
                 <div style={{ color: '#666', padding: 40, textAlign: 'center', fontSize: 13 }}>{t('loading')}</div>
               ) : taskDetailError ? (

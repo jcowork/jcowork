@@ -743,6 +743,16 @@ impl RsiService {
         self.store.list_reports(user_id, limit).await
     }
 
+    /// Newest successful reports for the account, without their full output.
+    /// Used by the feed, whose offset pagination needs the status filter in SQL.
+    pub async fn list_success_reports(
+        &self,
+        user_id: &str,
+        limit: i64,
+    ) -> Result<Vec<jcowork_storage::rsi_store::RsiReportSummary>> {
+        self.store.list_success_reports(user_id, limit).await
+    }
+
     /// One report, scoped to its owner.
     pub async fn get_report(
         &self,

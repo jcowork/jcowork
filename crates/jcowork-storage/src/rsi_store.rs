@@ -101,6 +101,28 @@ impl RsiStore {
         Ok(rows)
     }
 
+    /// Newest successful reports for a user, without the full output.
+    ///
+    /// The feed merges this stream with task results and documents using
+    /// offset pagination, so the status filter lives in SQL: filtering after
+    /// the fetch would shrink the merged window and misalign page offsets.
+    pub async fn list_success_reports(&self, user_id: &str, limit: i64) -> Result<Vec<RsiReportSummary>> {
+        let rows = sqlx::query_as::<_, RsiReportSummary>(
+            r#"
+            SELECT id, user_id, role, period_start, period_end, summary, status, created_at
+            FROM rsi_reports
+            WHERE user_id = ?1 AND status = 'success'
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT ?2
+            "#,
+        )
+        .bind(user_id)
+        .bind(limit.clamp(1, 1000))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     /// One report, scoped to its owner so an id from another account cannot
     /// be read by guessing.
     pub async fn get_report(&self, user_id: &str, id: &str) -> Result<Option<RsiReport>> {
