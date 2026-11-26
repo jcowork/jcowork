@@ -12,6 +12,16 @@ import { useEffect, useRef, useState } from 'react';
 import { useT } from '../i18n';
 import { VoiceClient, type VoiceState, type VoiceHistoryMessage } from '../utils/voiceClient';
 
+// App keeps every account's Chat mounted (hidden ones keep streaming), so a
+// call left open on a hidden account would keep the mic and speaker live:
+// the room hears two answers and both sessions barge-in on each other.
+// One live call per browser: claiming hangs up every other mounted
+// VoiceCall in this tab, and other tabs of this origin via BroadcastChannel.
+const voiceBus = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('jcowork-voice-call') : null;
+interface VoicePeer { id: number; yield: () => void }
+const voicePeers = new Set<VoicePeer>();
+let voicePeerSeq = 1;
+
 interface VoiceCallProps {
   token: string;
   conversationId: string;
@@ -68,8 +78,26 @@ export default function VoiceCall({
       },
     );
     clientRef.current = client;
+    // Register before claiming so a concurrent claim can yield us, then
+    // take over: every other live call in this browser ends right now.
+    const peer: VoicePeer = {
+      id: voicePeerSeq++,
+      yield: () => {
+        client.hangup();
+        if (clientRef.current === client) onCloseRef.current();
+      },
+    };
+    voicePeers.add(peer);
+    const onBus = (ev: MessageEvent) => {
+      if (ev.data?.claim !== peer.id) peer.yield();
+    };
+    voiceBus?.addEventListener('message', onBus);
+    for (const p of voicePeers) if (p !== peer) p.yield();
+    voiceBus?.postMessage({ claim: peer.id });
     client.start();
     return () => {
+      voicePeers.delete(peer);
+      voiceBus?.removeEventListener('message', onBus);
       if (clientRef.current === client) clientRef.current = null;
       client.hangup();
     };

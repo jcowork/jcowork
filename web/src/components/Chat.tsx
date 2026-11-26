@@ -35,6 +35,8 @@ interface ChatProps {
   /** False while another tab is active — Chat stays mounted but hidden,
   *  so running tasks keep streaming in the background. */
   visible?: boolean;
+  /** False while another account is active (view switches keep it true). */
+  accountActive?: boolean;
 }
 
 // Copy button for message bubbles
@@ -144,7 +146,7 @@ function loadMessages(userId: string, conversationId: string): Message[] {
   return (conv?.messages ?? []).filter((m) => !m.streaming);
 }
 
-export default function Chat({ userId, token, conversationId, onConversationsSync, onStreamingChange, visible = true }: ChatProps) {
+export default function Chat({ userId, token, conversationId, onConversationsSync, onStreamingChange, visible = true, accountActive = true }: ChatProps) {
   const t = useT();
   const [messages, setMessages] = useState<Message[]>(() => loadMessages(userId, conversationId));
   const [input, setInput] = useState('');
@@ -230,6 +232,12 @@ export default function Chat({ userId, token, conversationId, onConversationsSyn
   // Voice call overlay + server-side availability (null = not yet fetched)
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState<boolean | null>(null);
+  // Switching accounts ends this account's call: the mic belongs to the
+  // active conversation, and a hidden live call would keep playing answers
+  // over the new account's call (double playback, mutual barge-in).
+  useEffect(() => {
+    if (!accountActive && voiceOpen) setVoiceOpen(false);
+  }, [accountActive, voiceOpen]);
   // Mirror of the latest messages for closures that run after hang-up
   const messagesRef = useRef<Message[]>(messages);
 

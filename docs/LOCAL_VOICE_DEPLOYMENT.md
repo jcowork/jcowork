@@ -47,8 +47,9 @@
 
 | 候选 | 流式 | 中文效果 | 资源 | 许可 | 评价 |
 |---|---|---|---|---|---|
+| **Qwen3-ASR-1.7B（5-bit MLX，mlx-audio）** | ⚠️ 整句识别（silero-VAD 切段 + 增长缓冲节流重译出 partial） | 一线水平，多语种（中/粤/英/日/韩等 11 语） | Apple Silicon Metal 加速，5-bit 权重 ~1.2GB | Apache-2.0 | **主推（方案 B，Apple Silicon）**：LLM 级 ASR，中文与中英混读均强；非 Apple 平台自动回退 sherpa |
 | **FunASR Paraformer-zh-streaming**（+FSMN-VAD +CT-Transformer 标点） | ✅ 真流式（chunk 约 600ms 可调） | 中文一线水平，带标点/ITN | CPU 可跑（RTF<0.5），GPU 更佳；官方提供 runtime SDK 与 WebSocket 服务 | 代码 MIT；模型 ModelScope 许可（可商用，发布前核对模型卡） | **主推（方案 A）**：中文、流式、VAD、标点一条龙，与现有「partial 前缀+后缀」语义最接近 |
-| **sherpa-onnx streaming paraformer（zh-en 双语，FunASR 导出）** | ✅ 真流式 | 中文一线水平（实测整句零错字） | 纯 CPU、RTF≈0.03，fp32 内存 ~1GB | Apache-2.0 | **主推（方案 B，Mac/低配机）**：中文准确率显著优于 zipformer；int8 与 fp32 精度接近，但为稳妥用 fp32 |
+| **sherpa-onnx streaming paraformer（zh-en 双语，FunASR 导出）** | ✅ 真流式 | 中文一线水平（实测整句零错字） | 纯 CPU、RTF≈0.03，fp32 内存 ~1GB | Apache-2.0 | **方案 B 兜底（非 Apple Silicon / MLX 模型缺失）**：中文准确率显著优于 zipformer；int8 与 fp32 精度接近，但为稳妥用 fp32 |
 | sherpa-onnx streaming zipformer（zh-en 双语，2023-02-20） | ✅ 真流式（chunk 320ms 级） | 一般：同音错字多；**int8 量化会出现重复字（"大大大模型型"）** | 纯 CPU、内存 <1GB | Apache-2.0 | 降级备选：仅当 paraformer 模型缺失时启用，且必须 fp32（int8 重复字不可接受） |
 | SenseVoice-Small + silero-VAD 切段 | ⚠️ 伪流式（VAD 切段后整段识别） | 很好，多语种 | CPU 快 | 模型许可需核对 | 备选：实现简单，但 partial 体验差（无逐字上屏），只在整句结束时出文本 |
 | faster-whisper / whisper.cpp | ❌ 滑窗伪流式 | 中文一般、易幻觉 | GPU 才实用 | MIT | 不推荐：延迟与幻觉都不适合对话场景 |
@@ -60,8 +61,9 @@ VAD 统一说明：云端 Omni 的 `server_vad`（SpeechStarted 触发 barge-in�
 
 | 候选 | 流式首包 | 音质/自然度 | 资源 | 许可 | 评价 |
 |---|---|---|---|---|---|
+| **Kokoro-82M-v1.1-zh（MLX，mlx-audio）** | 句子级合成，Apple Silicon 实测首包 52–456ms | 中文对话级自然度，100 个中文音色（zf_*/zm_*），显著优于 VITS 播音腔 | Apple Silicon Metal 加速，RTF≈0.04，权重 ~350MB | Apache-2.0 | **主推（方案 B，Apple Silicon）**：需 misaki[zh] 1.1 前端（注音符号分词）；非 Apple 平台自动回退 melo |
 | **CosyVoice2-0.5B**（FunAudioLLM） | 官方标称 ~150ms（GPU，收 5 字即合成） | 中文对话级第一梯队，支持零样本音色克隆、语速控制 | GPU 建议 ≥6GB 显存；CPU 可跑但首包秒级 | Apache-2.0（代码+权重） | **主推（方案 A）**：与云端体验最接近，克隆 3–10s 参考音频即可复刻 `longanlingxin` 类音色 |
-| **sherpa-onnx vits-melo-tts-zh_en / matcha-icefall-zh-baker** | 纯 CPU 即近实时（整句合成后分块下发） | 清晰自然，但「播音腔」，韵律逊于 CosyVoice2 | 纯 CPU，内存 <1GB，Mac/Win/Linux | Apache-2.0 / MIT | **主推（方案 B）**：零 GPU 依赖，句子级流式（配合现有 SpeechSegmenter 天然契合） |
+| **sherpa-onnx vits-melo-tts-zh_en / matcha-icefall-zh-baker** | 纯 CPU 即近实时（整句合成后分块下发） | 清晰自然，但「播音腔」，韵律逊于 CosyVoice2/Kokoro；逐句响度漂移大（实测 8.75×），需归一 | 纯 CPU，内存 <1GB，Mac/Win/Linux | Apache-2.0 / MIT | **方案 B 兜底（非 Apple Silicon / MLX 模型缺失）**：零 GPU 依赖，句子级流式 |
 | Fish-Speech / OpenAudio S1 | 流式支持 | 很好，克隆强 | GPU | ⚠️ 权重非商用许可（CC-BY-NC-SA 系），商用需授权 | 备选（仅内部/非商用） |
 | GPT-SoVITS v2/v3 | 流式支持，首包 ~500ms | 少样本克隆音色最像 | GPU，微调门槛高 | MIT | 备选：需要固定专属音色且愿意微调时 |
 | IndexTTS2 | 支持 | 很好，情感可控 | GPU | 核对模型卡 | 备选 |
@@ -100,12 +102,15 @@ jcowork gateway (Rust)
 
 ```
 jcowork gateway (Rust)
-  └─ WS ws://127.0.0.1:50061/voice → voice-lite sidecar（单进程 sherpa-onnx：
-        streaming paraformer zh-en ASR（fp32，zipformer fp32 备选）+ silero-VAD + vits-melo-tts-zh_en TTS）
+  └─ WS ws://127.0.0.1:50061/voice → voice-lite sidecar（单进程：
+        Apple Silicon：Qwen3-ASR-1.7B-5bit（MLX）整句 ASR + silero-VAD 切段/barge-in；
+        其他平台：streaming paraformer zh-en ASR（fp32，zipformer fp32 备选）；
+        Apple Silicon：Kokoro-82M-v1.1-zh（MLX）TTS；其他平台：vits-melo-tts-zh_en；
+        所有 TTS 输出逐句响度归一，播报音量恒定）
 ```
 
-- 单个 Python sidecar（`sherpa-onnx` pip 包，ONNX Runtime CPU），同一端口两条 WS 路由；
-  内存合计约 1–1.5GB，Apple Silicon 实测可实时。
+- 单个 Python sidecar，同一端口两条 WS 路由；Apple Silicon 上 ASR 走 MLX（Metal），
+  其余平台 sherpa-onnx（ONNX Runtime CPU）；内存合计约 2–2.5GB，Apple Silicon 实测可实时。
 - TTS 为句子级合成：现有 `SpeechSegmenter` 已按句喂入，sidecar 合成一句立即分块回传，
   听感上仍是连续播报，只是首包比方案 A 慢。
 - 桌面 Tauri 场景：sidecar 随内嵌服务器由 setup 脚本安装到用户 venv（同 docling/python 模式）。
@@ -185,8 +190,9 @@ sherpa-onnx 用 endpoint 规则产出 final，partial 取当前解码结果。
 
 - 方案 A：CosyVoice2 零样本克隆——录 3–10s 参考音频（或选用开源参考音色），
   `local_voice` 存参考音频路径/预置音色名；支持语速参数。可在 Settings 上传参考音频。
-- 方案 B：vits-melo-tts-zh_en 自带说话人 id（`local_voice` = sid 数字），
-  matcha-icefall-zh-baker 为单说话人女声；无需克隆。
+- 方案 B：Apple Silicon 用 Kokoro-82M-v1.1-zh 音色包（`local_voice` = sid 数字，按序映射
+  zf_001/zf_002/zm_010/zm_011，`VOICE_LITE_TTS_VOICE` 可固定音色）；其他平台
+  vits-melo-tts-zh_en 自带说话人 id（`local_voice` = sid 数字）；无需克隆。
 - 许可注意：克隆他人音色需取得授权；参考音频仅存本机 `JCWORK_DATA_DIR`，不出内网。
 
 ---
@@ -265,6 +271,87 @@ RTF≈0.03（30× 实时），CPU 余量充足。已知取舍：paraformer 导�
 模型目录：`sherpa-onnx-streaming-paraformer-bilingual-zh-en`（主）与 zipformer（fp32 备选），
 `setup-voice-lite.sh` 两者都下载；sidecar 启动日志 `ASR ready: streaming-paraformer…(fp32)` 可确认生效。
 
+### 9.2 本地 ASR 升级 Qwen3-ASR-1.7B（5-bit MLX）（2026-11-26 凌晨）
+
+动机：§9.1 的 paraformer fp32 中文整句零错字，但中英混读弱（导出源自 zh-cn 模型）。
+Qwen3-ASR 为 LLM 级 ASR（中/粤/英/日/韩等 11 语），混读与口音鲁棒性显著更强。
+
+链路：`mlx-audio==0.6.8` 加载 `mlx-community/Qwen3-ASR-1.7B-5bit`（仅 Apple Silicon）。
+Qwen3-ASR 是整句识别，故 silero-VAD 兼任切段器：语音 onset 开始收音（带 0.32s pre-roll），
+尾静音 0.7s 出整句 final（与云端 server_vad / paraformer rule2 同手感）；收音期间每增长
+1s 音频对增长缓冲节流重译出 partial（有任务在飞则跳过，按段 generation 丢弃过期 partial）；
+30s 强制切段。barge-in 的 speech_started/stopped（0.15s/0.3s）与 WS 契约完全不变，网关零改动。
+回退：非 Apple Silicon / MLX 模型缺失 / 加载失败 → sherpa streaming paraformer（zipformer 备选）；
+`VOICE_LITE_ASR=sherpa` 可强制走旧路做 A/B。
+
+实测（MacBook Air，同一批测试音频）：
+
+| 路径 | 识别结果 |
+|---|---|
+| paraformer fp32 实时链路（混读样本） | 好这是第一种第二种叫呃与 always o s 什么意思啊（英文碎词） |
+| **Qwen3-ASR 5-bit 实时链路（同样本）** | **这是第一种，第二种叫呃，与always，always什么意思啊？** |
+| Qwen3-ASR 5-bit 整句（混读参考） | 昨天是 Monday. Today is 周二. The day after tomorrow 是星期三.（零错） |
+
+性能：加载 2.6s（含 Metal warmup）；整句推理 0.28–0.42s（RTF 0.04–0.06）；
+实时链路 final 延迟 ≈ 音频结束后 1.1–1.3s（0.7s 尾判 + 整句推理）；
+探针 11 partial / 3 final、barge-in 边沿齐全、final 后无过期 partial。
+取舍：final 比流式尾判多 ~0.4s 整句推理成本；partial 为整句重译，迭代间措辞可能跳变
+（自动语种检测），以 final 为准；权重内存 +~1.2GB。
+模型目录 `Qwen3-ASR-1.7B-5bit`；`setup-voice-lite.sh` 在 Apple Silicon 经 huggingface.co
+（不可达时自动换 hf-mirror.com）下载；启动日志 `ASR ready: Qwen3-ASR-1.7B-5bit (MLX)`、
+`/health` 的 `asr_backend=qwen` 可确认生效。
+
+### 9.3 双播报归因 + TTS 音色/响度修复（2026-11-26）
+
+**现象一：一个问题两次播报。** 日志（`voice_stage`）显示同一台机器两个账号的会话同时在跑：
+admin 会话 16:17:14 开始且未挂断，jhx02 会话 16:17:52 加入；同一句话两边各出一条
+asr_final（相隔 ~180ms）、各走一轮 agent + tts_connect，两个扬声器同时播报且互相 barge-in。
+根因在客户端：App 为保持后台任务流式，把每个账号的 Chat **全部挂载**（仅隐藏非活跃），
+隐藏账号的 VoiceCall 麦克风/扬声器/WS 仍然存活。修复（单浏览器单活通话）：
+
+- VoiceCall 模块级 claim 总线：新通话启动即挂断本标签页其他所有 VoiceCall，并经
+  `BroadcastChannel('jcowork-voice-call')` 挂断同源其他标签页的通话；
+- Chat 新增 `accountActive`：切换账号时关闭该账号的通话（视图切换不影响）。
+
+**现象二：声音忽大忽小。** melo VITS 逐句响度漂移实测：同一批 6 句 RMS 0.0078–0.0679，
+最大/最小 **8.75×**（短句「嗯」几乎听不见，长句偏响）。修复：sidecar 对每句合成输出做
+响度归一（有声段 RMS → 0.10 ≈ -20dBFS，峰值限幅 0.95，首尾 5ms 淡入淡出防咔哒声），
+两个 TTS 后端统一生效。归一后 6 句 RMS 比值 1.00（std 0.0001）。
+
+**现象三：音色不好。** Apple Silicon 上 TTS 升级为 Kokoro-82M-v1.1-zh（MLX，
+FluidInference 转换，Apache-2.0），melo 保留为非 Apple 平台/加载失败兜底；
+`VOICE_LITE_TTS=melo` 可强制 A/B。接入中解决的两个兼容问题（均已验证）：
+
+1. **权重布局**：该转换的 conv 权重已是 MLX (out,k,in) 布局，mlx-audio 0.6.8 的
+   sanitize 方核启发式会再转置一次 → 按模型参数形状精确还原 93 个张量，strict 加载通过。
+2. **G2P 前端**：v1.1-zh 用注音符号词表（171 符号），必须 `misaki.ZHG2P(version='1.1')`；
+   mlx-audio 默认的 legacy G2P 输出 IPA+声调箭头，词表静默丢弃这些符号 → 语音破碎
+   （「气温二十五度」听成「七万日元」）。sidecar 加载后替换 pipeline.g2p 为 1.1 前端；
+   英文混读用 misaki 自带 gold/silver 词典 + 字母拼读兜底（不引 spacy/espeak）。
+
+实测（MacBook Air，ASR 回环客观验证：Kokoro 合成 → 24k→16k → Qwen3-ASR 转写）：
+
+| 项 | 结果 |
+|---|---|
+| 音色正确性 | 4 音色 × 5 句（含中英混读「介绍一下GPT模型」）**20/20 逐字精确** |
+| 合成速度 | RTF 0.04–0.05（20–25× 实时） |
+| /tts WS 首包 | 52–456ms（6 句，含长句），优于 <1.5s 目标 |
+| 响度稳定性 | 归一后逐句 RMS 恒为 0.1000（比值 1.00）；melo 兜底同样归一 8.75×→1.00× |
+| 客户端 | `tsc` + `vite build` 通过；双账号回归见下 |
+
+双账号/跨标签页通话回归（已实测，2026-11-26）：
+
+- **账号切换**：A 通话中切到 B 再发起 → A 的 VoiceCall 被 claim 挂断。gateway `voice_stage`
+  会话严格串行：admin start 23:16:14→end 23:16:57、jhx02 start 23:17:29→end 23:17:43、
+  admin start 23:18:11→end 23:18:25，任一时刻仅一个活跃会话（对照修复前两会话重叠数分钟、
+  同句双 asr_final/双 tts_connect）。
+- **跨标签页**：Playwright 同 context 双页（独立 JS 运行时，模块级 peer 集合不互通，仅
+  BroadcastChannel 协调）6/6 断言通过、零控制台错误：B 发起→A 挂断、A reclaim→B 挂断、
+  显式挂断归零。gateway 会话交接间隔仅 2–5ms（A end 01:28:57.578→B start 01:28:57.583；
+  B end 01:28:59.696→A start 01:28:59.698），无重叠、无并行播报。
+模型目录 `Kokoro-82M-v1.1-zh-mlx`（setup 脚本 Apple Silicon 自动下载，hf-mirror 兜底）；
+启动日志 `TTS ready: Kokoro-82M-v1.1-zh (MLX)`、`/health` 的 `tts_backend=kokoro` 可确认生效。
+
 ---
 
 ## 附：选型速查
@@ -272,5 +359,6 @@ RTF≈0.03（30× 实时），CPU 余量充足。已知取舍：paraformer 导�
 | 场景 | ASR | TTS | 硬件 |
 |---|---|---|---|
 | 有 GPU 的服务器（推荐，体验≈云端） | FunASR paraformer-zh-streaming + FSMN-VAD + 标点 | CosyVoice2-0.5B（流式 + 克隆） | ≥6GB 显存 |
-| Mac / 纯 CPU / 内网低配机 | sherpa-onnx streaming paraformer zh-en（fp32）+ silero-VAD | sherpa-onnx vits-melo-tts-zh_en | 内存 ~2GB |
+| Mac（Apple Silicon） | Qwen3-ASR-1.7B-5bit（MLX）+ silero-VAD 切段 | Kokoro-82M-v1.1-zh（MLX，响度归一） | 统一内存 ~2.5GB |
+| 纯 CPU / 内网低配机 / 非 Apple Mac | sherpa-onnx streaming paraformer zh-en（fp32）+ silero-VAD | sherpa-onnx vits-melo-tts-zh_en | 内存 ~2GB |
 | 未来纯闲聊全双工（不在本期） | MiniCPM-o 4.5 / GLM-4-Voice（端到端，绕过 agent，慎用） | — | ≥12GB 显存 |

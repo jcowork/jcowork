@@ -1,7 +1,16 @@
-# Voice-Lite sidecar dependencies (Plan B: pure-CPU local speech).
-# sherpa-onnx bundles ONNX Runtime; no torch/GPU required.
+# Voice-Lite sidecar dependencies (Plan B: local speech).
+# sherpa-onnx bundles ONNX Runtime; no torch/GPU required. It carries VAD,
+# TTS and the fallback streaming ASR on every platform.
 # Pinned to the version the WS contract was verified against.
 sherpa-onnx==2.0.3
+# Primary ASR on Apple Silicon: Qwen3-ASR-1.7B (5-bit MLX) via mlx-audio.
+# Pinned to the version the utterance/partial contract was verified against.
+mlx-audio==0.6.8; sys_platform == 'darwin' and platform_machine == 'arm64'
+# Kokoro zh TTS on Apple Silicon: misaki[zh] does the Mandarin G2P (the 1.1
+# bopomofo frontend); safetensors converts the .npy voice packs mlx-audio reads.
+# Pinned to the version the ASR round-trip was verified against.
+misaki[zh]==0.8.4; sys_platform == 'darwin' and platform_machine == 'arm64'
+safetensors>=0.4; sys_platform == 'darwin' and platform_machine == 'arm64'
 numpy>=1.24
 fastapi>=0.109.0
 uvicorn[standard]>=0.27.0

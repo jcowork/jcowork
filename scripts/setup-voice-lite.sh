@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Bootstrap the local voice sidecar (Plan B: sherpa-onnx, pure CPU).
+# Bootstrap the local voice sidecar (Plan B: local speech).
 #
 # Creates ~/.jcowork/venv-voice-lite, installs services/voice-lite deps and
 # downloads the speech models into $JCWORK_DATA_DIR/models/voice-lite.
+# On Apple Silicon the primary ASR is Qwen3-ASR-1.7B (5-bit MLX) and the
+# primary TTS is Kokoro-82M-v1.1-zh (MLX); elsewhere (or when the MLX models
+# are absent) sherpa-onnx streaming ASR / melo TTS take over.
 # Idempotent — marker files skip completed steps.
 #
 # Usage:
@@ -15,10 +18,12 @@ DATA_DIR="${JCWORK_DATA_DIR:-${HOME}/.jcowork/data}"
 VENV_DIR="${HOME}/.jcowork/venv-voice-lite"
 MODELS_DIR="${DATA_DIR}/models/voice-lite"
 REQ_FILE="${SCRIPT_DIR}/../services/voice-lite/requirements.txt"
-MARKER="${VENV_DIR}/.voice-lite-setup-ok"
+MARKER="${VENV_DIR}/.voice-lite-setup-ok-mlx2"
 
 ASR_NAME="sherpa-onnx-streaming-paraformer-bilingual-zh-en"
 ASR_FALLBACK_NAME="sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20"
+QWEN_NAME="Qwen3-ASR-1.7B-5bit"
+KOKORO_NAME="Kokoro-82M-v1.1-zh-mlx"
 TTS_NAME="vits-melo-tts-zh_en"
 RELEASE_BASE="https://github.com/k2-fsa/sherpa-onnx/releases/download"
 
@@ -67,6 +72,42 @@ fetch_extract() {
 fetch_extract "${RELEASE_BASE}/asr-models/${ASR_NAME}.tar.bz2" "${ASR_NAME}"
 fetch_extract "${RELEASE_BASE}/asr-models/${ASR_FALLBACK_NAME}.tar.bz2" "${ASR_FALLBACK_NAME}"
 fetch_extract "${RELEASE_BASE}/tts-models/${TTS_NAME}.tar.bz2" "${TTS_NAME}"
+
+# Qwen3-ASR (MLX) only runs on Apple Silicon; other platforms keep sherpa ASR.
+if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
+    if [ -f "${MODELS_DIR}/${QWEN_NAME}/config.json" ]; then
+        echo "Model ${QWEN_NAME} already present — skipping."
+    else
+        echo "Downloading ${QWEN_NAME} (MLX, ~1.2 GB) ..."
+        "${VENV_DIR}/bin/python" - "${MODELS_DIR}" "${QWEN_NAME}" <<'PY'
+import os, sys
+from huggingface_hub import snapshot_download
+models_dir, name = sys.argv[1], sys.argv[2]
+try:
+    snapshot_download(f"mlx-community/{name}", local_dir=os.path.join(models_dir, name), max_workers=4)
+except Exception:
+    # huggingface.co is unreachable from some networks; the mirror carries
+    # the same mlx-community repos.
+    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+    snapshot_download(f"mlx-community/{name}", local_dir=os.path.join(models_dir, name), max_workers=4)
+PY
+    fi
+    if [ -f "${MODELS_DIR}/${KOKORO_NAME}/config.json" ]; then
+        echo "Model ${KOKORO_NAME} already present — skipping."
+    else
+        echo "Downloading ${KOKORO_NAME} (MLX zh TTS, ~350 MB) ..."
+        "${VENV_DIR}/bin/python" - "${MODELS_DIR}" "${KOKORO_NAME}" <<'PY'
+import os, sys
+from huggingface_hub import snapshot_download
+models_dir, name = sys.argv[1], sys.argv[2]
+try:
+    snapshot_download(f"FluidInference/{name.lower()}", local_dir=os.path.join(models_dir, name), max_workers=4)
+except Exception:
+    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+    snapshot_download(f"FluidInference/{name.lower()}", local_dir=os.path.join(models_dir, name), max_workers=4)
+PY
+    fi
+fi
 
 if [ ! -f "${MODELS_DIR}/silero_vad.onnx" ]; then
     echo "Downloading silero_vad.onnx ..."

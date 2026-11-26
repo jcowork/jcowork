@@ -1563,6 +1563,7 @@ function AppInner() {
                   onConversationsSync={handleConversationsSync}
                   onStreamingChange={handleStreamingChange}
                   visible={isActive && chatVisible}
+                  accountActive={isActive}
                 />
               </div>
             );
