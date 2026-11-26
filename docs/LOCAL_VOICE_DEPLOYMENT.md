@@ -61,7 +61,8 @@ VAD 统一说明：云端 Omni 的 `server_vad`（SpeechStarted 触发 barge-in�
 
 | 候选 | 流式首包 | 音质/自然度 | 资源 | 许可 | 评价 |
 |---|---|---|---|---|---|
-| **Kokoro-82M-v1.1-zh（MLX，mlx-audio）** | 句子级合成，Apple Silicon 实测首包 52–456ms | 中文对话级自然度，100 个中文音色（zf_*/zm_*），显著优于 VITS 播音腔 | Apple Silicon Metal 加速，RTF≈0.04，权重 ~350MB | Apache-2.0 | **主推（方案 B，Apple Silicon）**：需 misaki[zh] 1.1 前端（注音符号分词）；非 Apple 平台自动回退 melo |
+| **Qwen3-TTS-12Hz-1.7B-CustomVoice（8-bit MLX，mlx-audio）** | 句子级合成，Apple Silicon 实测 WS 首包 1.1–2.2s（随句长） | 中文对话级自然度，预置说话人（Vivian/Serena/Uncle_Fu/Dylan 等），中英混读 | Apple Silicon Metal，RTF≈0.47，权重 ~3GB | Apache-2.0 | **主推（方案 B，Apple Silicon）**：ASR 回环 19/20（唯一 miss 为英文缩写偶发误识，重试 3/3 通过），归一后 RMS std=0；Qwen3-TTS 缺失/加载失败回退 Kokoro，非 Apple 平台回退 melo |
+| **Kokoro-82M-v1.1-zh（MLX，mlx-audio）** | 句子级合成，Apple Silicon 实测首包 52–456ms | 中文对话级自然度，100 个中文音色（zf_*/zm_*），显著优于 VITS 播音腔 | Apple Silicon Metal 加速，RTF≈0.04，权重 ~350MB | Apache-2.0 | **Apple Silicon 兜底（Qwen3-TTS 缺失/加载失败）**：需 misaki[zh] 1.1 前端（注音符号分词）；非 Apple 平台自动回退 melo |
 | **CosyVoice2-0.5B**（FunAudioLLM） | 官方标称 ~150ms（GPU，收 5 字即合成） | 中文对话级第一梯队，支持零样本音色克隆、语速控制 | GPU 建议 ≥6GB 显存；CPU 可跑但首包秒级 | Apache-2.0（代码+权重） | **主推（方案 A）**：与云端体验最接近，克隆 3–10s 参考音频即可复刻 `longanlingxin` 类音色 |
 | **sherpa-onnx vits-melo-tts-zh_en / matcha-icefall-zh-baker** | 纯 CPU 即近实时（整句合成后分块下发） | 清晰自然，但「播音腔」，韵律逊于 CosyVoice2/Kokoro；逐句响度漂移大（实测 8.75×），需归一 | 纯 CPU，内存 <1GB，Mac/Win/Linux | Apache-2.0 / MIT | **方案 B 兜底（非 Apple Silicon / MLX 模型缺失）**：零 GPU 依赖，句子级流式 |
 | Fish-Speech / OpenAudio S1 | 流式支持 | 很好，克隆强 | GPU | ⚠️ 权重非商用许可（CC-BY-NC-SA 系），商用需授权 | 备选（仅内部/非商用） |
@@ -105,7 +106,7 @@ jcowork gateway (Rust)
   └─ WS ws://127.0.0.1:50061/voice → voice-lite sidecar（单进程：
         Apple Silicon：Qwen3-ASR-1.7B-5bit（MLX）整句 ASR + silero-VAD 切段/barge-in；
         其他平台：streaming paraformer zh-en ASR（fp32，zipformer fp32 备选）；
-        Apple Silicon：Kokoro-82M-v1.1-zh（MLX）TTS；其他平台：vits-melo-tts-zh_en；
+        Apple Silicon：Qwen3-TTS-12Hz-1.7B-CustomVoice（8-bit MLX）TTS（Kokoro-82M-v1.1-zh 兜底）；其他平台：vits-melo-tts-zh_en；
         所有 TTS 输出逐句响度归一，播报音量恒定）
 ```
 
@@ -190,8 +191,9 @@ sherpa-onnx 用 endpoint 规则产出 final，partial 取当前解码结果。
 
 - 方案 A：CosyVoice2 零样本克隆——录 3–10s 参考音频（或选用开源参考音色），
   `local_voice` 存参考音频路径/预置音色名；支持语速参数。可在 Settings 上传参考音频。
-- 方案 B：Apple Silicon 用 Kokoro-82M-v1.1-zh 音色包（`local_voice` = sid 数字，按序映射
-  zf_001/zf_002/zm_010/zm_011，`VOICE_LITE_TTS_VOICE` 可固定音色）；其他平台
+- 方案 B：Apple Silicon 用 Qwen3-TTS-12Hz-1.7B-CustomVoice 预置说话人（`local_voice` = sid 数字，
+  按序映射 Vivian/Serena/Uncle_Fu/Dylan，`VOICE_LITE_TTS_VOICE` 可固定音色）；Qwen3-TTS 缺失时
+  回退 Kokoro-82M-v1.1-zh 音色包（zf_001/zf_002/zm_010/zm_011）；其他平台
   vits-melo-tts-zh_en 自带说话人 id（`local_voice` = sid 数字）；无需克隆。
 - 许可注意：克隆他人音色需取得授权；参考音频仅存本机 `JCWORK_DATA_DIR`，不出内网。
 
@@ -352,6 +354,35 @@ FluidInference 转换，Apache-2.0），melo 保留为非 Apple 平台/加载失
 模型目录 `Kokoro-82M-v1.1-zh-mlx`（setup 脚本 Apple Silicon 自动下载，hf-mirror 兜底）；
 启动日志 `TTS ready: Kokoro-82M-v1.1-zh (MLX)`、`/health` 的 `tts_backend=kokoro` 可确认生效。
 
+### 9.4 本地 TTS 升级 Qwen3-TTS-1.7B（8-bit MLX）（2026-11-26）
+
+**动机**：在 Kokoro 基础上进一步提升音色自然度与中英混读能力。Qwen3-TTS-12Hz-1.7B-CustomVoice
+（`mlx-community/...-8bit`，Apache-2.0）是 codec-LM TTS（talker 语言模型 + speech_tokenizer 解码器），
+24kHz 输出，预置说话人 Vivian/Serena/Uncle_Fu/Dylan（中文）等，无需克隆。
+
+**接入**：`app.py` 新增 `_load_qwen3_tts()` 为主 TTS，加载失败回退 Kokoro，再回退 melo；
+`VOICE_LITE_TTS=qwen3|kokoro|melo`（默认 auto=优先 qwen3），`VOICE_LITE_TTS_VOICE` 可固定音色；
+sid 按序映射 Vivian/Serena/Uncle_Fu/Dylan。响度归一、24k 重采样、40ms 分帧为所有后端共用。
+
+**下载坑（已修复）**：huggingface.co 不可达、hf-mirror 大文件限速（~360KB/s），改用 ModelScope CN CDN
+（8 worker×64MB 并行 Range + 断点续传 + 重试）。**ModelScope files API 的 `Size` 字段返回 safetensors
+数据段大小（不含 header）**，致 model.safetensors 少下 109827 字节、加载报 `invalid data offsets`；
+改用 `Range: bytes=0-0` 的 `Content-Range` 探真实总大小（2393308931），setup 脚本已同步修正并加尺寸断言。
+
+**客观验证**（MacBook Air，ASR 回环：Qwen3-TTS 合成 → 24k→16k → Qwen3-ASR 转写，4 音色×5 句=20 例）：
+
+| 指标 | 结果 |
+|---|---|
+| ASR 回环精确 | 19/20；唯一 miss（Dylan 读「GPT」→ASR 听成「JPD」）为偶发，重测 3/3 通过（Vivian 亦 3/3） |
+| RTF（离线） | mean 0.468、max 0.686（首句暖机），稳态 ~0.44（快于实时） |
+| 响度稳定性 | 归一后逐句 RMS 恒 0.1000，std=0.0000（无忽大忽小） |
+| `/tts` WS 探针（5 句） | 全部 done、帧长恒 1920 字节（40ms）；TTFA mean 1.5s/max 2.2s（随句长），RTF mean 0.537 |
+| 加载 | 2.5s，sample_rate=24000；启动日志 `TTS ready: Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit (MLX)`、`/health` `tts_backend=qwen3` |
+
+**依赖**：无新增——CustomVoice 预置说话人路径不走 ref_audio/`load_audio`，故无需 soundfile；
+mlx-audio==0.6.8 已含 `qwen3_tts`。模型目录 `Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit`（~3GB：
+model 2.39GB + speech_tokenizer 682MB），setup 脚本 Apple Silicon 自动下载。
+
 ---
 
 ## 附：选型速查
@@ -359,6 +390,6 @@ FluidInference 转换，Apache-2.0），melo 保留为非 Apple 平台/加载失
 | 场景 | ASR | TTS | 硬件 |
 |---|---|---|---|
 | 有 GPU 的服务器（推荐，体验≈云端） | FunASR paraformer-zh-streaming + FSMN-VAD + 标点 | CosyVoice2-0.5B（流式 + 克隆） | ≥6GB 显存 |
-| Mac（Apple Silicon） | Qwen3-ASR-1.7B-5bit（MLX）+ silero-VAD 切段 | Kokoro-82M-v1.1-zh（MLX，响度归一） | 统一内存 ~2.5GB |
+| Mac（Apple Silicon） | Qwen3-ASR-1.7B-5bit（MLX）+ silero-VAD 切段 | Qwen3-TTS-12Hz-1.7B-CustomVoice（8-bit MLX，响度归一；Kokoro 兜底） | 统一内存 ~4.5GB |
 | 纯 CPU / 内网低配机 / 非 Apple Mac | sherpa-onnx streaming paraformer zh-en（fp32）+ silero-VAD | sherpa-onnx vits-melo-tts-zh_en | 内存 ~2GB |
 | 未来纯闲聊全双工（不在本期） | MiniCPM-o 4.5 / GLM-4-Voice（端到端，绕过 agent，慎用） | — | ≥12GB 显存 |

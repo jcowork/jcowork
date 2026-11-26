@@ -26,8 +26,8 @@ Environment:
     VOICE_LITE_PORT        (default 50061)
     VOICE_LITE_THREADS     (default 2, per model)
     VOICE_LITE_ASR         ("qwen" | "sherpa"; default auto: qwen when available)
-    VOICE_LITE_TTS         ("kokoro" | "melo"; default auto: kokoro when available)
-    VOICE_LITE_TTS_VOICE   (Kokoro voice pack name, default zf_001)
+    VOICE_LITE_TTS         ("qwen3" | "kokoro" | "melo"; default auto: qwen3 when available)
+    VOICE_LITE_TTS_VOICE   (MLX TTS voice pin: Qwen3 speaker or Kokoro pack name)
 """
 
 import asyncio
@@ -63,12 +63,14 @@ ASR_DIR = MODELS_DIR / "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-
 PARAFORMER_DIR = MODELS_DIR / "sherpa-onnx-streaming-paraformer-bilingual-zh-en"
 QWEN_DIR = MODELS_DIR / "Qwen3-ASR-1.7B-5bit"
 KOKORO_DIR = MODELS_DIR / "Kokoro-82M-v1.1-zh-mlx"
+QWEN3_TTS_DIR = MODELS_DIR / "Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit"
 TTS_DIR = MODELS_DIR / "vits-melo-tts-zh_en"
 VAD_PATH = MODELS_DIR / "silero_vad.onnx"
 ASR_PREF = os.environ.get("VOICE_LITE_ASR", "auto").lower()
 TTS_PREF = os.environ.get("VOICE_LITE_TTS", "auto").lower()
-KOKORO_VOICE_PIN = os.environ.get("VOICE_LITE_TTS_VOICE", "").strip()
-# Speaker ids from the gateway map onto Kokoro zh voice packs in this order.
+TTS_VOICE_PIN = os.environ.get("VOICE_LITE_TTS_VOICE", "").strip()
+# Speaker ids from the gateway map onto MLX TTS voices in this order.
+QWEN3_VOICES = ["Vivian", "Serena", "Uncle_Fu", "Dylan"]
 KOKORO_VOICES = ["zf_001", "zf_002", "zm_010", "zm_011"]
 
 TARGET_RATE = 24000  # gateway/browser contract: 24 kHz s16le mono
@@ -219,6 +221,32 @@ def _kokoro_en_callable():
     return en
 
 
+def _load_qwen3_tts():
+    """Qwen3-TTS-12Hz-1.7B-CustomVoice (8-bit MLX) — Apple Silicon primary TTS."""
+    global mlx_tts, tts_backend
+    if TTS_PREF in ("melo", "kokoro"):
+        return
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        log.info("Qwen3-TTS skipped: MLX requires Apple Silicon")
+        return
+    if not (QWEN3_TTS_DIR / "config.json").exists():
+        log.info("Qwen3-TTS model absent at %s — run scripts/setup-voice-lite.sh", QWEN3_TTS_DIR)
+        return
+    try:
+        from mlx_audio.tts.utils import load_model
+
+        model = load_model(str(QWEN3_TTS_DIR))
+        mlx_tts = model
+        # Warm Metal kernels so the first real sentence pays no compile cost.
+        for _ in mlx_tts.generate("你好。", voice=QWEN3_VOICES[0], lang_code="auto"):
+            pass
+        tts_backend = "qwen3"
+        log.info("TTS ready: Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit (MLX)")
+    except Exception:
+        mlx_tts = None
+        log.exception("Qwen3-TTS load failed — falling back to Kokoro/melo TTS")
+
+
 def _load_kokoro():
     """Kokoro-82M-v1.1-zh (MLX) — Apple Silicon only, natural zh timbre."""
     global mlx_tts, tts_backend
@@ -239,8 +267,8 @@ def _load_kokoro():
 
         # The zh voice packs ship as .npy; mlx-audio reads voices/{name}.safetensors.
         needed = set(KOKORO_VOICES)
-        if KOKORO_VOICE_PIN:
-            needed.add(KOKORO_VOICE_PIN)
+        if TTS_VOICE_PIN:
+            needed.add(TTS_VOICE_PIN)
         for name in sorted(needed):
             npy = KOKORO_DIR / "voices" / f"{name}.npy"
             st = KOKORO_DIR / "voices" / f"{name}.safetensors"
@@ -291,7 +319,9 @@ def load_models():
         vad_model_path = str(VAD_PATH)
     else:
         log.error("silero VAD missing: %s", VAD_PATH)
-    _load_kokoro()
+    _load_qwen3_tts()
+    if mlx_tts is None:
+        _load_kokoro()
     if mlx_tts is not None:
         return
     try:
@@ -618,12 +648,17 @@ async def tts_ws(ws: WebSocket):
 
     def generate(text: str):
         if mlx_tts is not None:
-            voice = KOKORO_VOICE_PIN or KOKORO_VOICES[state["voice"] % len(KOKORO_VOICES)]
+            if tts_backend == "qwen3":
+                voice = TTS_VOICE_PIN or QWEN3_VOICES[state["voice"] % len(QWEN3_VOICES)]
+                lang = "auto"
+            else:
+                voice = TTS_VOICE_PIN or KOKORO_VOICES[state["voice"] % len(KOKORO_VOICES)]
+                lang = "z"
             with mlx_lock:
                 parts = [
                     np.asarray(r.audio, dtype=np.float32)
                     for r in mlx_tts.generate(
-                        text, voice=voice, speed=state["speed"], lang_code="z"
+                        text, voice=voice, speed=state["speed"], lang_code=lang
                     )
                 ]
             return np.concatenate(parts), mlx_tts.sample_rate

@@ -4,8 +4,9 @@
 # Creates ~/.jcowork/venv-voice-lite, installs services/voice-lite deps and
 # downloads the speech models into $JCWORK_DATA_DIR/models/voice-lite.
 # On Apple Silicon the primary ASR is Qwen3-ASR-1.7B (5-bit MLX) and the
-# primary TTS is Kokoro-82M-v1.1-zh (MLX); elsewhere (or when the MLX models
-# are absent) sherpa-onnx streaming ASR / melo TTS take over.
+# primary TTS is Qwen3-TTS-12Hz-1.7B-CustomVoice (8-bit MLX), with Kokoro-82M-v1.1-zh
+# (MLX) as TTS fallback; elsewhere (or when the MLX models are absent)
+# sherpa-onnx streaming ASR / melo TTS take over.
 # Idempotent — marker files skip completed steps.
 #
 # Usage:
@@ -23,6 +24,7 @@ MARKER="${VENV_DIR}/.voice-lite-setup-ok-mlx2"
 ASR_NAME="sherpa-onnx-streaming-paraformer-bilingual-zh-en"
 ASR_FALLBACK_NAME="sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20"
 QWEN_NAME="Qwen3-ASR-1.7B-5bit"
+QWEN3_TTS_NAME="Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit"
 KOKORO_NAME="Kokoro-82M-v1.1-zh-mlx"
 TTS_NAME="vits-melo-tts-zh_en"
 RELEASE_BASE="https://github.com/k2-fsa/sherpa-onnx/releases/download"
@@ -90,6 +92,93 @@ except Exception:
     # the same mlx-community repos.
     os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
     snapshot_download(f"mlx-community/{name}", local_dir=os.path.join(models_dir, name), max_workers=4)
+PY
+    fi
+    if [ -f "${MODELS_DIR}/${QWEN3_TTS_NAME}/config.json" ]; then
+        echo "Model ${QWEN3_TTS_NAME} already present — skipping."
+    else
+        echo "Downloading ${QWEN3_TTS_NAME} (MLX zh TTS, ~3 GB) ..."
+        "${VENV_DIR}/bin/python" - "${MODELS_DIR}" "${QWEN3_TTS_NAME}" <<'PY'
+import os, sys, json, time, urllib.request
+from concurrent.futures import ThreadPoolExecutor
+models_dir, name = sys.argv[1], sys.argv[2]
+dst = os.path.join(models_dir, name)
+base = f"https://modelscope.cn/models/mlx-community/{name}/resolve/master/"
+api = f"https://modelscope.cn/api/v1/models/mlx-community/{name}/repo/files?Revision=master&Root="
+CH = 64 * 1024 * 1024
+def listfiles(root=""):
+    d = json.load(urllib.request.urlopen(api + root, timeout=30))["Data"]["Files"]
+    out = []
+    for f in d:
+        if f["Type"] == "tree":
+            out += listfiles(f["Path"])
+        else:
+            out.append(f["Path"])
+    return out
+def true_size(rel):
+    # The files API "Size" can report the safetensors data-section size
+    # (header excluded), which truncates the download; probe the real total
+    # from Content-Range instead.
+    req = urllib.request.Request(base + rel, headers={"Range": "bytes=0-0"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        cr = r.headers.get("Content-Range")  # bytes 0-0/<total>
+        if cr and "/" in cr:
+            return int(cr.rsplit("/", 1)[1])
+    raise RuntimeError(f"cannot determine size of {rel}")
+def fetch(url, s, e, p, expect):
+    if os.path.exists(p) and os.path.getsize(p) == expect:
+        return
+    for attempt in range(8):
+        try:
+            req = urllib.request.Request(url, headers={"Range": f"bytes={s}-{e}"})
+            with urllib.request.urlopen(req, timeout=120) as r, open(p, "wb") as f:
+                while True:
+                    b = r.read(1 << 20)
+                    if not b:
+                        break
+                    f.write(b)
+            if os.path.getsize(p) == expect:
+                return
+        except Exception:
+            pass
+        time.sleep(1.5 * (attempt + 1))
+    raise RuntimeError(f"chunk failed: {p}")
+def get(rel):
+    url = base + rel
+    out = os.path.join(dst, rel)
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    size = true_size(rel)
+    if os.path.exists(out) and os.path.getsize(out) == size:
+        return
+    if size <= CH:
+        urllib.request.urlretrieve(url, out)
+        return
+    n = (size + CH - 1) // CH
+    def task(i):
+        s = i * CH
+        e = min(size - 1, s + CH - 1)
+        p = f"{out}.part{i:03d}"
+        fetch(url, s, e, p, e - s + 1)
+        return p
+    with ThreadPoolExecutor(8) as ex:
+        parts = list(ex.map(task, range(n)))
+    tmp = out + ".assembling"
+    with open(tmp, "wb") as f:
+        for p in parts:
+            with open(p, "rb") as pf:
+                f.write(pf.read())
+    assert os.path.getsize(tmp) == size, f"size mismatch {rel}"
+    os.replace(tmp, out)
+    for p in parts:
+        os.remove(p)
+try:
+    # ModelScope's CN CDN is far faster than the HF mirror for large weights.
+    for rel in listfiles():
+        get(rel)
+except Exception:
+    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+    from huggingface_hub import snapshot_download
+    snapshot_download(f"mlx-community/{name}", local_dir=dst, max_workers=4)
 PY
     fi
     if [ -f "${MODELS_DIR}/${KOKORO_NAME}/config.json" ]; then

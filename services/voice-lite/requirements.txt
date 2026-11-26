@@ -3,8 +3,9 @@
 # TTS and the fallback streaming ASR on every platform.
 # Pinned to the version the WS contract was verified against.
 sherpa-onnx==2.0.3
-# Primary ASR on Apple Silicon: Qwen3-ASR-1.7B (5-bit MLX) via mlx-audio.
-# Pinned to the version the utterance/partial contract was verified against.
+# Primary ASR (Qwen3-ASR-1.7B 5-bit) and primary TTS (Qwen3-TTS-12Hz-1.7B
+# CustomVoice 8-bit) on Apple Silicon, both via mlx-audio. Kokoro-82M-v1.1-zh
+# stays as the TTS fallback. Pinned to the version the WS contract was verified against.
 mlx-audio==0.6.8; sys_platform == 'darwin' and platform_machine == 'arm64'
 # Kokoro zh TTS on Apple Silicon: misaki[zh] does the Mandarin G2P (the 1.1
 # bopomofo frontend); safetensors converts the .npy voice packs mlx-audio reads.
